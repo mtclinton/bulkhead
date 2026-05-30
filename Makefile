@@ -18,6 +18,8 @@ help:
 	@echo "  make image          build the appliance image -> output/images/"
 	@echo "  make run            boot the image in qemu (CPU-only)"
 	@echo "  make verify         boot the image in qemu and assert the security floor"
+	@echo "  make data-disk      build the model data volume (downloads the GGUF)"
+	@echo "  make verify-service boot with the data disk and assert local inference"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -37,6 +39,12 @@ run:
 
 verify:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-floor-check.py
+
+data-disk:
+	$(BULKHEAD_ROOT)/scripts/make-data-disk.sh
+
+verify-service:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-service-check.py
 
 menuconfig: | $(BUILDROOT_DIR)
 	$(BR) menuconfig

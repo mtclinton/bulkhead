@@ -10,14 +10,21 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMG="$ROOT/output/images"
 KERNEL="$IMG/bzImage"
 ROOTFS="$IMG/rootfs.ext2"
+DATA="$IMG/data.ext4"
 
 [ -r "$KERNEL" ] || { echo "missing $KERNEL — run 'make image' first" >&2; exit 1; }
 [ -r "$ROOTFS" ] || { echo "missing $ROOTFS — run 'make image' first" >&2; exit 1; }
 
-exec qemu-system-x86_64 \
-  -M pc -cpu "${CPU:-max}" -m "${MEM:-4096}" -smp "${SMP:-4}" \
-  -kernel "$KERNEL" \
-  -drive file="$ROOTFS",if=virtio,format=raw \
-  -append "root=/dev/vda rw console=ttyS0 lsm=landlock,lockdown,yama,bpf" \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+args=(
+  -M pc -cpu "${CPU:-max}" -m "${MEM:-6144}" -smp "${SMP:-4}"
+  -kernel "$KERNEL"
+  -drive file="$ROOTFS",if=virtio,format=raw
+)
+# Attach the model data volume (becomes /dev/vdb) when it has been built.
+[ -r "$DATA" ] && args+=( -drive file="$DATA",if=virtio,format=raw )
+args+=(
+  -append "root=/dev/vda rw console=ttyS0 lsm=landlock,lockdown,yama,bpf"
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0
   -nographic
+)
+exec qemu-system-x86_64 "${args[@]}"

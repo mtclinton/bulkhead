@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Mounts the model data volume (a separate read-only virtio disk) — the model
+# lives on its own volume, never on the immutable rootfs.
+[Unit]
+Description=bulkhead model data volume
+ConditionPathExists=/dev/vdb
+
+[Mount]
+What=/dev/vdb
+Where=/var/lib/bulkhead/models
+Type=ext4
+Options=ro,nosuid,nodev,noexec
+
+[Install]
+WantedBy=multi-user.target

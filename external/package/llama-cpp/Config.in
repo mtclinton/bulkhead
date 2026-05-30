@@ -1,0 +1,14 @@
+config BR2_PACKAGE_LLAMA_CPP
+	bool "llama-cpp (llama-server)"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	help
+	  llama.cpp inference server (llama-server), built CPU-only and
+	  portable (GGML_NATIVE=OFF) for the bulkhead local inference tier.
+	  Exposes an OpenAI-compatible HTTP API; bound to loopback and
+	  fronted by bulkhead-router.
+
+	  https://github.com/ggml-org/llama.cpp
+
+comment "llama-cpp needs a toolchain w/ C++, threads"
+	depends on !BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS

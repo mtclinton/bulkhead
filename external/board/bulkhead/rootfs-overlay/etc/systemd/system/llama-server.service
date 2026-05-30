@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=bulkhead local inference (llama.cpp server)
+Documentation=https://github.com/mtclinton/bulkhead
+After=var-lib-bulkhead-models.mount
+Requires=var-lib-bulkhead-models.mount
+
+[Service]
+Type=exec
+DynamicUser=yes
+ExecStart=/usr/bin/llama-server \
+    --model /var/lib/bulkhead/models/qwen2.5-3b-instruct-q4_k_m.gguf \
+    --host 127.0.0.1 --port 8081 \
+    --ctx-size 8192 --threads 4 --n-gpu-layers 0 \
+    --jinja --alias local
+Restart=on-failure
+RestartSec=2
+
+# --- fail-closed hardening floor (pairs with the kernel LSM/seccomp substrate) ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+# Egress default-deny: only loopback (the router) may reach this service.
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

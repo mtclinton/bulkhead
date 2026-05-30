@@ -8,6 +8,8 @@ BR2_x86_64=y
 
 # Buildroot-internal glibc toolchain + 6.12 headers (systemd requires glibc)
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
+# C++ support (llama.cpp is C++); pulls in libstdc++
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
 
 # Init: systemd (selects systemd, merged /usr, systemd skeleton)
 BR2_INIT_SYSTEMD=y
@@ -40,6 +42,14 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh"
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
 BR2_PACKAGE_HOST_QEMU=y
 BR2_PACKAGE_HOST_QEMU_SYSTEM_MODE=y
+
+# Local inference (llama.cpp server) + a minimal HTTP client for health checks
+BR2_PACKAGE_LLAMA_CPP=y
+BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_CURL=y
+
+# Appliance rootfs overlay: systemd units (llama-server, model mount) + mountpoint
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_BULKHEAD_PATH)/board/bulkhead/rootfs-overlay"
 
 # Reproducible, isolated builds
 BR2_REPRODUCIBLE=y
