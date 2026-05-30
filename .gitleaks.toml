@@ -4,6 +4,14 @@ title = "bulkhead gitleaks config"
 [extend]
 useDefault = true
 
+# gitleaks' default ruleset has no Tailscale rule, so detect them explicitly
+# (auth keys are tskey-<type>-<keyID>-<secret>). Placeholders are allowlisted below.
+[[rules]]
+id = "tailscale-key"
+description = "Tailscale auth/API key"
+regex = '''tskey-(auth|api|client|webhook)-[A-Za-z0-9]{8,}-[A-Za-z0-9]{16,}'''
+keywords = ["tskey-"]
+
 [allowlist]
 description = "global allowlist"
 paths = [
