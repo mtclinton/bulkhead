@@ -1,0 +1,9 @@
+config BR2_PACKAGE_BULKHEAD_ROUTER
+	bool "bulkhead-router"
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	help
+	  bulkhead request router: an OpenAI-compatible HTTP front door that
+	  routes each request to the local llama.cpp server or the Anthropic
+	  API per a simple rule. Pure Go (stdlib only), single static binary.
+
+	  https://github.com/mtclinton/bulkhead

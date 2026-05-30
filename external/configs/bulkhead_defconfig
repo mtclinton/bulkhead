@@ -48,6 +48,9 @@ BR2_PACKAGE_LLAMA_CPP=y
 BR2_PACKAGE_LIBCURL=y
 BR2_PACKAGE_LIBCURL_CURL=y
 
+# Request router (Go): OpenAI-compatible front door, local | Anthropic routing
+BR2_PACKAGE_BULKHEAD_ROUTER=y
+
 # Appliance rootfs overlay: systemd units (llama-server, model mount) + mountpoint
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_BULKHEAD_PATH)/board/bulkhead/rootfs-overlay"
 

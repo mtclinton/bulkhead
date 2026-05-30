@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"time"
+)
+
+const (
+	maxRequestBytes  = 8 << 20  // 8 MiB inbound cap
+	maxResponseBytes = 32 << 20 // 32 MiB upstream response cap
+)
+
+type server struct {
+	cfg  config
+	key  string
+	http *http.Client
+}
+
+func newServer(cfg config, key string) *server {
+	return &server{
+		cfg: cfg,
+		key: key,
+		http: &http.Client{
+			Timeout: 120 * time.Second,
+			// Never follow redirects: Go does NOT strip custom headers (our
+			// x-api-key) when redirecting to another host, so a 30x from an
+			// upstream could exfiltrate the key. Neither backend legitimately
+			// redirects, so stopping at the first response is safe.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
+}
+
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
+	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /source", s.handleSource)
+	return s.withSourceHeader(mux)
+}
+
+// withSourceHeader adds the AGPL section 13 source-offer header to every
+// response, so the running build always advertises its corresponding source.
+func (s *server) withSourceHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Source-Code", sourceURL())
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "build": BuildCommit})
+}
+
+func (s *server) handleSource(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, sourceURL(), http.StatusFound)
+}
+
+func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		log.Printf("read body: %v", err)
+		writeError(w, http.StatusBadRequest, "could not read request body")
+		return
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		log.Printf("invalid request JSON: %v", err)
+		writeError(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+	if len(req.Messages) == 0 {
+		writeError(w, http.StatusBadRequest, "messages must not be empty")
+		return
+	}
+	if req.Stream {
+		// Streaming translation is not implemented yet; fail loudly rather than
+		// silently returning a non-streamed body the client did not expect.
+		writeError(w, http.StatusBadRequest, "streaming responses are not supported")
+		return
+	}
+
+	d := decide(&req, s.cfg.Threshold, s.cfg.DefaultRoute)
+	w.Header().Set("X-Bulkhead-Route", string(d.Route))
+	log.Printf("route=%s reason=%q model=%q promptlen=%d", d.Route, d.Reason, req.Model, promptLen(&req))
+
+	switch d.Route {
+	case RouteAPI:
+		s.proxyAnthropic(r.Context(), w, &req)
+	default:
+		s.proxyLocal(r.Context(), w, body)
+	}
+}
+
+// proxyLocal forwards the original request body to the local llama.cpp server's
+// OpenAI-compatible endpoint and returns its response. llama-server ignores the
+// bulkhead-only "route" field.
+func (s *server) proxyLocal(ctx context.Context, w http.ResponseWriter, body []byte) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.LlamaURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("local proxy: build request: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.http.Do(req)
+	if err != nil {
+		log.Printf("local inference unreachable: %v", err)
+		writeError(w, http.StatusBadGateway, "local inference backend unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, maxResponseBytes))
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeError returns a generic, client-safe message. Internal detail (upstream
+// bodies, transport errors, parser errors) is logged server-side, never echoed.
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]any{"error": map[string]string{"message": msg}})
+}

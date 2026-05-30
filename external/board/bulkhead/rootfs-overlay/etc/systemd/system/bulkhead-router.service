@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=bulkhead request router (local llama.cpp | Anthropic API)
+Documentation=https://github.com/mtclinton/bulkhead
+After=llama-server.service
+# Note: deliberately NOT ordered after network-online.target — that target is
+# never reached unless systemd-networkd-wait-online is enabled, and the router
+# does not need it (it binds a local port and dials upstreams lazily).
+
+[Service]
+Type=exec
+DynamicUser=yes
+ExecStart=/usr/bin/bulkhead-router
+Restart=on-failure
+RestartSec=2
+# Front door binds loopback in the prototype; M4 rebinds it to the tailnet.
+# The local inference backend is reached on loopback.
+Environment=BULKHEAD_LISTEN=127.0.0.1:8080
+Environment=BULKHEAD_LLAMA_URL=http://127.0.0.1:8081
+# The Anthropic key is delivered at runtime via a systemd credential drop-in
+# (see deploy/anthropic-credential.md) so 'api' routes work; absent it, 'api'
+# routes return 503 and 'local' routes still work. The key is never in the image.
+
+# --- hardening (the router needs egress to api.anthropic.com; the M4
+#     nftables/dnsmasq floor adds the default-deny egress allowlist on top) ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

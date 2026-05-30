@@ -2,6 +2,6 @@
 # bulkhead BR2_EXTERNAL package menu (appears under "External options").
 menu "bulkhead packages"
 source "$BR2_EXTERNAL_BULKHEAD_PATH/package/llama-cpp/Config.in"
-# source "$BR2_EXTERNAL_BULKHEAD_PATH/package/bulkhead-router/Config.in"     # M3
+source "$BR2_EXTERNAL_BULKHEAD_PATH/package/bulkhead-router/Config.in"
 # source "$BR2_EXTERNAL_BULKHEAD_PATH/package/bulkhead-collector/Config.in"  # M5
 endmenu

@@ -20,6 +20,7 @@ help:
 	@echo "  make verify         boot the image in qemu and assert the security floor"
 	@echo "  make data-disk      build the model data volume (downloads the GGUF)"
 	@echo "  make verify-service boot with the data disk and assert local inference"
+	@echo "  make verify-router  boot with the data disk and assert request routing"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -45,6 +46,9 @@ data-disk:
 
 verify-service:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-service-check.py
+
+verify-router:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-router-check.py
 
 menuconfig: | $(BUILDROOT_DIR)
 	$(BR) menuconfig
