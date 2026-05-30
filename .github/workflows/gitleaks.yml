@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+name: gitleaks
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is required only for GitHub *organization*-owned
+          # repos. mtclinton/bulkhead is a personal-account repo, so none is
+          # needed. Re-confirm if the repo is ever transferred to an org.

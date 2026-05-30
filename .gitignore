@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Buildroot (fetched, never vendored) + build artifacts
+/buildroot/
+/output/
+/dl/
+*.config.old
+
+# Yocto / OpenEmbedded (production phase)
+/build/
+/downloads/
+/sstate-cache/
+/tmp/
+bitbake.lock
+
+# Go
+/bin/
+*.test
+*.out
+vendor/
+
+# Model weights — fetched at build time, never committed
+*.gguf
+
+# Secrets — never commit (defense in depth behind the gitleaks gate)
+.env
+*.pem
+*.key
+*.crt
+*.cred
+*.tpm
+*.secret
+*authkey*

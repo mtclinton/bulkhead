@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Enforce a clean, single-author public history: no AI/co-author attribution
+# anywhere in commit author/committer identities, messages, or trailers.
+name: authorship
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  clean-authorship:
+    name: no AI / co-author attribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan commit identities, messages, and trailers
+        run: |
+          set -euo pipefail
+          # Forbidden in any commit's author/committer line or message body.
+          pattern='co-authored-by:|generated with|noreply@anthropic|\bclaude\b|\bcopilot\b|chatgpt|🤖'
+          if git log --format='%H%n%an <%ae>%n%cn <%ce>%n%B' | grep -iEn "$pattern"; then
+            echo "::error::Forbidden attribution found in commit metadata."
+            echo "History must be single-author with no AI/co-author trailers."
+            exit 1
+          fi
+          echo "OK: commit history is clean (single-author, no AI attribution)."

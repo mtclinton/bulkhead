@@ -1,0 +1,28 @@
+bulkhead
+Copyright (C) 2026 mtclinton
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License v3.0 (AGPL-3.0-only) as
+published by the Free Software Foundation. See the LICENSE file for the full
+text.
+
+----------------------------------------------------------------------------
+
+Third-party attribution notices.
+
+This file collects attribution for third-party components incorporated into
+bulkhead or distributed in bulkhead images. Permissive-licensed components
+retain their original notices; the combined work as a whole is governed by
+AGPL-3.0-only. Each entry is finalized with its exact upstream version and the
+verbatim notice text required by its license when the component lands.
+
+Planned / integrated components:
+
+  Buildroot                      GPL-2.0-or-later   (build system; not linked into the image)
+  Linux kernel                   GPL-2.0-only
+  systemd                        LGPL-2.1-or-later
+  llama.cpp                      MIT
+  Qwen2.5 / Qwen3 model weights  Apache-2.0         (Copyright Alibaba Cloud)
+  tailscale                      BSD-3-Clause
+  cilium/ebpf                    MIT and BSD-2-Clause
+  RAUC                           LGPL-2.1-or-later  (production / Yocto phase)

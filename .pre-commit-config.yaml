@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Local secret-scan gate. Enable once with: pre-commit install
+# (CI runs the authoritative scan on every push/PR regardless.)
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead BR2_EXTERNAL package menu (appears under "External options").
+#
+# Package entries are added here as milestones land, e.g.:
+#   source "$BR2_EXTERNAL_BULKHEAD_PATH/package/llama-cpp/Config.in"
+#   source "$BR2_EXTERNAL_BULKHEAD_PATH/package/bulkhead-router/Config.in"
+#   source "$BR2_EXTERNAL_BULKHEAD_PATH/package/bulkhead-collector/Config.in"

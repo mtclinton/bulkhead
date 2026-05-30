@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+title = "bulkhead gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "global allowlist"
+paths = [
+  '''testdata/''',
+  '''go\.sum$''',
+  '''LICENSE$''',
+]
+# Documentation and examples use obvious placeholder secrets only; allow them
+# so they do not trip the scanner. Real secrets never appear in the tree.
+regexes = [
+  '''EXAMPLE_[A-Z0-9_]+''',
+  '''tskey-auth-(EXAMPLE|REDACTED|XXXX|x{4,})''',
+  '''sk-ant-(EXAMPLE|REDACTED|x{4,})''',
+]
