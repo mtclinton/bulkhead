@@ -19,7 +19,7 @@ IMG = os.path.join(ROOT, "output", "images")
 KERNEL = os.path.join(IMG, "bzImage")
 ROOTFS = os.path.join(IMG, "rootfs.ext2")
 DATA = os.path.join(IMG, "data.ext4")
-CMDLINE = "root=/dev/vda rw console=ttyS0 lsm=landlock,lockdown,yama,bpf"
+CMDLINE = "root=/dev/vda rw console=ttyS0 net.ifnames=0 lsm=landlock,lockdown,yama,bpf"
 TIMEOUT = 300
 
 PROBE = (

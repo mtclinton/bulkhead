@@ -51,6 +51,10 @@ BR2_PACKAGE_LIBCURL_CURL=y
 # Request router (Go): OpenAI-compatible front door, local | Anthropic routing
 BR2_PACKAGE_BULKHEAD_ROUTER=y
 
+# Network boundary (M4): nftables default-deny egress floor + Tailscale
+BR2_PACKAGE_NFTABLES=y
+BR2_PACKAGE_TAILSCALE_BIN=y
+
 # Appliance rootfs overlay: systemd units (llama-server, model mount) + mountpoint
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_BULKHEAD_PATH)/board/bulkhead/rootfs-overlay"
 

@@ -23,7 +23,7 @@ args=(
 # Attach the model data volume (becomes /dev/vdb) when it has been built.
 [ -r "$DATA" ] && args+=( -drive file="$DATA",if=virtio,format=raw )
 args+=(
-  -append "root=/dev/vda rw console=ttyS0 lsm=landlock,lockdown,yama,bpf"
+  -append "root=/dev/vda rw console=ttyS0 net.ifnames=0 lsm=landlock,lockdown,yama,bpf"
   -netdev user,id=n0 -device virtio-net-pci,netdev=n0
   -nographic
 )

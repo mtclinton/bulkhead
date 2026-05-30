@@ -1,0 +1,10 @@
+config BR2_PACKAGE_TAILSCALE_BIN
+	bool "tailscale-bin (official static binaries)"
+	depends on BR2_x86_64
+	help
+	  Official prebuilt static Tailscale binaries (tailscaled + tailscale),
+	  pinned to a current, audited release. Used instead of Buildroot's
+	  in-tree tailscale package, which lags upstream and (at 1.78.1) predates
+	  advisory TS-2025-008.
+
+	  https://tailscale.com

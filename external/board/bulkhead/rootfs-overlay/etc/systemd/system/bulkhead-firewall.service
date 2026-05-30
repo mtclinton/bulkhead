@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=bulkhead nftables default-deny network floor
+Documentation=https://github.com/mtclinton/bulkhead
+# Load the floor before anything that egresses (router, agents, tailscaled).
+Before=network.target bulkhead-router.service llama-server.service tailscaled.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.conf
+ExecStop=-/usr/sbin/nft flush ruleset
+
+[Install]
+WantedBy=multi-user.target

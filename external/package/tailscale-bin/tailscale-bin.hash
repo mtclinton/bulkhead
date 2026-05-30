@@ -1,0 +1,2 @@
+# Locally computed (matches the published .sha256 at pkgs.tailscale.com)
+sha256  e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b  tailscale_1.98.4_amd64.tgz
