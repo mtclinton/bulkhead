@@ -17,7 +17,7 @@ help:
 	@echo "  make defconfig      load the bulkhead defconfig into Buildroot"
 	@echo "  make image          build the appliance image -> output/images/"
 	@echo "  make run            boot the image in qemu (CPU-only)"
-	@echo "  make verify         assert the security floor is live (run in guest)"
+	@echo "  make verify         boot the image in qemu and assert the security floor"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -36,7 +36,7 @@ run:
 	$(BULKHEAD_ROOT)/scripts/run-qemu.sh
 
 verify:
-	$(BULKHEAD_ROOT)/scripts/verify-floor.sh
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-floor-check.py
 
 menuconfig: | $(BUILDROOT_DIR)
 	$(BR) menuconfig

@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead security kernel config fragment.
+# Merged over board/qemu/x86_64/linux.config via BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES.
+# Provides the cgroup v2 + namespaces + seccomp + Landlock + BPF-LSM + BTF
+# substrate, the cgroup-attached BPF the systemd egress firewall needs, netfilter
+# for the nftables default-deny egress, TUN for Tailscale, and TPM support.
+
+# --- expose the running config so verify-floor can read /proc/config.gz ---
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+
+# --- BPF core + CO-RE (BTF) + ring buffer (RINGBUF is part of BPF_SYSCALL) ---
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_BPF_JIT_ALWAYS_ON=y
+# Tracing prerequisites: BPF_EVENTS (required by BPF_LSM) depends on
+# (KPROBE_EVENTS || UPROBE_EVENTS) && PERF_EVENTS, which in turn need FTRACE +
+# KPROBES. Without these, BPF_EVENTS — and therefore BPF_LSM — silently drop
+# during 'make olddefconfig'.
+CONFIG_FTRACE=y
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_UPROBE_EVENTS=y
+CONFIG_BPF_EVENTS=y
+# BTF (CO-RE): the "Debug information" choice is gated on DEBUG_KERNEL; without
+# it DEBUG_INFO stays off and DEBUG_INFO_BTF silently drops.
+CONFIG_DEBUG_KERNEL=y
+# CONFIG_DEBUG_INFO_NONE is not set
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_DEBUG_INFO_BTF_MODULES=y
+
+# --- LSM framework: BPF-LSM + Landlock + Yama + lockdown; seccomp (orthogonal) ---
+CONFIG_SECURITY=y
+CONFIG_SECURITYFS=y
+CONFIG_BPF_LSM=y
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_SECURITY_YAMA=y
+CONFIG_SECURITY_LOCKDOWN_LSM=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+# bpf MUST be listed to be active; ordered AFTER the enforcing LSMs (landlock).
+CONFIG_LSM="landlock,lockdown,yama,bpf"
+
+# --- cgroup v2 + controllers + cgroup-attached BPF ---
+# CONFIG_CGROUP_BPF is REQUIRED or systemd's IPAddressDeny= egress firewall
+# silently fails open (logs a warning, runs with no firewall).
+CONFIG_CGROUPS=y
+CONFIG_MEMCG=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_CPUSETS=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_CGROUP_FREEZER=y
+CONFIG_BLK_CGROUP=y
+CONFIG_CGROUP_BPF=y
+CONFIG_SOCK_CGROUP_DATA=y
+
+# --- namespaces (agent jails) ---
+CONFIG_NAMESPACES=y
+CONFIG_UTS_NS=y
+CONFIG_IPC_NS=y
+CONFIG_USER_NS=y
+CONFIG_PID_NS=y
+CONFIG_NET_NS=y
+
+# --- TPM (vTPM via swtpm in qemu; real TPM on bare metal) ---
+CONFIG_TCG_TPM=y
+CONFIG_TCG_TIS_CORE=y
+CONFIG_TCG_TIS=y
+CONFIG_TCG_CRB=y
+CONFIG_HW_RANDOM_TPM=y
+
+# --- netfilter + nf_tables + conntrack (default-deny egress, M4) ---
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NF_CONNTRACK_IPV4=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_COUNTER=y
+CONFIG_NFT_LOG=y
+
+# --- TUN for Tailscale kernel mode (M4) ---
+CONFIG_TUN=y

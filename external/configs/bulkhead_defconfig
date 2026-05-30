@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead appliance defconfig — Buildroot 2025.02.14, x86_64, qemu, systemd.
+# Based on qemu_x86_64_defconfig; init switched to systemd; bulkhead security
+# kernel fragment added; reproducible build enabled.
+# Regenerate the minimal form with: make savedefconfig
+
+BR2_x86_64=y
+
+# Buildroot-internal glibc toolchain + 6.12 headers (systemd requires glibc)
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
+
+# Init: systemd (selects systemd, merged /usr, systemd skeleton)
+BR2_INIT_SYSTEMD=y
+
+# System identity / networking
+BR2_TARGET_GENERIC_HOSTNAME="bulkhead"
+BR2_TARGET_GENERIC_ISSUE="bulkhead agent appliance"
+BR2_SYSTEM_DHCP="eth0"
+
+# Kernel 6.12 LTS + bulkhead security fragment + BTF (needs host-pahole)
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.12.27"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/x86_64/linux.config"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_BULKHEAD_PATH)/board/bulkhead/linux-bulkhead.fragment"
+BR2_LINUX_KERNEL_NEEDS_HOST_LIBELF=y
+BR2_LINUX_KERNEL_NEEDS_HOST_PAHOLE=y
+
+# Root filesystem (ext4; generous size for later milestones — model staged separately)
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="1G"
+
+# qemu board glue + host qemu for `make run`
+BR2_GLOBAL_PATCH_DIR="board/qemu/patches"
+BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
+BR2_ROOTFS_POST_BUILD_SCRIPT="board/qemu/x86_64/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
+BR2_PACKAGE_HOST_QEMU=y
+BR2_PACKAGE_HOST_QEMU_SYSTEM_MODE=y
+
+# Reproducible, isolated builds
+BR2_REPRODUCIBLE=y
+BR2_PER_PACKAGE_DIRECTORIES=y
