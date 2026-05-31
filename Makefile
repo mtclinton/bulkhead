@@ -23,6 +23,8 @@ help:
 	@echo "  make verify-router  boot with the data disk and assert request routing"
 	@echo "  make verify-egress  boot and assert the default-deny network floor"
 	@echo "  make verify-m5      boot and assert provenance + the fail-closed self-test"
+	@echo "  make tsauth-disk    build the Tailscale auth-key provisioning volume"
+	@echo "  make verify-tailnet boot with the key volume and assert the node joins"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -57,6 +59,12 @@ verify-egress:
 
 verify-m5:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-m5-check.py
+
+tsauth-disk:
+	$(BULKHEAD_ROOT)/scripts/make-tsauth-disk.sh
+
+verify-tailnet:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-tailnet-check.py
 
 menuconfig: | $(BUILDROOT_DIR)
 	$(BR) menuconfig

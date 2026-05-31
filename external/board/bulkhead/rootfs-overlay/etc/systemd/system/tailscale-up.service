@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=bulkhead Tailscale node join
+After=tailscaled.service mnt-tsauth.mount bulkhead-firewall.service
+Wants=tailscaled.service
+Requires=mnt-tsauth.mount
+# Only join when the provisioning key is present; otherwise tailscaled stays
+# idle and this is skipped (graceful on key-less boots).
+ConditionPathExists=/mnt/tsauth/authkey
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The key is read from the provisioning volume at runtime (file: keeps it out of
+# the process arguments). Production seals it with systemd-creds — see
+# deploy/tailscale-join.md.
+ExecStart=/usr/bin/tailscale up --auth-key=file:/mnt/tsauth/authkey \
+    --hostname=bulkhead-appliance --accept-routes=false --ssh=false
+
+[Install]
+WantedBy=multi-user.target

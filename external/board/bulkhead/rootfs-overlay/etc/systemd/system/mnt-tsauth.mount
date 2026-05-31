@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Provisioning-only secret volume holding the Tailscale auth key. Present only
+# at first join; the key is never on the rootfs or in an image.
+[Unit]
+Description=bulkhead Tailscale auth-key provisioning volume
+ConditionPathExists=/dev/vdc
+
+[Mount]
+What=/dev/vdc
+Where=/mnt/tsauth
+Type=ext4
+Options=ro,nosuid,nodev,noexec
+
+[Install]
+WantedBy=multi-user.target

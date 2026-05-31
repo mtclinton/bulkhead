@@ -22,6 +22,8 @@ args=(
 )
 # Attach the model data volume (becomes /dev/vdb) when it has been built.
 [ -r "$DATA" ] && args+=( -drive file="$DATA",if=virtio,format=raw )
+# Attach the Tailscale auth-key provisioning volume (/dev/vdc) when present.
+[ -r "$IMG/tsauth.ext4" ] && args+=( -drive file="$IMG/tsauth.ext4",if=virtio,format=raw )
 args+=(
   -append "root=/dev/vda rw console=ttyS0 net.ifnames=0 lsm=landlock,lockdown,yama,bpf"
   -netdev user,id=n0 -device virtio-net-pci,netdev=n0
