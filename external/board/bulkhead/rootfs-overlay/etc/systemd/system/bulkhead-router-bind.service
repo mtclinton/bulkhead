@@ -9,7 +9,7 @@ Type=oneshot
 RemainAfterExit=yes
 # Pin the router's listen address to the tailnet IP when joined, so the front
 # door is reachable ONLY over the tailnet; otherwise keep it on loopback.
-ExecStart=/usr/bin/sh -c 'ip=$(/usr/bin/tailscale ip -4 2>/dev/null | head -1); \
+ExecStart=/bin/sh -c 'ip=$(/usr/bin/tailscale ip -4 2>/dev/null | head -1); \
   if [ -n "$ip" ]; then echo "BULKHEAD_LISTEN=$ip:8080" > /run/bulkhead-router.env; \
   else echo "BULKHEAD_LISTEN=127.0.0.1:8080" > /run/bulkhead-router.env; fi'
 
