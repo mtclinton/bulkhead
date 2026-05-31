@@ -8,11 +8,15 @@
 #   5 root_b    (ext4, A/B rootfs slot B)
 #   6 data      (ext4, persistent /data: audit log, tailscaled/cred state, model)
 # Slots are 768M (bulkhead's rootfs + in-rootfs kernel exceed the demo's 200M).
+# --no-fstab-update on every partition: wic must NOT write /etc/fstab. The device's
+# fstab (from base-files) mounts /grubenv, /rescue, /data by /dev/sdaN (unambiguous).
+# Letting wic add UUID-based entries duplicates them, and /rescue shares root_a's ext4
+# UUID (both --source rootfs) so a UUID mount is ambiguous -> mount fails -> emergency.
 bootloader --ptable gpt
-part --fixed-size 50M --source rawcopy --sourceparams="file=efi-boot.vfat" --fstype=vfat --ondisk sda --label boot --active --align 4096
+part --fixed-size 50M --source rawcopy --sourceparams="file=efi-boot.vfat" --fstype=vfat --ondisk sda --label boot --active --align 4096 --no-fstab-update
 part --fixed-size 50M --ondisk sda --align 4096 --no-table
-part --fixed-size 10M --source rawcopy --sourceparams="file=grubenv.vfat" --fstype=vfat --ondisk sda --label grubenv --align 1024
-part /rescue --source rootfs --ondisk sda --fstype=ext4 --label rescue --fixed-size=768M --align 1024
-part / --source rootfs --ondisk sda --fstype=ext4 --label root_a --fixed-size=768M --align 4096
-part / --source empty --ondisk sda --fstype=ext4 --label root_b --fixed-size=768M --align 4096
-part /data --fixed-size 100M --ondisk sda --fstype=ext4 --label data --align 4096
+part --fixed-size 10M --source rawcopy --sourceparams="file=grubenv.vfat" --fstype=vfat --ondisk sda --label grubenv --align 1024 --no-fstab-update
+part /rescue --source rootfs --ondisk sda --fstype=ext4 --label rescue --fixed-size=768M --align 1024 --no-fstab-update
+part / --source rootfs --ondisk sda --fstype=ext4 --label root_a --fixed-size=768M --align 4096 --no-fstab-update
+part / --source empty --ondisk sda --fstype=ext4 --label root_b --fixed-size=768M --align 4096 --no-fstab-update
+part /data --fixed-size 100M --ondisk sda --fstype=ext4 --label data --align 4096 --no-fstab-update

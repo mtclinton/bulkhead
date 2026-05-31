@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead RAUC A/B fstab. The active rootfs slot is mounted by the kernel root=
+# cmdline (rauc.slot=A|B -> /dev/sda4|5). The /rescue fallback slot is intentionally
+# NOT mounted in normal operation; it is only booted into when both A and B fail.
+/dev/root            /                    auto       defaults              1  1
+proc                 /proc                proc       defaults              0  0
+devpts               /dev/pts             devpts     mode=0620,ptmxmode=0666,gid=5      0  0
+tmpfs                /run                 tmpfs      mode=0755,nodev,nosuid,strictatime 0  0
+tmpfs                /var/volatile        tmpfs      defaults              0  0
+
+# grubenv: rauc writes the A/B boot-selection env here (sync for durable boot state).
+/dev/sda2            /grubenv             auto       defaults,sync,nofail  0  0
+# data: persistent appliance state (audit log, tailscaled/cred state, model).
+/dev/sda6            /data                auto       defaults,nofail       0  0
