@@ -17,6 +17,7 @@ IMAGE_INSTALL += " \
     nftables \
     curl \
     rauc \
+    dnsmasq \
     kernel-image \
 "
 # kernel-image puts /boot/bzImage in each rootfs slot so GRUB can load it per-slot
