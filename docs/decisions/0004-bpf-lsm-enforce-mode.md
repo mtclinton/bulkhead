@@ -85,8 +85,39 @@ map write or link close — no reboot.
 
 ## Roadmap (per-hook, each behind its own flag)
 
-- **E0 (this ADR):** `lsm/bpf` enforce, opt-in.
-- **E1:** `lsm/ptrace_access_check` (agents may not ptrace).
+- **E0 (this ADR):** `lsm/bpf` enforce, opt-in. **DONE.**
+- **E1:** `lsm/ptrace_access_check` (agents may not ptrace). **DONE.**
 - **E2:** `lsm/socket_connect` per-agent egress (agent → declared destinations),
-  driven by the capability manifest.
+  driven by the capability manifest. **DONE** (see below).
 - **E3:** `lsm/task_fix_setuid` + `lsm/capset` — deny privilege *gains* (allow drops).
+
+## E2 realization — destination *classes*, not named hosts
+
+"Declared destinations" could mean a per-agent list of allowed hostnames/IPs. We
+deliberately did **not** build that, because it would duplicate the authoritative
+dnsmasq→nftset dynamic allowlist (which already resolves names to IPs at the network
+layer, host-wide). Instead the per-agent manifest is a bitmask of destination
+**classes** — `loopback`, `linklocal`, `private` (RFC1918 + `100.64/10` CGNAT/tailnet
++ IPv6 ULA), `public`, `other` (non-INET: unix/netlink local IPC) — classified
+in-kernel purely from the connect `sockaddr`. So there is **no IP set to keep in
+sync**, and the two layers *compose*: BPF decides *whether* an agent may attempt
+public egress at all; nftables still constrains *which* public IPs it may reach.
+
+- Map `egress_policy` (HASH `cgroup_id`→`u32` mask). **Absent ⇒ no manifest ⇒
+  unrestricted** (fail-open; the floor still applies). Present ⇒ a connect whose
+  class is absent from the mask is a deny candidate.
+- Same fail-open gate as E0/E1: deny (`-EPERM`) requires `ret==0` AND cgroup∉TCB AND
+  manifest-present-and-class-not-allowed AND `enforce_flags[socket_connect]==1`. TCB
+  and prior-LSM-deny are always honored. `socket_connect` is `LSM_HOOK(int,0,...)`.
+- The single `prov_socket_connect` program does both jobs: it still logs **every**
+  connect (full provenance) and now also computes/applies the verdict — no second
+  program on the hook.
+- CLI: `bulkhead-collector egress set|clear <self|id:N|cgroup-path> <classes>`;
+  `enforce on socket_connect` arms it; `status` lists manifests. Map pinned at
+  `/sys/fs/bpf/bulkhead/egress_policy`.
+- **Caveat:** because `socket_connect` also fires for AF_UNIX/AF_NETLINK, a manifest
+  that omits `other` will deny local IPC for that cgroup once armed. Manifests for
+  agents that need local sockets must include `other` (and usually `loopback`).
+- **Note:** the manifest keys on cgroup id; per-agent cgroups arrive with the
+  multi-agent runner. Until then the mechanism is exercised against any non-TCB
+  cgroup (e.g. a login-session scope), which is exactly how E2 was verified.

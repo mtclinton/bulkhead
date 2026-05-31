@@ -11,7 +11,12 @@
 //	                                  unless every one is denied (gates the services).
 //	bulkhead-collector enforce on|off [hook]   flip the per-hook enforce toggle (the
 //	                                  kill-switch; default observe). hook defaults to bpf.
-//	bulkhead-collector status         print the enforce toggles + TCB allowlist.
+//	bulkhead-collector egress set|clear <cgroup> [classes]   set/clear a cgroup's
+//	                                  per-agent egress manifest (E2). cgroup is
+//	                                  'self', 'id:N', or a cgroup path; classes is a
+//	                                  comma list of loopback,linklocal,private,public,
+//	                                  other (or any/none). No manifest => unrestricted.
+//	bulkhead-collector status         print the enforce toggles + TCB + egress manifests.
 package main
 
 import (
@@ -57,6 +62,94 @@ func hookID(name string) (uint32, bool) {
 	return 0, false
 }
 
+// destination classes for the E2 egress manifest — MUST match the DST_* #defines
+// in provenance.bpf.c (a connect target's address class, classified in-kernel).
+const (
+	dstLoopback  uint32 = 1 << 0
+	dstLinklocal uint32 = 1 << 1
+	dstPrivate   uint32 = 1 << 2
+	dstPublic    uint32 = 1 << 3
+	dstOther     uint32 = 1 << 4
+)
+
+var dstClasses = []struct {
+	name string
+	bit  uint32
+}{
+	{"loopback", dstLoopback},
+	{"linklocal", dstLinklocal},
+	{"private", dstPrivate},
+	{"public", dstPublic},
+	{"other", dstOther},
+}
+
+// parseClasses turns a comma list (or "any"/"none") into a DST_* bitmask.
+func parseClasses(s string) (uint32, error) {
+	var mask uint32
+	for _, tok := range strings.Split(s, ",") {
+		tok = strings.TrimSpace(tok)
+		switch tok {
+		case "", "none":
+			continue
+		case "any", "all":
+			for _, c := range dstClasses {
+				mask |= c.bit
+			}
+			continue
+		}
+		matched := false
+		for _, c := range dstClasses {
+			if c.name == tok {
+				mask |= c.bit
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return 0, fmt.Errorf("unknown class %q (known: loopback,linklocal,private,public,other,any,none)", tok)
+		}
+	}
+	return mask, nil
+}
+
+func classNames(mask uint32) string {
+	if mask == 0 {
+		return "none"
+	}
+	var parts []string
+	for _, c := range dstClasses {
+		if mask&c.bit != 0 {
+			parts = append(parts, c.name)
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// resolveCgroupID maps a cgroup spec to its v2 cgroup id (= the cgroup directory
+// inode, which is what bpf_get_current_cgroup_id() returns in-kernel).
+func resolveCgroupID(spec string) (uint64, error) {
+	switch {
+	case spec == "self":
+		p := selfCgroupPath()
+		if p == "" {
+			return 0, fmt.Errorf("cannot read /proc/self/cgroup")
+		}
+		return cgroupIDFromInode(filepath.Join("/sys/fs/cgroup", p))
+	case strings.HasPrefix(spec, "id:"):
+		var id uint64
+		if _, err := fmt.Sscanf(spec, "id:%d", &id); err != nil {
+			return 0, fmt.Errorf("bad cgroup id %q: %v", spec, err)
+		}
+		return id, nil
+	case strings.HasPrefix(spec, "/sys/fs/cgroup"):
+		return cgroupIDFromInode(spec)
+	case strings.HasPrefix(spec, "/"):
+		return cgroupIDFromInode(filepath.Join("/sys/fs/cgroup", spec))
+	default:
+		return 0, fmt.Errorf("cgroup spec must be 'self', 'id:N', or a cgroup path")
+	}
+}
+
 const pinDir = "/sys/fs/bpf/bulkhead"
 
 func main() {
@@ -71,6 +164,8 @@ func main() {
 		runSelftest()
 	case "enforce":
 		cmdEnforce(os.Args[2:])
+	case "egress":
+		cmdEgress(os.Args[2:])
 	case "status":
 		cmdStatus()
 	default:
@@ -79,7 +174,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|status")
 	os.Exit(2)
 }
 
@@ -153,6 +248,44 @@ func cmdEnforce(args []string) {
 	log.Printf("enforce %s for hook %q (id %d) — %s", args[0], hook, hid, state)
 }
 
+// cmdEgress sets or clears a cgroup's per-agent egress manifest (E2). The manifest
+// is enforced only when `enforce on socket_connect` is also armed; absent a manifest
+// a cgroup is unrestricted (the nftables floor still applies).
+func cmdEgress(args []string) {
+	if len(args) < 2 || (args[0] != "set" && args[0] != "clear") {
+		usage()
+	}
+	cg, err := resolveCgroupID(args[1])
+	if err != nil {
+		log.Fatalf("resolve cgroup %q: %v", args[1], err)
+	}
+	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "egress_policy"), nil)
+	if err != nil {
+		log.Fatalf("open pinned egress_policy (is the collector running?): %v", err)
+	}
+	defer m.Close()
+
+	if args[0] == "clear" {
+		if err := m.Delete(cg); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			log.Fatalf("clear egress_policy: %v", err)
+		}
+		log.Printf("egress manifest cleared for cgroup %d — unrestricted (nftables floor still applies)", cg)
+		return
+	}
+
+	if len(args) < 3 {
+		log.Fatalf("usage: bulkhead-collector egress set <cgroup> <classes>")
+	}
+	mask, err := parseClasses(args[2])
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	if err := m.Update(cg, mask, ebpf.UpdateAny); err != nil {
+		log.Fatalf("update egress_policy: %v", err)
+	}
+	log.Printf("egress manifest for cgroup %d = %s (mask 0x%02x)", cg, classNames(mask), mask)
+}
+
 func cmdStatus() {
 	ef, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
 	if err != nil {
@@ -177,6 +310,21 @@ func cmdStatus() {
 		it := tcb.Iterate()
 		for it.Next(&key, &val) {
 			fmt.Printf("  %d\n", key)
+		}
+	}
+	if ep, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "egress_policy"), nil); err == nil {
+		defer ep.Close()
+		fmt.Println("egress manifests (cgroup -> allowed dest classes):")
+		var key uint64
+		var val uint32
+		it := ep.Iterate()
+		any := false
+		for it.Next(&key, &val) {
+			fmt.Printf("  %-20d %s\n", key, classNames(val))
+			any = true
+		}
+		if !any {
+			fmt.Println("  (none — every cgroup unrestricted; nftables floor applies)")
 		}
 	}
 }
@@ -237,13 +385,17 @@ func runCollector() {
 	if err := objs.TcbCgroups.Pin(filepath.Join(pinDir, "tcb_cgroups")); err != nil {
 		log.Fatalf("pin tcb_cgroups: %v", err)
 	}
+	// E2: pin the per-agent egress manifest map for the `egress`/`status` subcommands.
+	if err := objs.EgressPolicy.Pin(filepath.Join(pinDir, "egress_policy")); err != nil {
+		log.Fatalf("pin egress_policy: %v", err)
+	}
 
 	al, err := openAuditLog()
 	if err != nil {
 		log.Fatalf("audit log: %v", err)
 	}
 	defer al.Close()
-	log.Printf("collector running: observe+enforce(bpf) attached (default observe), audit at %s, signer %s", al.path, al.pubHex())
+	log.Printf("collector running: observe+enforce attached (bpf,ptrace,socket_connect; default observe), audit at %s, signer %s", al.path, al.pubHex())
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {

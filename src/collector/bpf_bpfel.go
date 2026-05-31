@@ -72,6 +72,7 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
+	EgressPolicy *ebpf.MapSpec `ebpf:"egress_policy"`
 	EnforceFlags *ebpf.MapSpec `ebpf:"enforce_flags"`
 	Events       *ebpf.MapSpec `ebpf:"events"`
 	TcbCgroups   *ebpf.MapSpec `ebpf:"tcb_cgroups"`
@@ -104,6 +105,7 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
+	EgressPolicy *ebpf.Map `ebpf:"egress_policy"`
 	EnforceFlags *ebpf.Map `ebpf:"enforce_flags"`
 	Events       *ebpf.Map `ebpf:"events"`
 	TcbCgroups   *ebpf.Map `ebpf:"tcb_cgroups"`
@@ -111,6 +113,7 @@ type bpfMaps struct {
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.EgressPolicy,
 		m.EnforceFlags,
 		m.Events,
 		m.TcbCgroups,
