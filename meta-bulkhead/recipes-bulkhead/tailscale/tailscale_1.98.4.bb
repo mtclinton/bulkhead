@@ -12,6 +12,10 @@ COMPATIBLE_MACHINE = "qemux86-64"
 # Prebuilt vendor binaries: skip the source/arch/strip QA that assumes we built them.
 INSANE_SKIP:${PN} += "already-stripped ldflags"
 
+inherit systemd
+SYSTEMD_SERVICE:${PN} = "tailscaled.service"
+SYSTEMD_AUTO_ENABLE = "enable"
+
 do_install() {
 	install -Dm0755 ${S}/tailscaled ${D}${sbindir}/tailscaled
 	install -Dm0755 ${S}/tailscale  ${D}${bindir}/tailscale
