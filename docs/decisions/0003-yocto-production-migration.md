@@ -20,7 +20,7 @@ change.
 | # | Decision | Rationale |
 |---|----------|-----------|
 | 1 | **Yocto LTS: scarthgap (5.0)** | Mature, widely deployed, supported to 2028, first-class `meta-rauc`. (wrynose 6.0 is newer/longer-support but less shaken-out; revisit at the next LTS.) |
-| 2 | **Kernel pinned to 6.12 LTS** with the bulkhead security fragment ported verbatim | Keep the exact, verified v1 floor (BPF-LSM, Landlock, BTF, CGROUP_BPF, FUNCTION_TRACER…). A `linux-yocto` bbappend carries the fragment + `lsm=` cmdline. |
+| 2 | **Kernel: scarthgap's linux-yocto 6.6 LTS** with the bulkhead security fragment ported verbatim | scarthgap ships 6.6 LTS (not 6.12); the v1 floor (BPF-LSM, Landlock, BTF, CGROUP_BPF, FUNCTION_TRACER…) is fully present in 6.6, so we align with the LTS's tested kernel rather than carry a custom 6.12 recipe. A `linux-yocto` bbappend carries the fragment + `lsm=` cmdline. |
 | 3 | **Updates: RAUC A/B, `verity` bundle format** | Immutable, authenticated, rollback-capable. x86_64 uses the **GRUB** backend (grubenv on a non-redundant partition) — systemd-boot is not a RAUC backend. |
 | 4 | **Read-only rootfs + a persistent data partition** | `IMAGE_FEATURES += "read-only-rootfs"`; `/var/lib/bulkhead` (audit log, tailscaled/credential state) and the model live on a persistent partition, not a RAUC slot. |
 | 5 | **Signing keys off-repo (PKCS#11/KMS)** | `RAUC_KEY_FILE`/`RAUC_CERT_FILE` point at out-of-tree paths or a PKCS#11 URI; only the CA trust anchor ships on the device. Never committed (same posture as every other secret). |

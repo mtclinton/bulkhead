@@ -17,8 +17,9 @@ IMAGE_INSTALL += " \
     nftables \
     curl \
     rauc \
-    tpm2-tss \
 "
+# tpm2-tss (for sealed credentials) needs meta-security/meta-tpm — added with
+# the measured-boot/attestation hardening step.
 
 # RAUC A/B verity slots + a persistent data partition are assembled via wic
 # (recipes-support/rauc + a wks layout) — added in the RAUC integration step.
