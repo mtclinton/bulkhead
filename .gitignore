@@ -12,6 +12,11 @@
 /sstate-cache/
 /tmp/
 bitbake.lock
+# Fetched Yocto layers + build output (meta-bulkhead/ is committed; these are not)
+/yocto/poky/
+/yocto/meta-openembedded/
+/yocto/meta-rauc/
+/yocto/build/
 
 # Go
 /bin/
