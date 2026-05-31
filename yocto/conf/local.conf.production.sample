@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead PRODUCTION build config (template). Copy to the build dir for a release:
+#   cp yocto/conf/local.conf.production.sample yocto/build/conf/local.conf
+#
+# This is the hardened counterpart to the dev / A-B-test local.conf: NO debug-tweaks,
+# no auto-login, no ssh server, root account locked. bulkhead-image.bb arms a build
+# assert (BULKHEAD_PRODUCTION=1) that FAILS the build if any of those leaked in.
+
+MACHINE ??= "qemux86-64"
+DISTRO  ?= "bulkhead"
+
+# Arm the production hardening assert in bulkhead-image.bb.
+BULKHEAD_PRODUCTION = "1"
+
+# Drop ALL dev image features. This OVERRIDES poky's default
+# `EXTRA_IMAGE_FEATURES ?= "debug-tweaks"`; the result has a locked root account,
+# no serial auto-login, and no ssh daemon.
+EXTRA_IMAGE_FEATURES = ""
+
+# --- RAUC signing + device keyring (OFF-REPO; never committed) ---
+# Production uses a real CA whose private signing key lives in an HSM / PKCS#11 token,
+# not on the build host. Point these at the release trust anchor + signer:
+#   BULKHEAD_RAUC_KEYDIR  must contain ca.cert.pem (the device trust anchor that ships
+#                         on-device and verifies update bundles).
+#   RAUC_KEY_FILE         the signing key — prefer a PKCS#11 URI, e.g.
+#                         "pkcs11:token=bulkhead;object=release-signer;type=private".
+#   RAUC_CERT_FILE        the signer certificate (chains to ca.cert.pem).
+BULKHEAD_RAUC_KEYDIR = "/etc/bulkhead/rauc"
+RAUC_KEY_FILE  = "/etc/bulkhead/rauc/release.key.pem"
+RAUC_CERT_FILE = "/etc/bulkhead/rauc/release.cert.pem"
+
+# A/B wic disk: GRUB A/B bootconf + UEFI firmware to assemble/boot the image.
+PREFERRED_RPROVIDER_virtual-grub-bootconf = "rauc-qemu-grubconf"
+EXTRA_IMAGEDEPENDS += "ovmf"
+
+# Build parallelism (tune to the release host).
+BB_NUMBER_THREADS ?= "8"
+PARALLEL_MAKE     ?= "-j 8"
+
+# Reproducible release engineering: pin every layer SRCREV (no AUTOREV); the distro
+# conf already sets BB_HASHSERVE/OEEquivHash. For a release farm, also point at a
+# shared, immutable sstate + downloads cache:
+#   SSTATE_DIR ?= "/srv/bulkhead/sstate"
+#   DL_DIR     ?= "/srv/bulkhead/downloads"
