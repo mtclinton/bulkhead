@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Apply the bulkhead security floor as a FORCED fragment so its values win over
+# scarthgap's feature defaults. Without 'force', features/netfilter (processed
+# after a plain SRC_URI .cfg) sets CONFIG_NF_CONNTRACK=m, which then demotes
+# NFT_CT to =m and breaks the nft default-deny floor at boot (and module loading
+# isn't an option under the lockdown LSM). 'force' overrides regardless of order.
+define KFEATURE_DESCRIPTION "Bulkhead security floor"
+define KFEATURE_COMPATIBILITY all
+
+force kconf non-hardware bulkhead-security.cfg

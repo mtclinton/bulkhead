@@ -2,7 +2,12 @@
 # Carry the verified v1 kernel security floor into the Yocto kernel.
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
-SRC_URI += "file://bulkhead-security.cfg"
+SRC_URI += "file://bulkhead-security.cfg \
+            file://bulkhead-security.scc"
+
+# Process the fragment as a forced kernel feature so our values override scarthgap's
+# defaults (notably features/netfilter's CONFIG_NF_CONNTRACK=m).
+KERNEL_FEATURES:append = " bulkhead-security.scc"
 
 # CONFIG_DEBUG_INFO_BTF (required for the collector's BPF-LSM CO-RE and for
 # /sys/kernel/btf/vmlinux) needs pahole at kernel build time. In linux-yocto.inc,
