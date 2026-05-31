@@ -55,6 +55,9 @@ BR2_PACKAGE_BULKHEAD_ROUTER=y
 BR2_PACKAGE_NFTABLES=y
 BR2_PACKAGE_TAILSCALE_BIN=y
 
+# Provenance (M5): eBPF observe-only collector + fail-closed boot self-test
+BR2_PACKAGE_BULKHEAD_COLLECTOR=y
+
 # Appliance rootfs overlay: systemd units (llama-server, model mount) + mountpoint
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_BULKHEAD_PATH)/board/bulkhead/rootfs-overlay"
 

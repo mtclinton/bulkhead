@@ -4,5 +4,5 @@ menu "bulkhead packages"
 source "$BR2_EXTERNAL_BULKHEAD_PATH/package/llama-cpp/Config.in"
 source "$BR2_EXTERNAL_BULKHEAD_PATH/package/bulkhead-router/Config.in"
 source "$BR2_EXTERNAL_BULKHEAD_PATH/package/tailscale-bin/Config.in"
-# source "$BR2_EXTERNAL_BULKHEAD_PATH/package/bulkhead-collector/Config.in"  # M5
+source "$BR2_EXTERNAL_BULKHEAD_PATH/package/bulkhead-collector/Config.in"
 endmenu

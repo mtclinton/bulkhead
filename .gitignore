@@ -18,6 +18,10 @@ bitbake.lock
 *.test
 *.out
 vendor/
+# ...except the collector's vendored deps: committed so the air-gapped Buildroot
+# build works (SITE_METHOD=local sources are never auto-vendored).
+!src/collector/vendor/
+!src/collector/vendor/**
 
 # Model weights — fetched at build time, never committed
 *.gguf

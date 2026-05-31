@@ -22,6 +22,7 @@ help:
 	@echo "  make verify-service boot with the data disk and assert local inference"
 	@echo "  make verify-router  boot with the data disk and assert request routing"
 	@echo "  make verify-egress  boot and assert the default-deny network floor"
+	@echo "  make verify-m5      boot and assert provenance + the fail-closed self-test"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -53,6 +54,9 @@ verify-router:
 
 verify-egress:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-check.py
+
+verify-m5:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-m5-check.py
 
 menuconfig: | $(BUILDROOT_DIR)
 	$(BR) menuconfig

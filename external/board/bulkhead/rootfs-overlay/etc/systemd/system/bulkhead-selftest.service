@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=bulkhead fail-closed boot self-test
+Documentation=https://github.com/mtclinton/bulkhead
+# Run AFTER the egress floor is loaded (so the forbidden-egress probe is subject
+# to it) and BEFORE any service or agent. A non-zero exit fails this unit, and
+# the Requires= on the gated units propagates that failure, blocking them.
+After=bulkhead-firewall.service
+Requires=bulkhead-firewall.service
+Before=llama-server.service bulkhead-router.service bulkhead-collector.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bulkhead-collector selftest
+# Run under the same confinement an agent gets, so the probes test the real floor.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

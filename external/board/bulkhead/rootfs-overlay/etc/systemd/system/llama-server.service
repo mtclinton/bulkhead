@@ -2,8 +2,8 @@
 [Unit]
 Description=bulkhead local inference (llama.cpp server)
 Documentation=https://github.com/mtclinton/bulkhead
-After=var-lib-bulkhead-models.mount
-Requires=var-lib-bulkhead-models.mount
+After=var-lib-bulkhead-models.mount bulkhead-selftest.service
+Requires=var-lib-bulkhead-models.mount bulkhead-selftest.service
 
 [Service]
 Type=exec

@@ -1,0 +1,10 @@
+config BR2_PACKAGE_BULKHEAD_COLLECTOR
+	bool "bulkhead-collector"
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	help
+	  eBPF observe-only provenance collector (cilium/ebpf) plus the
+	  fail-closed boot self-test. Loads a BPF-LSM program, streams events
+	  to a hash-chained, Ed25519-signed append-only audit log. Vendored
+	  dependencies are committed so the build is fully offline.
+
+	  https://github.com/mtclinton/bulkhead

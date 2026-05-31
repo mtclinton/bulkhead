@@ -2,7 +2,8 @@
 [Unit]
 Description=bulkhead request router (local llama.cpp | Anthropic API)
 Documentation=https://github.com/mtclinton/bulkhead
-After=llama-server.service
+After=llama-server.service bulkhead-selftest.service
+Requires=bulkhead-selftest.service
 # Note: deliberately NOT ordered after network-online.target — that target is
 # never reached unless systemd-networkd-wait-online is enabled, and the router
 # does not need it (it binds a local port and dials upstreams lazily).

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=bulkhead eBPF provenance collector
+Documentation=https://github.com/mtclinton/bulkhead
+# Gated on the fail-closed self-test: if it fails, the collector does not start.
+After=bulkhead-selftest.service
+Requires=bulkhead-selftest.service
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/bulkhead-collector run
+Restart=on-failure
+RestartSec=2
+# Loading BPF and attaching the LSM program needs these caps; agents never get
+# them — only this trusted collector does.
+User=root
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# The append-only audit log lives under the writable StateDirectory; the rest of
+# the filesystem stays protected.
+StateDirectory=bulkhead
+Environment=BULKHEAD_AUDIT_DIR=/var/lib/bulkhead/audit
+# BPF JIT needs W+X, so MemoryDenyWriteExecute must stay off here.
+MemoryDenyWriteExecute=no
+
+[Install]
+WantedBy=multi-user.target
