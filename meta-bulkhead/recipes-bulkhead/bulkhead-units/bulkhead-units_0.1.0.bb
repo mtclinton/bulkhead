@@ -4,11 +4,16 @@ HOMEPAGE = "https://github.com/mtclinton/bulkhead"
 LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
-SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-SRCREV = "9306c0afaf5d7f328b1d7ee712d163d772b224ed"
+SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git \
+           file://bulkhead-collector-data.conf"
+SRCREV = "ef2b0d2db3ff67cf0e066194b0618c026b8b8080"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
+
+# Yocto-only collector drop-in (redirect the audit log to /data) lives in files/,
+# NOT the shared rootfs-overlay (so Buildroot's writable-rootfs path is untouched).
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
 # Files-only recipe; ${S} is the repo root whose Makefile is the Buildroot
 # prototype's — keep base_do_configure from running `make clean` against it.
@@ -42,6 +47,11 @@ do_install() {
 	install -d ${D}${systemd_system_unitdir}/bulkhead-router.service.d
 	install -m0644 ${OV}/etc/systemd/system/bulkhead-router.service.d/*.conf \
 		${D}${systemd_system_unitdir}/bulkhead-router.service.d/
+
+	# Yocto-only: persist the collector audit log on /data (RO rootfs -> /var is volatile)
+	install -d ${D}${systemd_system_unitdir}/bulkhead-collector.service.d
+	install -m0644 ${WORKDIR}/bulkhead-collector-data.conf \
+		${D}${systemd_system_unitdir}/bulkhead-collector.service.d/10-data-persistence.conf
 
 	# nftables default-deny egress floor
 	install -Dm0644 ${OV}/etc/nftables.conf ${D}${sysconfdir}/nftables.conf

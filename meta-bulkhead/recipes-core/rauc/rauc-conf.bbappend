@@ -7,4 +7,7 @@
 # system.conf's [keyring] path=ca.cert.pem. The cert/key never enter the repo
 # (.gitignore blocks *.pem); production points BULKHEAD_RAUC_KEYDIR at the real CA
 # trust anchor (PKCS#11/HSM-backed signing key stays off-device).
-FILESEXTRAPATHS:prepend := "${BULKHEAD_RAUC_KEYDIR}:"
+# ${THISDIR}/files: bulkhead's own system.conf (compatible=bulkhead appliance),
+# overriding meta-rauc-qemux86's demo copy (meta-bulkhead has higher layer priority).
+# ${BULKHEAD_RAUC_KEYDIR}: the off-repo device keyring (ca.cert.pem).
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:${BULKHEAD_RAUC_KEYDIR}:"

@@ -5,10 +5,9 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/AGPL-3.0-only;md5=73f1eb20517c5
 
 inherit bundle
 
-# Must match the compatible string in the device's RAUC system.conf. (Currently the
-# meta-rauc-qemux86 reference system.conf; a bulkhead-specific compatible + keyring
-# is a follow-up once the A/B mechanism is proven.)
-RAUC_BUNDLE_COMPATIBLE = "qemux86-64 demo platform"
+# Must match the device system.conf compatible byte-for-byte (meta-bulkhead ships its
+# own system.conf with this string via recipes-core/rauc/files/qemux86-64/system.conf).
+RAUC_BUNDLE_COMPATIBLE = "bulkhead appliance"
 
 # verity: dm-verity-protected bundle (authenticated, integrity-checked at install).
 RAUC_BUNDLE_FORMAT = "verity"
