@@ -38,6 +38,9 @@ CONFIG_DEBUG_INFO_BTF_MODULES=y
 # --- LSM framework: BPF-LSM + Landlock + Yama + lockdown; seccomp (orthogonal) ---
 CONFIG_SECURITY=y
 CONFIG_SECURITYFS=y
+# Socket-family LSM hooks (security_socket_connect, ...) — required for the
+# collector's lsm/socket_connect BPF program to find bpf_lsm_socket_connect.
+CONFIG_SECURITY_NETWORK=y
 CONFIG_BPF_LSM=y
 CONFIG_SECURITY_LANDLOCK=y
 CONFIG_SECURITY_YAMA=y
