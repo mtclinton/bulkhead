@@ -22,6 +22,9 @@ bitbake.lock
 /bin/
 *.test
 *.out
+# Compiled package binaries (output of `go build .` / `go build ./...` in a module dir)
+/src/collector/collector
+/src/router/router
 vendor/
 # ...except the collector's vendored deps: committed so the air-gapped Buildroot
 # build works (SITE_METHOD=local sources are never auto-vendored).
