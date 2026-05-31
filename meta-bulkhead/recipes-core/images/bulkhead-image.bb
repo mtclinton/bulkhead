@@ -39,6 +39,14 @@ do_image_wic[depends] += "boot-image:do_deploy"
 # 4K-align the rootfs (RAUC adaptive 'block-hash-index' friendliness + clean slots).
 IMAGE_ROOTFS_ALIGNMENT = "4"
 
+# Resolve via the systemd-resolved STUB (127.0.0.53), not resolved's upstream
+# resolv.conf. The upstream file can't express dnsmasq's :5353 port and is empty under
+# UseDNS=false; the stub forwards to dnsmasq, which gates egress via the nft allowlist.
+ROOTFS_POSTPROCESS_COMMAND += "bulkhead_resolv_stub;"
+bulkhead_resolv_stub() {
+    ln -sf ../run/systemd/resolve/stub-resolv.conf ${IMAGE_ROOTFS}${sysconfdir}/resolv.conf
+}
+
 # --- Production build hardening ---
 # A shippable image MUST NOT carry dev conveniences (empty root password, an
 # auto-login serial console, an ssh server, etc.). Production builds set
