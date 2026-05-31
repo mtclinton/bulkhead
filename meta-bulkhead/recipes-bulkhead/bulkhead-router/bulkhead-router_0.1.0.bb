@@ -19,7 +19,8 @@ do_compile() {
 	export GOPROXY=off GOFLAGS=-mod=mod
 	export GOCACHE="${WORKDIR}/.gocache" GOPATH="${WORKDIR}/.gopath"
 	cd ${S}/src/router
-	${STAGING_BINDIR_NATIVE}/go build -trimpath -ldflags '-s -w' -o ${B}/bulkhead-router .
+	# Don't strip here (-s -w): let Yocto strip and split debug symbols.
+	${STAGING_BINDIR_NATIVE}/go build -trimpath -o ${B}/bulkhead-router .
 }
 
 do_install() {
