@@ -6,7 +6,7 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git \
            file://bulkhead-collector-data.conf"
-SRCREV = "ef2b0d2db3ff67cf0e066194b0618c026b8b8080"
+SRCREV = "0db0f301faddcccd702a5242aede045dedf7998f"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
