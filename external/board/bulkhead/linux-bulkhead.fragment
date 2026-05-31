@@ -19,6 +19,10 @@ CONFIG_BPF_JIT_ALWAYS_ON=y
 # KPROBES. Without these, BPF_EVENTS — and therefore BPF_LSM — silently drop
 # during 'make olddefconfig'.
 CONFIG_FTRACE=y
+# FUNCTION_TRACER pulls in DYNAMIC_FTRACE + DYNAMIC_FTRACE_WITH_DIRECT_CALLS,
+# which BPF-LSM / fentry programs require to install their trampoline on the
+# bpf_lsm_* hook functions. Without it, link.AttachLSM fails with EBUSY.
+CONFIG_FUNCTION_TRACER=y
 CONFIG_KPROBES=y
 CONFIG_KPROBE_EVENTS=y
 CONFIG_UPROBE_EVENTS=y
