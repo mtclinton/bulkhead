@@ -16,7 +16,9 @@ type bpfEvent struct {
 	CgroupId uint64
 	Pid      uint32
 	Comm     [16]uint8
-	_        [4]byte
+	Hook     uint32
+	Decision uint32
+	Mode     uint32
 }
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -61,6 +63,7 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	EnforceBpf        *ebpf.ProgramSpec `ebpf:"enforce_bpf"`
 	ProvSocketConnect *ebpf.ProgramSpec `ebpf:"prov_socket_connect"`
 }
 
@@ -68,7 +71,9 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	Events *ebpf.MapSpec `ebpf:"events"`
+	EnforceFlags *ebpf.MapSpec `ebpf:"enforce_flags"`
+	Events       *ebpf.MapSpec `ebpf:"events"`
+	TcbCgroups   *ebpf.MapSpec `ebpf:"tcb_cgroups"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -98,12 +103,16 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	Events *ebpf.Map `ebpf:"events"`
+	EnforceFlags *ebpf.Map `ebpf:"enforce_flags"`
+	Events       *ebpf.Map `ebpf:"events"`
+	TcbCgroups   *ebpf.Map `ebpf:"tcb_cgroups"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.EnforceFlags,
 		m.Events,
+		m.TcbCgroups,
 	)
 }
 
@@ -118,11 +127,13 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	EnforceBpf        *ebpf.Program `ebpf:"enforce_bpf"`
 	ProvSocketConnect *ebpf.Program `ebpf:"prov_socket_connect"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.EnforceBpf,
 		p.ProvSocketConnect,
 	)
 }

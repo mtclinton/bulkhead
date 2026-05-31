@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //go:build linux
 
-// bulkhead-collector: observe-only eBPF provenance + a fail-closed self-test.
+// bulkhead-collector: eBPF provenance + an opt-in, fail-open BPF-LSM enforce layer
+// (ADR-0004) + a fail-closed self-test.
 //
-//	bulkhead-collector run       attach the BPF-LSM program, stream events to a
-//	                             hash-chained, Ed25519-signed append-only log
-//	bulkhead-collector selftest  attempt known-forbidden actions; exit non-zero
-//	                             unless every one is denied (gates the services)
+//	bulkhead-collector run            attach the BPF-LSM programs (observe + enforce),
+//	                                  pin the policy maps, stream decisions to a
+//	                                  hash-chained, Ed25519-signed append-only log.
+//	bulkhead-collector selftest       attempt known-forbidden actions; exit non-zero
+//	                                  unless every one is denied (gates the services).
+//	bulkhead-collector enforce on|off [hook]   flip the per-hook enforce toggle (the
+//	                                  kill-switch; default observe). hook defaults to bpf.
+//	bulkhead-collector status         print the enforce toggles + TCB allowlist.
 package main
 
 import (
@@ -24,49 +29,72 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 )
 
+// hook ids — MUST match the HOOK_* #defines in provenance.bpf.c.
+const (
+	hookBPF     uint32 = 0
+	hookConnect uint32 = 3
+)
+
+var hookNames = map[uint32]string{hookBPF: "bpf", hookConnect: "socket_connect"}
+
+func hookID(name string) (uint32, bool) {
+	for id, n := range hookNames {
+		if n == name {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
+const pinDir = "/sys/fs/bpf/bulkhead"
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest")
-		os.Exit(2)
+		usage()
 	}
 	switch os.Args[1] {
 	case "run":
 		runCollector()
 	case "selftest":
 		runSelftest()
+	case "enforce":
+		cmdEnforce(os.Args[2:])
+	case "status":
+		cmdStatus()
 	default:
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest")
-		os.Exit(2)
+		usage()
 	}
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|status")
+	os.Exit(2)
 }
 
 // ---- selftest: fail closed -------------------------------------------------
 
-// runSelftest attempts actions that the appliance's floor MUST deny. Each must
-// fail; any success means the floor is open, so we exit non-zero and (wired via
-// systemd Requires=) block every dependent service from starting.
 func runSelftest() {
 	failures := 0
 
 	// (a) Egress to a routeable, non-allowlisted address must be denied by the
-	// nftables floor (1.1.1.1:443 is not in the Anthropic set, loopback, or the
-	// tailnet). A DROP yields a timeout; EPERM is also a pass; an ESTABLISHED
-	// connection is the only failure. At boot, before the NIC has a lease, this
-	// passes trivially via ENETUNREACH — the M4 egress check is the authoritative
-	// network-up test, and probe (b) is the robust gate regardless.
+	// nftables floor. A DROP yields a timeout; EPERM is also a pass; an ESTABLISHED
+	// connection is the only failure. At boot before a DHCP lease this passes via
+	// ENETUNREACH — the M4 egress check is the authoritative network-up test.
 	conn, err := net.DialTimeout("tcp", "1.1.1.1:443", 3*time.Second)
 	if err == nil {
 		conn.Close()
-		log.Printf("SELFTEST FAIL: egress to 192.0.2.1:443 succeeded (floor is open)")
+		log.Printf("SELFTEST FAIL: egress to 1.1.1.1:443 succeeded (floor is open)")
 		failures++
 	} else {
 		log.Printf("selftest ok: forbidden egress denied (%v)", err)
@@ -91,30 +119,123 @@ func runSelftest() {
 	log.Printf("self-test passed: the floor denies forbidden actions")
 }
 
-// ---- collector: observe-only provenance ------------------------------------
+// ---- enforce / status: control the pinned policy maps ----------------------
+
+func cmdEnforce(args []string) {
+	if len(args) < 1 || (args[0] != "on" && args[0] != "off") {
+		usage()
+	}
+	hook := "bpf"
+	if len(args) > 1 {
+		hook = args[1]
+	}
+	hid, ok := hookID(hook)
+	if !ok {
+		log.Fatalf("unknown hook %q (known: bpf, socket_connect)", hook)
+	}
+	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
+	if err != nil {
+		log.Fatalf("open pinned enforce_flags (is the collector running?): %v", err)
+	}
+	defer m.Close()
+	var v uint32
+	if args[0] == "on" {
+		v = 1
+	}
+	if err := m.Update(hid, v, ebpf.UpdateAny); err != nil {
+		log.Fatalf("update enforce_flags: %v", err)
+	}
+	state := "observe (fail-open)"
+	if v == 1 {
+		state = "DENY non-TCB"
+	}
+	log.Printf("enforce %s for hook %q (id %d) — %s", args[0], hook, hid, state)
+}
+
+func cmdStatus() {
+	ef, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
+	if err != nil {
+		log.Fatalf("open pinned maps (is the collector running?): %v", err)
+	}
+	defer ef.Close()
+	fmt.Println("enforce toggles (per hook):")
+	for id, name := range hookNames {
+		var v uint32
+		_ = ef.Lookup(id, &v)
+		state := "observe"
+		if v == 1 {
+			state = "ENFORCE"
+		}
+		fmt.Printf("  %-16s %s\n", name, state)
+	}
+	if tcb, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "tcb_cgroups"), nil); err == nil {
+		defer tcb.Close()
+		var key uint64
+		var val uint32
+		fmt.Println("TCB-allowlisted cgroup ids:")
+		it := tcb.Iterate()
+		for it.Next(&key, &val) {
+			fmt.Printf("  %d\n", key)
+		}
+	}
+}
+
+// ---- collector: provenance + opt-in enforce --------------------------------
 
 func runCollector() {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatalf("remove memlock: %v", err)
 	}
+
+	// Fresh pin dir each run: a restart resets enforce to default-observe (fail-safe).
+	_ = os.RemoveAll(pinDir)
+	if err := os.MkdirAll(pinDir, 0o700); err != nil {
+		log.Fatalf("mkdir pin dir %s: %v", pinDir, err)
+	}
+
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
 		log.Fatalf("load bpf objects: %v", err)
 	}
 	defer objs.Close()
 
-	l, err := link.AttachLSM(link.LSMOptions{Program: objs.ProvSocketConnect})
+	// Observe-only provenance on socket_connect (unchanged verdict).
+	lObs, err := link.AttachLSM(link.LSMOptions{Program: objs.ProvSocketConnect})
 	if err != nil {
-		log.Fatalf("attach lsm (is bpf in the active LSM list?): %v", err)
+		log.Fatalf("attach lsm/socket_connect (is bpf in the active LSM list?): %v", err)
 	}
-	defer l.Close()
+	defer lObs.Close()
+
+	// Opt-in enforce on bpf() — attached but default-observe (enforce_flags empty).
+	lEnf, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceBpf})
+	if err != nil {
+		log.Fatalf("attach lsm/bpf: %v", err)
+	}
+	defer lEnf.Close()
+
+	// Populate the TCB allowlist (collector + init/root cgroup) BEFORE anything could
+	// arm enforce, so the privileged loaders are never denied.
+	for _, cg := range tcbCgroupIDs() {
+		if err := objs.TcbCgroups.Update(cg, uint32(1), ebpf.UpdateAny); err != nil {
+			log.Printf("tcb allowlist update (cgid %d): %v", cg, err)
+		}
+	}
+
+	// Pin the policy maps so the `enforce`/`status` subcommands (separate processes)
+	// can reach the running collector's maps. Default observe: enforce_flags stays 0.
+	if err := objs.EnforceFlags.Pin(filepath.Join(pinDir, "enforce_flags")); err != nil {
+		log.Fatalf("pin enforce_flags: %v", err)
+	}
+	if err := objs.TcbCgroups.Pin(filepath.Join(pinDir, "tcb_cgroups")); err != nil {
+		log.Fatalf("pin tcb_cgroups: %v", err)
+	}
 
 	al, err := openAuditLog()
 	if err != nil {
 		log.Fatalf("audit log: %v", err)
 	}
 	defer al.Close()
-	log.Printf("collector running: BPF-LSM attached, audit log at %s, signer %s", al.path, al.pubHex())
+	log.Printf("collector running: observe+enforce(bpf) attached (default observe), audit at %s, signer %s", al.path, al.pubHex())
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
@@ -135,20 +256,82 @@ func runCollector() {
 			continue
 		}
 		b := rec.RawSample
-		if len(b) < 28 {
+		if len(b) < 40 {
 			continue
 		}
-		// bpfEvent layout: cgroup_id u64@0, pid u32@8, comm[16]@12.
+		// bpfEvent: cgroup_id u64@0, pid u32@8, comm[16]@12, hook u32@28,
+		// decision u32@32, mode u32@36.
+		mode := binary.LittleEndian.Uint32(b[36:40])
 		ev := provEvent{
 			CgroupID: binary.LittleEndian.Uint64(b[0:8]),
 			PID:      binary.LittleEndian.Uint32(b[8:12]),
 			Comm:     string(bytes.TrimRight(b[12:28], "\x00")),
-			Hook:     "socket_connect",
+			Hook:     hookNames[binary.LittleEndian.Uint32(b[28:32])],
+			Decision: decisionName(binary.LittleEndian.Uint32(b[32:36]), mode),
+			Mode:     modeName(mode),
+		}
+		if ev.Hook == "" {
+			ev.Hook = "unknown"
 		}
 		if err := al.append(ev); err != nil {
 			log.Printf("audit append: %v", err)
 		}
 	}
+}
+
+func decisionName(decision, mode uint32) string {
+	if decision == 0 {
+		return "allowed"
+	}
+	if mode == 1 {
+		return "denied"
+	}
+	return "would-deny"
+}
+
+func modeName(mode uint32) string {
+	if mode == 1 {
+		return "enforce"
+	}
+	return "observe"
+}
+
+// tcbCgroupIDs returns the cgroup ids of the collector itself and the root cgroup.
+// bpf_get_current_cgroup_id() returns the v2 cgroup's kernfs id, which equals the
+// inode of the cgroup directory under /sys/fs/cgroup.
+func tcbCgroupIDs() []uint64 {
+	var ids []uint64
+	if id, err := cgroupIDFromInode("/sys/fs/cgroup"); err == nil {
+		ids = append(ids, id) // root cgroup (PID-1 / system-level loaders)
+	}
+	if p := selfCgroupPath(); p != "" {
+		if id, err := cgroupIDFromInode(filepath.Join("/sys/fs/cgroup", p)); err == nil {
+			ids = append(ids, id) // the collector's own cgroup
+		}
+	}
+	return ids
+}
+
+func selfCgroupPath() string {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		// v2 unified line: "0::/system.slice/bulkhead-collector.service"
+		if strings.HasPrefix(line, "0::") {
+			return strings.TrimPrefix(line, "0::")
+		}
+	}
+	return ""
+}
+
+func cgroupIDFromInode(path string) (uint64, error) {
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return 0, err
+	}
+	return st.Ino, nil
 }
 
 // ---- tamper-evident audit log ----------------------------------------------
@@ -158,6 +341,8 @@ type provEvent struct {
 	PID      uint32
 	Comm     string
 	Hook     string
+	Decision string // allowed | denied | would-deny
+	Mode     string // observe | enforce
 }
 
 type auditLog struct {
@@ -175,6 +360,8 @@ type auditRecord struct {
 	PID      uint32 `json:"pid"`
 	Comm     string `json:"comm"`
 	Hook     string `json:"hook"`
+	Decision string `json:"decision"`
+	Mode     string `json:"mode"`
 	PrevHash string `json:"prev_hash"`
 	Hash     string `json:"hash"`
 	Sig      string `json:"sig"`
@@ -201,8 +388,8 @@ func openAuditLog() (*auditLog, error) {
 }
 
 // loadSigningKey reads a 32-byte Ed25519 seed from the systemd credential dir
-// (TPM-sealed in production); absent one, it generates an ephemeral key and
-// logs the public key so the chain is verifiable for this boot.
+// (TPM-sealed in production); absent one, it generates an ephemeral key so the
+// chain is still verifiable for this boot.
 func loadSigningKey() (ed25519.PrivateKey, error) {
 	if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
 		if seed, err := os.ReadFile(filepath.Join(dir, "audit-seed")); err == nil && len(seed) >= ed25519.SeedSize {
@@ -233,6 +420,8 @@ func canonical(r auditRecord, prev []byte) []byte {
 	put(uint64(r.PID))
 	putStr(r.Comm)
 	putStr(r.Hook)
+	putStr(r.Decision)
+	putStr(r.Mode)
 	put(uint64(len(prev)))
 	b.Write(prev)
 	return b.Bytes()
@@ -243,6 +432,7 @@ func (a *auditLog) append(ev provEvent) error {
 	r := auditRecord{
 		Seq: a.seq, TS: time.Now().UnixNano(),
 		CgroupID: ev.CgroupID, PID: ev.PID, Comm: ev.Comm, Hook: ev.Hook,
+		Decision: ev.Decision, Mode: ev.Mode,
 		PrevHash: hex.EncodeToString(a.prevHash),
 	}
 	sum := sha256.Sum256(canonical(r, a.prevHash))

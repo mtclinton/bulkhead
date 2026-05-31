@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# OPT-IN BPF-LSM enforce arming (ADR-0004). Arms enforce for the bpf() hook AFTER the
+# fail-closed self-test, the collector (which pins the policy maps), and the floor are
+# up. NOT auto-enabled: the shipped image is default-OBSERVE; opt into enforcement with
+#   systemctl enable --now bulkhead-enforce.service
+# Disarm (soft, no reboot) with `systemctl stop bulkhead-enforce` (clears the toggle)
+# or `bulkhead-collector enforce off bpf`. Fail-open: if the collector isn't up, this
+# unit just fails and the system stays in observe mode.
+[Unit]
+Description=bulkhead BPF-LSM enforce arming (opt-in: bpf hook)
+Documentation=https://github.com/mtclinton/bulkhead
+After=bulkhead-collector.service
+Requires=bulkhead-collector.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bulkhead-collector enforce on bpf
+ExecStop=/usr/bin/bulkhead-collector enforce off bpf
+
+[Install]
+WantedBy=multi-user.target
