@@ -11,6 +11,7 @@ PACKAGECONFIG:append = " nftset"
 SRC_URI += " \
     file://10-bulkhead-dnsmasq.conf \
     file://dnsmasq-bulkhead.conf \
+    file://10-bulkhead.network \
 "
 
 do_install:append() {
@@ -24,9 +25,14 @@ do_install:append() {
     install -d ${D}${systemd_system_unitdir}/dnsmasq.service.d
     install -m0644 ${WORKDIR}/dnsmasq-bulkhead.conf \
         ${D}${systemd_system_unitdir}/dnsmasq.service.d/10-bulkhead.conf
+    # Don't accept DHCP DNS -> force all resolution through dnsmasq (the allowlist path).
+    install -d ${D}${sysconfdir}/systemd/network
+    install -m0644 ${WORKDIR}/10-bulkhead.network \
+        ${D}${sysconfdir}/systemd/network/10-bulkhead.network
 }
 
 FILES:${PN} += " \
     ${sysconfdir}/systemd/resolved.conf.d/10-bulkhead-dnsmasq.conf \
     ${systemd_system_unitdir}/dnsmasq.service.d/10-bulkhead.conf \
+    ${sysconfdir}/systemd/network/10-bulkhead.network \
 "

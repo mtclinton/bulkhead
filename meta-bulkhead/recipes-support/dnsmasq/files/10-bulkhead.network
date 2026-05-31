@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Wired DHCP, but do NOT accept DHCP-provided DNS servers. All name resolution must go
+# through the local dnsmasq (the egress-allowlist resolver, reached via resolved's
+# 127.0.0.1:5353 upstream) — otherwise resolved would prefer the per-link DHCP DNS
+# (e.g. the slirp/router DNS) and bypass the nftset path, leaving the allowlist empty.
+# Numbered 10- so it is matched before the stock 80-wired.network.
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+
+[DHCPv4]
+UseDNS=false
+
+[DHCPv6]
+UseDNS=false
+
+[IPv6AcceptRA]
+UseDNS=false
