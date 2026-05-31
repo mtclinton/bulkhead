@@ -13,6 +13,10 @@
 //     per-hook enforce flag is set; every uncertain path returns the incoming ret
 //     (allow). Deny requires ALL of:
 //       ret==0  AND  cgroup not in the TCB allowlist  AND  enforce_flags[hook]==1.
+//   enforce_setuid (lsm/task_fix_setuid, E3) / enforce_capset (lsm/capset, E3):
+//     OPT-IN, FAIL-OPEN. Same gate, but deny only a privilege GAIN (regaining root /
+//     raising caps) — drops are always allowed. The kernel itself permits these
+//     gains, so the hooks ADD a denial for non-TCB cgroups.
 //
 // bpf is ordered LAST in lsm=landlock,lockdown,yama,bpf, and the dispatcher
 // short-circuits on the first deny, so this can only ADD a denial atop the in-tree
@@ -36,6 +40,8 @@ char LICENSE[] SEC("license") = "GPL";
 #define HOOK_BPF     0
 #define HOOK_PTRACE  1
 #define HOOK_CONNECT 3
+#define HOOK_SETUID  4
+#define HOOK_CAPSET  5
 
 // E2 destination classes (a connect target's address class). The per-agent egress
 // manifest is a bitmask of the classes a cgroup may reach — classified purely from
@@ -217,4 +223,57 @@ SEC("lsm/ptrace_access_check")
 int BPF_PROG(enforce_ptrace, struct task_struct *child, unsigned int mode, int ret)
 {
 	return enforce_verdict(HOOK_PTRACE, ret);
+}
+
+// Shared gate for E3 privilege-GAIN hooks: deny (when armed) a non-TCB cgroup that
+// is raising privilege; ALWAYS allow drops/no-ops. `gain` (computed by the caller)
+// is 1 iff this transition raises privilege. Same fail-open discipline as above.
+static __always_inline int enforce_gain(__u32 hook, int ret, int gain)
+{
+	if (ret != 0)
+		return ret; // honor a prior LSM deny; never revert
+	if (!gain)
+		return 0;   // privilege drop or no change: always allow
+
+	__u64 cg = bpf_get_current_cgroup_id();
+	__u32 *tcb = bpf_map_lookup_elem(&tcb_cgroups, &cg);
+	if (tcb && *tcb == 1)
+		return 0;   // TCB (collector / init): always allow
+
+	__u32 *on = bpf_map_lookup_elem(&enforce_flags, &hook);
+	__u32 enforce = (on && *on == 1) ? 1 : 0; // miss/0 -> observe (fail-open)
+	log_decision(cg, hook, 1, enforce);       // (would-)deny a privilege gain
+	if (!enforce)
+		return 0;   // observe: logged the would-deny, but ALLOW
+	return -EPERM;      // enforce: deny the escalation
+}
+
+// E3: deny an agent cgroup GAINING effective root via the setuid family; allow
+// drops. Gain = acquiring euid 0 the task did not have (e.g. regaining root from a
+// retained suid=0) — a transition the kernel itself permits, so this adds a denial.
+SEC("lsm/task_fix_setuid")
+int BPF_PROG(enforce_setuid, struct cred *new, const struct cred *old, int flags, int ret)
+{
+	__u32 ne = 1, oe = 1; // default !=0 -> no gain -> allow on a failed read (fail-open)
+	bpf_probe_read_kernel(&ne, sizeof(ne), &new->euid.val);
+	bpf_probe_read_kernel(&oe, sizeof(oe), &old->euid.val);
+	int gain = (ne == 0 && oe != 0);
+	return enforce_gain(HOOK_SETUID, ret, gain);
+}
+
+// E3: deny an agent cgroup GAINING capabilities (effective or permitted) via capset;
+// allow drops. Raising effective within an already-held permitted set is kernel-
+// permitted, so this adds a denial. kernel_cap_t is a single u64 on 6.6.
+SEC("lsm/capset")
+int BPF_PROG(enforce_capset, struct cred *new, const struct cred *old,
+	     const kernel_cap_t *effective, const kernel_cap_t *inheritable,
+	     const kernel_cap_t *permitted, int ret)
+{
+	__u64 ne = 0, oe = 0, np = 0, op = 0;
+	bpf_probe_read_kernel(&ne, sizeof(ne), effective);            // requested effective
+	bpf_probe_read_kernel(&oe, sizeof(oe), &old->cap_effective.val);
+	bpf_probe_read_kernel(&np, sizeof(np), permitted);           // requested permitted
+	bpf_probe_read_kernel(&op, sizeof(op), &old->cap_permitted.val);
+	int gain = ((ne & ~oe) != 0) || ((np & ~op) != 0);
+	return enforce_gain(HOOK_CAPSET, ret, gain);
 }

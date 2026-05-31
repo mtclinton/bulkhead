@@ -16,6 +16,9 @@
 //	                                  'self', 'id:N', or a cgroup path; classes is a
 //	                                  comma list of loopback,linklocal,private,public,
 //	                                  other (or any/none). No manifest => unrestricted.
+//	bulkhead-collector probe setuid|capset   run as root from a non-TCB cgroup to
+//	                                  exercise a privilege gain (regain root / re-raise
+//	                                  a capability); exits 1 if E3 denied it (the test).
 //	bulkhead-collector status         print the enforce toggles + TCB + egress manifests.
 package main
 
@@ -34,6 +37,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +46,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
 )
 
 // hook ids — MUST match the HOOK_* #defines in provenance.bpf.c.
@@ -49,9 +54,14 @@ const (
 	hookBPF     uint32 = 0
 	hookPtrace  uint32 = 1
 	hookConnect uint32 = 3
+	hookSetuid  uint32 = 4
+	hookCapset  uint32 = 5
 )
 
-var hookNames = map[uint32]string{hookBPF: "bpf", hookPtrace: "ptrace", hookConnect: "socket_connect"}
+var hookNames = map[uint32]string{
+	hookBPF: "bpf", hookPtrace: "ptrace", hookConnect: "socket_connect",
+	hookSetuid: "setuid", hookCapset: "capset",
+}
 
 func hookID(name string) (uint32, bool) {
 	for id, n := range hookNames {
@@ -166,6 +176,8 @@ func main() {
 		cmdEnforce(os.Args[2:])
 	case "egress":
 		cmdEgress(os.Args[2:])
+	case "probe":
+		cmdProbe(os.Args[2:])
 	case "status":
 		cmdStatus()
 	default:
@@ -174,7 +186,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|status")
 	os.Exit(2)
 }
 
@@ -286,6 +298,63 @@ func cmdEgress(args []string) {
 	log.Printf("egress manifest for cgroup %d = %s (mask 0x%02x)", cg, classNames(mask), mask)
 }
 
+// cmdProbe exercises a real privilege-GAIN primitive so E3 can be verified: run it
+// as root from a non-TCB cgroup. It first DROPS privilege (which E3 always allows),
+// then tries to REGAIN it (which the kernel permits but E3 denies when armed).
+// Prints ALLOWED/DENIED and exits 0 (regain allowed) / 1 (regain denied) / 3 (setup).
+func cmdProbe(args []string) {
+	if len(args) < 1 || (args[0] != "setuid" && args[0] != "capset") {
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe setuid|capset")
+		os.Exit(2)
+	}
+	// setuid/capset are per-thread on Linux; keep both calls on one OS thread.
+	runtime.LockOSThread()
+
+	if args[0] == "setuid" {
+		// Drop euid to 1000 but retain suid=0 (a real escalation primitive). E3
+		// allows the drop.
+		if err := unix.Setresuid(1000, 1000, 0); err != nil {
+			fmt.Printf("PROBE setuid: drop to uid 1000 failed: %v\n", err)
+			os.Exit(3)
+		}
+		// Regain effective root from the retained suid. The kernel permits this;
+		// E3 (task_fix_setuid) denies the GAIN when armed.
+		if err := unix.Setresuid(0, 0, 0); err != nil {
+			fmt.Printf("PROBE setuid: regain root DENIED (%v)\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("PROBE setuid: regain root ALLOWED (euid=%d)\n", os.Geteuid())
+		os.Exit(0)
+	}
+
+	// capset: drop CAP_SYS_ADMIN from the effective set (keeping it permitted) — a
+	// drop E3 allows — then raise it back, a kernel-permitted GAIN E3 denies.
+	const capSysAdmin = 21 // CAP_SYS_ADMIN, word 0 (caps 0..31)
+	bit := uint32(1) << capSysAdmin
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3, Pid: 0}
+	var cur [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &cur[0]); err != nil {
+		fmt.Printf("PROBE capset: capget failed: %v\n", err)
+		os.Exit(3)
+	}
+	if cur[0].Effective&bit == 0 || cur[0].Permitted&bit == 0 {
+		fmt.Printf("PROBE capset: CAP_SYS_ADMIN not held (eff/perm) — cannot probe\n")
+		os.Exit(3)
+	}
+	dropped := cur
+	dropped[0].Effective &^= bit // remove from effective only
+	if err := unix.Capset(&hdr, &dropped[0]); err != nil {
+		fmt.Printf("PROBE capset: drop CAP_SYS_ADMIN failed: %v\n", err)
+		os.Exit(3)
+	}
+	if err := unix.Capset(&hdr, &cur[0]); err != nil { // raise back == the GAIN
+		fmt.Printf("PROBE capset: re-raise CAP_SYS_ADMIN DENIED (%v)\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("PROBE capset: re-raise CAP_SYS_ADMIN ALLOWED\n")
+	os.Exit(0)
+}
+
 func cmdStatus() {
 	ef, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
 	if err != nil {
@@ -369,6 +438,19 @@ func runCollector() {
 	}
 	defer lEnfPt.Close()
 
+	// E3: opt-in enforce on privilege gains — task_fix_setuid (regaining root) and
+	// capset (raising caps). Both default-observe; allow drops always.
+	lEnfSu, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSetuid})
+	if err != nil {
+		log.Fatalf("attach lsm/task_fix_setuid: %v", err)
+	}
+	defer lEnfSu.Close()
+	lEnfCap, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceCapset})
+	if err != nil {
+		log.Fatalf("attach lsm/capset: %v", err)
+	}
+	defer lEnfCap.Close()
+
 	// Populate the TCB allowlist (collector + init/root cgroup) BEFORE anything could
 	// arm enforce, so the privileged loaders are never denied.
 	for _, cg := range tcbCgroupIDs() {
@@ -395,7 +477,7 @@ func runCollector() {
 		log.Fatalf("audit log: %v", err)
 	}
 	defer al.Close()
-	log.Printf("collector running: observe+enforce attached (bpf,ptrace,socket_connect; default observe), audit at %s, signer %s", al.path, al.pubHex())
+	log.Printf("collector running: observe+enforce attached (bpf,ptrace,socket_connect,setuid,capset; default observe), audit at %s, signer %s", al.path, al.pubHex())
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {

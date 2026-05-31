@@ -90,6 +90,30 @@ map write or link close — no reboot.
 - **E2:** `lsm/socket_connect` per-agent egress (agent → declared destinations),
   driven by the capability manifest. **DONE** (see below).
 - **E3:** `lsm/task_fix_setuid` + `lsm/capset` — deny privilege *gains* (allow drops).
+  **DONE** (see below). This completes the enforce roadmap.
+
+## E3 realization — deny privilege *gains*, always allow drops
+
+Two hooks, each with its own flag (`setuid`, `capset`), sharing an `enforce_gain()`
+gate that is the fail-open `enforce_verdict()` plus one extra precondition: the
+transition must *raise* privilege. Drops and no-ops are always allowed — so a jailed
+agent can still `setuid`/`capset` *downward* (the common, safe direction), but cannot
+climb back.
+
+- **`task_fix_setuid`**: gain ⇔ `new.euid == 0 && old.euid != 0` (regaining effective
+  root). The classic case: a process that dropped to a non-root euid while retaining
+  `suid == 0` — the kernel *permits* it to return to euid 0, so the BPF hook adds the
+  denial the kernel would not make.
+- **`capset`**: gain ⇔ the requested effective or permitted set contains a bit the old
+  cred lacked (`(new & ~old) != 0`). Raising *effective* within an already-held
+  *permitted* set is kernel-permitted; the hook denies it for non-TCB cgroups.
+  `kernel_cap_t` is a single `u64` on 6.6.
+- Both are `LSM_HOOK(int, 0, ...)` → deny-safe on 6.6.127. Reads use
+  `bpf_probe_read_kernel` against fixed offsets from the pinned kernel's `vmlinux.h`.
+- Verified with a self-contained probe (`bulkhead-collector probe setuid|capset`, no
+  dependency on `setpriv`/`su` in the image): run as root from a non-TCB cgroup, it
+  drops privilege (allowed) then regains it (denied iff armed) and exits 1 on denial.
+- Same default-observe / soft-kill-switch / TCB-exempt semantics as E0–E2.
 
 ## E2 realization — destination *classes*, not named hosts
 

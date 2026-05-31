@@ -64,7 +64,9 @@ type bpfSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
 	EnforceBpf        *ebpf.ProgramSpec `ebpf:"enforce_bpf"`
+	EnforceCapset     *ebpf.ProgramSpec `ebpf:"enforce_capset"`
 	EnforcePtrace     *ebpf.ProgramSpec `ebpf:"enforce_ptrace"`
+	EnforceSetuid     *ebpf.ProgramSpec `ebpf:"enforce_setuid"`
 	ProvSocketConnect *ebpf.ProgramSpec `ebpf:"prov_socket_connect"`
 }
 
@@ -132,14 +134,18 @@ type bpfVariables struct {
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
 	EnforceBpf        *ebpf.Program `ebpf:"enforce_bpf"`
+	EnforceCapset     *ebpf.Program `ebpf:"enforce_capset"`
 	EnforcePtrace     *ebpf.Program `ebpf:"enforce_ptrace"`
+	EnforceSetuid     *ebpf.Program `ebpf:"enforce_setuid"`
 	ProvSocketConnect *ebpf.Program `ebpf:"prov_socket_connect"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
 		p.EnforceBpf,
+		p.EnforceCapset,
 		p.EnforcePtrace,
+		p.EnforceSetuid,
 		p.ProvSocketConnect,
 	)
 }
