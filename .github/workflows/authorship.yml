@@ -20,7 +20,9 @@ jobs:
         run: |
           set -euo pipefail
           # Forbidden in any commit's author/committer line or message body.
-          pattern='co-authored-by:|generated with|noreply@anthropic|\bclaude\b|\bcopilot\b|chatgpt|🤖'
+          # Match real AI-attribution markers. (Not a bare "generated with",
+          # which false-matches legitimate phrasing like "pre-generated with X".)
+          pattern='co-authored-by:[[:space:]]*(claude|copilot|chatgpt|gpt-|openai|anthropic)|generated with \[?(claude|copilot|chatgpt)|noreply@anthropic|🤖'
           if git log --format='%H%n%an <%ae>%n%cn <%ce>%n%B' | grep -iEn "$pattern"; then
             echo "::error::Forbidden attribution found in commit metadata."
             echo "History must be single-author with no AI/co-author trailers."
