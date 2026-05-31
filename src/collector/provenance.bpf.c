@@ -26,6 +26,7 @@ char LICENSE[] SEC("license") = "GPL";
 
 // hook ids — MUST match the userspace HOOK_* constants in main.go.
 #define HOOK_BPF     0
+#define HOOK_PTRACE  1
 #define HOOK_CONNECT 3
 
 struct event {
@@ -84,8 +85,10 @@ int BPF_PROG(prov_socket_connect, struct socket *sock, struct sockaddr *address,
 	return ret; // OBSERVE-ONLY: honor the incoming verdict
 }
 
-SEC("lsm/bpf")
-int BPF_PROG(enforce_bpf, int cmd, union bpf_attr *attr, unsigned int size, int ret)
+// Shared fail-open enforce verdict (identical skeleton for every enforce hook):
+// deny ONLY when ret==0 AND the cgroup is not in the TCB allowlist AND the hook's
+// enforce flag is explicitly 1. Every other path returns the incoming ret (allow).
+static __always_inline int enforce_verdict(__u32 hook, int ret)
 {
 	if (ret != 0)
 		return ret; // honor a prior LSM deny; never revert (one-way ratchet)
@@ -96,13 +99,27 @@ int BPF_PROG(enforce_bpf, int cmd, union bpf_attr *attr, unsigned int size, int 
 	if (tcb && *tcb == 1)
 		return 0; // TCB (collector / init): always allow
 
-	__u32 k = HOOK_BPF;
-	__u32 *on = bpf_map_lookup_elem(&enforce_flags, &k);
+	__u32 *on = bpf_map_lookup_elem(&enforce_flags, &hook);
 	__u32 enforce = (on && *on == 1) ? 1 : 0; // miss / 0 -> observe (fail-open)
 
-	log_decision(cg, HOOK_BPF, enforce ? 1 : 0, enforce);
+	log_decision(cg, hook, enforce ? 1 : 0, enforce);
 
 	if (!enforce)
 		return 0;      // observe: logged the would-deny, but ALLOW
-	return -EPERM;         // enforce: deny agent-originated bpf()
+	return -EPERM;         // enforce: deny the agent-originated action
+}
+
+// E0: deny bpf() from agent cgroups (protect the BPF substrate the TCB rests on).
+SEC("lsm/bpf")
+int BPF_PROG(enforce_bpf, int cmd, union bpf_attr *attr, unsigned int size, int ret)
+{
+	return enforce_verdict(HOOK_BPF, ret);
+}
+
+// E1: deny ptrace_access_check from agent cgroups (agents may not ptrace/inspect
+// other processes). Yama's ptrace_scope is host-wide; this is per-agent.
+SEC("lsm/ptrace_access_check")
+int BPF_PROG(enforce_ptrace, struct task_struct *child, unsigned int mode, int ret)
+{
+	return enforce_verdict(HOOK_PTRACE, ret);
 }

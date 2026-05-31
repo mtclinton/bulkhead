@@ -42,10 +42,11 @@ import (
 // hook ids — MUST match the HOOK_* #defines in provenance.bpf.c.
 const (
 	hookBPF     uint32 = 0
+	hookPtrace  uint32 = 1
 	hookConnect uint32 = 3
 )
 
-var hookNames = map[uint32]string{hookBPF: "bpf", hookConnect: "socket_connect"}
+var hookNames = map[uint32]string{hookBPF: "bpf", hookPtrace: "ptrace", hookConnect: "socket_connect"}
 
 func hookID(name string) (uint32, bool) {
 	for id, n := range hookNames {
@@ -212,6 +213,13 @@ func runCollector() {
 		log.Fatalf("attach lsm/bpf: %v", err)
 	}
 	defer lEnf.Close()
+
+	// E1: opt-in enforce on ptrace_access_check (deny agents ptracing others).
+	lEnfPt, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforcePtrace})
+	if err != nil {
+		log.Fatalf("attach lsm/ptrace_access_check: %v", err)
+	}
+	defer lEnfPt.Close()
 
 	// Populate the TCB allowlist (collector + init/root cgroup) BEFORE anything could
 	// arm enforce, so the privileged loaders are never denied.
