@@ -16,6 +16,7 @@ bitbake.lock
 /yocto/poky/
 /yocto/meta-openembedded/
 /yocto/meta-rauc/
+/yocto/meta-rauc-community/
 /yocto/build/
 
 # Go

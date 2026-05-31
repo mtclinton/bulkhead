@@ -23,7 +23,10 @@ clone() { # url dir
 clone https://git.yoctoproject.org/poky                    poky
 clone https://github.com/openembedded/meta-openembedded    meta-openembedded
 clone https://github.com/rauc/meta-rauc                    meta-rauc
+# meta-rauc-community/meta-rauc-qemux86: the qemux86-64 GRUB A/B reference (wks,
+# grub.cfg/grubenv, boot-image, system.conf) that bulkhead's wic A/B build reuses.
+clone https://github.com/rauc/meta-rauc-community          meta-rauc-community
 
 echo
-echo "Fetched poky + meta-openembedded + meta-rauc @ $BRANCH"
+echo "Fetched poky + meta-openembedded + meta-rauc + meta-rauc-community @ $BRANCH"
 echo "Next: see yocto/README.md to set up the build (bitbake-layers, distro, image)."
