@@ -22,6 +22,13 @@ PrivateTmp=yes
 RestrictAddressFamilies=AF_INET AF_INET6
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# The collector binary links cilium/ebpf, which feature-probes via bpf() at startup
+# even on the `selftest` path (which itself only does net+file probes). bpf() is not
+# in @system-service, so under Yocto's seccomp-enabled systemd it was SIGSYS-killed
+# (status=31/SYS) — Buildroot's systemd was -SECCOMP, so the filter was a no-op there.
+# Return EPERM for unlisted syscalls instead of killing; the empty CapabilityBoundingSet
+# still denies any real BPF use, and this is robust to per-Go-version syscall drift.
+SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
 
 [Install]
