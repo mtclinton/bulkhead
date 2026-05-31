@@ -5,11 +5,16 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-SRCREV = "b46e34d778b8e5baf2c693e4c61affa3a4734bcd"
+SRCREV = "9306c0afaf5d7f328b1d7ee712d163d772b224ed"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
 inherit goarch
+
+# No configure step: we build directly with go in do_compile. ${S} is the repo root,
+# whose Makefile is the Buildroot prototype's (clean pulls in a buildroot target that
+# errors); keep base_do_configure from running `make clean` against it.
+do_configure[noexec] = "1"
 
 # The module lives in a repo subdir (src/router) and is pure stdlib, so build it
 # directly with the native Go cross-compiler rather than via go.bbclass (which
