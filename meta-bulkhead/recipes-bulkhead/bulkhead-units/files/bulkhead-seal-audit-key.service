@@ -1,27 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# First-boot sealing of the audit-log signing seed to the device TPM (ADR-0008). Yocto-
-# only (needs /data + a TPM); ordered before the collector, which LoadCredentialEncrypted
-# unseals the result. Idempotent — seals once, later boots just unseal. If it fails (no
-# TPM / sealing error) the collector's BULKHEAD_REQUIRE_SEALED_KEY guard fails it closed
-# rather than signing with an ephemeral key.
+# First-boot provisioning of the audit-log signing seed (ADR-0008). Yocto-only (needs
+# /data); ordered before the collector/broker, which load the seed as a credential.
+# Idempotent + self-healing. If it fails, the collector's BULKHEAD_REQUIRE_SEALED_KEY
+# guard fails closed rather than signing with an ephemeral key.
+#
+# Runs in the NORMAL boot transaction (NOT Before=sysinit.target — sealing before the
+# system is up produced a garbage seed). Default mode `plain` writes a plaintext seed to
+# /data (the reliable VM mechanism: qemu's vTPM unseal is unreliable, ADR-0001 #12). Bare
+# metal sets BULKHEAD_SEAL_KEY=tpm2 to hardware-seal it (the tpm2 mechanism + the OVMF/
+# GRUB/kernel/systemd tpm2 infra are staged and spike-proven).
 [Unit]
-Description=bulkhead first-boot TPM sealing of the audit signing seed
+Description=bulkhead first-boot provisioning of the audit signing seed
 Documentation=https://github.com/mtclinton/bulkhead
-DefaultDependencies=no
-After=data.mount
 RequiresMountsFor=/data
-ConditionPathExists=/dev/tpmrm0
-Before=bulkhead-collector.service bulkhead-broker.service sysinit.target
+Before=bulkhead-collector.service bulkhead-broker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/bulkhead-seal-audit-key
-# Sealing touches /data + the TPM; keep the rest of the surface minimal.
+Environment=BULKHEAD_SEAL_KEY=plain
 ProtectSystem=strict
 ReadWritePaths=/data
 ProtectHome=yes
 NoNewPrivileges=yes
 
 [Install]
-WantedBy=sysinit.target
+WantedBy=multi-user.target

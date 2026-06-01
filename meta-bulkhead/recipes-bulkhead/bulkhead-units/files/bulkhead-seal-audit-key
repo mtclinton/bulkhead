@@ -1,29 +1,63 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only
-# First-boot sealing of the audit-log signing seed (ADR-0008). tpm2 sealing binds to the
-# DEVICE's own TPM, so the seed cannot be sealed at image-build time on another machine —
-# it is generated and sealed HERE, once, then only the ciphertext persists on /data.
+# First-boot provisioning of the audit-log signing seed (ADR-0008). Generates 32 random
+# bytes ONCE and persists them on /data so the collector + broker have a STABLE signing
+# identity across reboots — replacing the ephemeral per-boot key that left the signed
+# audit chain resting on an unattested boot. Idempotent + self-healing. If it cannot
+# provision a 32-byte seed, the collector's BULKHEAD_REQUIRE_SEALED_KEY guard fails closed
+# (never signs with an ephemeral key).
 #
-# Idempotent: if the sealed credential already exists, do nothing (later boots just
-# unseal it via LoadCredentialEncrypted, giving a stable signing identity). The plaintext
-# seed never touches disk — it is piped straight into systemd-creds. Sealed to PCR 7
-# (Secure Boot state), which is stable across RAUC A/B updates; perturbing the policy
-# (a tampered measurement) makes the unseal — and thus the collector — fail closed.
+# KEY MODE (BULKHEAD_SEAL_KEY):
+#   plain  (default, the VM/dev phase) — write the seed PLAINTEXT to /data/bulkhead/audit-seed
+#          (0600 root); the collector loads it via LoadCredential. Generated on-device (never
+#          shipped in the image) and protected by fs perms + the read-only rootfs + the
+#          nftables/BPF-LSM isolation floor. qemu's vTPM unseal is unreliable (ADR-0001 #12 /
+#          systemd #21747), so this is the reliable VM mechanism.
+#   tpm2   (bare metal) — hardware-seal the seed to /data/bulkhead/audit-seed.cred via
+#          systemd-creds (PCR 7, stable across RAUC A/B); the collector loads it via
+#          LoadCredentialEncrypted. Encrypted at rest, unsealable only on the expected boot.
+#          On real hardware set BULKHEAD_SEAL_KEY=tpm2 AND switch the collector/broker
+#          drop-ins to LoadCredentialEncrypted=audit-seed:/data/bulkhead/audit-seed.cred.
+#
+# NB: busybox `head` has no -c; use dd for the random seed.
 set -eu
-CRED="/data/bulkhead/audit-seed.cred"
+DATADIR="/data/bulkhead"
+SEED="$DATADIR/audit-seed"
+CRED="$DATADIR/audit-seed.cred"
+KEY="${BULKHEAD_SEAL_KEY:-plain}"
+mkdir -p "$DATADIR"
 
-[ -e "$CRED" ] && { echo "bulkhead-seal: $CRED already present; leaving it"; exit 0; }
-mkdir -p /data/bulkhead
+if [ "$KEY" = tpm2 ]; then
+	# bare metal: a cred is good iff it decrypts to >= an Ed25519 seed (32 bytes).
+	cred_ok() {
+		[ -e "$1" ] || return 1
+		n=$(systemd-creds decrypt --name=audit-seed "$1" - 2>/dev/null | wc -c)
+		[ "${n:-0}" -ge 32 ]
+	}
+	if cred_ok "$CRED"; then echo "bulkhead-seal: $CRED valid (tpm2); leaving it"; exit 0; fi
+	echo "bulkhead-seal: tpm2-sealing audit seed (PCR ${BULKHEAD_SEAL_PCRS:-7})"
+	rm -f "$CRED" "$CRED.tmp"
+	if dd if=/dev/urandom bs=32 count=1 2>/dev/null \
+	     | systemd-creds encrypt --name=audit-seed --with-key=tpm2 --tpm2-pcrs="${BULKHEAD_SEAL_PCRS:-7}" - "$CRED.tmp" 2>&1; then
+		mv "$CRED.tmp" "$CRED"; chmod 0600 "$CRED"
+		cred_ok "$CRED" || { echo "bulkhead-seal: ERROR sealed cred does not verify" >&2; rm -f "$CRED"; exit 1; }
+		echo "bulkhead-seal: tpm2-sealed + verified at $CRED"
+		exit 0
+	fi
+	rm -f "$CRED.tmp"; echo "bulkhead-seal: ERROR tpm2-sealing audit seed" >&2; exit 1
+fi
 
-# 32 random bytes (an Ed25519 seed) -> sealed credential named 'audit-seed'. --tpm2-pcrs=7
-# binds it to the boot's Secure Boot state. Written atomically (.tmp then mv).
-if head -c 32 /dev/urandom | systemd-creds encrypt --name=audit-seed \
-        --with-key=tpm2 --tpm2-pcrs=7 - "$CRED.tmp" 2>/dev/null; then
-	mv "$CRED.tmp" "$CRED"
-	chmod 0600 "$CRED"
-	echo "bulkhead-seal: sealed audit seed to the TPM (PCR 7) at $CRED"
+# plain (VM/dev): a 32-byte plaintext seed, provisioned once and kept thereafter.
+if [ -e "$SEED" ] && [ "$(wc -c < "$SEED" 2>/dev/null || echo 0)" -eq 32 ]; then
+	echo "bulkhead-seal: $SEED present (32B); leaving it"
+	exit 0
+fi
+echo "bulkhead-seal: provisioning plaintext audit seed at $SEED"
+rm -f "$SEED.tmp"
+dd if=/dev/urandom bs=32 count=1 2>/dev/null > "$SEED.tmp"
+if [ "$(wc -c < "$SEED.tmp" 2>/dev/null || echo 0)" -eq 32 ]; then
+	mv "$SEED.tmp" "$SEED"; chmod 0600 "$SEED"
+	echo "bulkhead-seal: wrote 32-byte audit seed at $SEED"
 else
-	rm -f "$CRED.tmp"
-	echo "bulkhead-seal: ERROR sealing audit seed (no TPM / systemd-creds tpm2 unavailable)" >&2
-	exit 1
+	rm -f "$SEED.tmp"; echo "bulkhead-seal: ERROR provisioning seed" >&2; exit 1
 fi
