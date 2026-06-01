@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead agent jail (template). One instance == one agent == one cgroup.
+#
+# THE RACE, AND HOW IT IS CLOSED (no sleep, no poll, fail-closed):
+#   The per-agent egress manifest must be in the BPF map BEFORE the agent payload can
+#   call connect(). The payload cannot set it itself (DynamicUser + empty caps + a
+#   bpf()-EPERM seccomp filter make that physically impossible). So a `+`-prefixed
+#   ExecStartPre runs the trusted collector with FULL privileges (the `+` restores
+#   CAP_BPF for that one command, bypassing this unit's empty CapabilityBoundingSet),
+#   in THIS instance's own cgroup (so `egress set self` resolves to exactly the cgroup
+#   id the payload will run under). systemd runs ExecStartPre to completion and only
+#   forks ExecStart on exit 0 -> strict happens-before. If the write fails (collector
+#   down, bad class) the unit fails and the payload never launches: the agent never
+#   runs UNRESTRICTED, it simply does not run.
+#
+# Instances are started on demand (no [Install]); per-instance egress is set via a
+# bulkhead-agent@<id>.service.d/ drop-in (BULKHEAD_AGENT_EGRESS). The manifest only
+# BITES when E2 is armed (bulkhead-enforce-egress.service); default-observe per ADR-0004.
+[Unit]
+Description=bulkhead agent jail (%i)
+Documentation=https://github.com/mtclinton/bulkhead
+After=bulkhead-collector.service bulkhead-firewall.service
+Requires=bulkhead-collector.service
+
+[Service]
+Type=exec
+Slice=bulkhead-agent.slice
+
+# Default-deny manifest unless a per-instance drop-in overrides it (most-restrictive:
+# local IPC + loopback only, no outbound network).
+Environment=BULKHEAD_AGENT_EGRESS=loopback,other
+
+# --- RACE FIX: privileged manifest write in THIS cgroup, before the payload forks. ---
+ExecStartPre=+/usr/bin/bulkhead-collector egress set self ${BULKHEAD_AGENT_EGRESS}
+
+# --- the caged payload (MVP stub probe; the real agent runtime replaces it later) ---
+ExecStart=/usr/bin/bulkhead-agent-run %i
+
+# --- cgroup-inode-reuse hygiene: drop this cgroup's manifest on exit (+ for caps,
+#     leading - so a missing entry / down collector never fails the stop). ---
+ExecStopPost=-+/usr/bin/bulkhead-collector egress clear self
+
+# --- fail-closed hardening floor (the bulkhead-selftest/llama-server profile). ---
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
+SystemCallErrorNumber=EPERM
+# AF_UNIX kept so the `other` class (local IPC) is exercisable; AF_INET/6 for egress
+# that the BPF E2 manifest then gates per destination class.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+IPAddressDeny=any
+IPAddressAllow=localhost

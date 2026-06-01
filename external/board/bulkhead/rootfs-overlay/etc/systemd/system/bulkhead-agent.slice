@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Parent cgroup for all agent jails. Each bulkhead-agent@<id>.service instance gets its
+# own cgroup directory under this slice -> its own dir inode -> its own
+# bpf_get_current_cgroup_id(), which is exactly the key the BPF-LSM per-agent policy
+# maps (E1 ptrace, E2 egress manifest, E3 setuid/capset) are keyed on. This slice is
+# what turns those hooks from "verified against the console cgroup" into genuinely
+# per-agent enforcement.
+[Unit]
+Description=bulkhead agent jail slice (per-agent cgroup parent)
+Documentation=https://github.com/mtclinton/bulkhead
+Before=slices.target
+
+[Slice]
+# Coarse 2nd-layer egress firewall (systemd's cgroup/eBPF filter). This is independent
+# defense-in-depth that composes with the nftables host-wide floor and the BPF-LSM
+# per-agent E2 class manifest; it is NOT what closes the manifest-vs-connect race (exec
+# ordering in bulkhead-agent@.service does that). Only loopback is reachable here.
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+# Blast-radius caps for the whole agent population (tunable; not load-bearing for v1).
+TasksMax=512
+MemoryAccounting=yes

@@ -142,6 +142,7 @@ public egress at all; nftables still constrains *which* public IPs it may reach.
 - **Caveat:** because `socket_connect` also fires for AF_UNIX/AF_NETLINK, a manifest
   that omits `other` will deny local IPC for that cgroup once armed. Manifests for
   agents that need local sockets must include `other` (and usually `loopback`).
-- **Note:** the manifest keys on cgroup id; per-agent cgroups arrive with the
-  multi-agent runner. Until then the mechanism is exercised against any non-TCB
-  cgroup (e.g. a login-session scope), which is exactly how E2 was verified.
+- **Note:** the manifest keys on cgroup id. Per-agent cgroups are now realized by the
+  agent jail runner (ADR-0005, `bulkhead-agent@.service`), so E1/E2/E3 are genuinely
+  per-agent; E2 was first verified against a non-TCB login-session cgroup and is now
+  also driven through two real per-agent jails (ADR-0005's A-vs-B demo).

@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead-agent-run <instance> — MVP stub payload for a bulkhead agent jail.
+#
+# Runs INSIDE the per-agent cgroup + namespace + seccomp jail (bulkhead-agent@.service),
+# subject to the BPF-LSM per-agent egress manifest that the unit's +ExecStartPre set on
+# this cgroup. For v1 it just probes egress so per-agent E2 enforcement is observable
+# end to end; the real agent runtime replaces this later. It probes two destination
+# classes and logs each curl exit code:
+#   public  : https://api.anthropic.com/  (host floor allows it via the dnsmasq nftset,
+#             so a failure here is the BPF E2 manifest, not the nftables floor)
+#   loopback: http://127.0.0.1:5353/      (dnsmasq's TCP listener; never floor-dropped)
+# curl exit 7 == connect() returned EPERM == E2 denied this cgroup that destination class.
+id="${1:-?}"
+pub="${BULKHEAD_AGENT_PROBE:-https://api.anthropic.com/}"
+
+curl -s -o /dev/null --noproxy '*' --max-time 8 "$pub"
+rcp=$?
+curl -s -o /dev/null --noproxy '*' --max-time 4 http://127.0.0.1:5353/
+rcl=$?
+
+echo "bulkhead-agent[$id]: public(${pub}) rc=${rcp} ; loopback(127.0.0.1:5353) rc=${rcl}"
+exit 0

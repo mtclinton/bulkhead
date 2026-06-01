@@ -44,9 +44,18 @@ do_install() {
 	install -d ${D}${systemd_system_unitdir}
 	install -m0644 ${OV}/etc/systemd/system/*.service ${D}${systemd_system_unitdir}/
 	install -m0644 ${OV}/etc/systemd/system/*.mount   ${D}${systemd_system_unitdir}/
+	install -m0644 ${OV}/etc/systemd/system/*.slice   ${D}${systemd_system_unitdir}/
 	install -d ${D}${systemd_system_unitdir}/bulkhead-router.service.d
 	install -m0644 ${OV}/etc/systemd/system/bulkhead-router.service.d/*.conf \
 		${D}${systemd_system_unitdir}/bulkhead-router.service.d/
+
+	# Agent jail: per-instance egress drop-ins (the demo agents) + the stub payload.
+	for d in ${OV}/etc/systemd/system/bulkhead-agent@*.service.d; do
+		dn=$(basename "$d")
+		install -d ${D}${systemd_system_unitdir}/$dn
+		install -m0644 $d/*.conf ${D}${systemd_system_unitdir}/$dn/
+	done
+	install -Dm0755 ${OV}/usr/bin/bulkhead-agent-run ${D}${bindir}/bulkhead-agent-run
 
 	# Yocto-only: persist the collector audit log on /data (RO rootfs -> /var is volatile)
 	install -d ${D}${systemd_system_unitdir}/bulkhead-collector.service.d
@@ -62,6 +71,7 @@ do_install() {
 
 FILES:${PN} = "\
     ${systemd_system_unitdir} \
+    ${bindir}/bulkhead-agent-run \
     ${sysconfdir}/nftables.conf \
     ${localstatedir}/lib/bulkhead \
 "
