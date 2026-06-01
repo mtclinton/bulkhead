@@ -635,14 +635,23 @@ func openAuditLog() (*auditLog, error) {
 	return &auditLog{f: f, path: f.Name(), priv: priv, prevHash: make([]byte, sha256.Size)}, nil
 }
 
-// loadSigningKey reads a 32-byte Ed25519 seed from the systemd credential dir
-// (TPM-sealed in production); absent one, it generates an ephemeral key so the
-// chain is still verifiable for this boot.
+// loadSigningKey reads a 32-byte Ed25519 seed from the systemd credential dir. On the
+// appliance the seed is a TPM-sealed credential (ADR-0008) that systemd unseals into
+// CREDENTIALS_DIRECTORY via LoadCredentialEncrypted; a stable seed => a stable audit
+// identity across reboots, and a tampered/unsatisfied PCR policy makes systemd refuse to
+// pass it (the unit fails to start). Absent a credential it falls back to an ephemeral
+// per-boot key so non-TPM dev/Buildroot smoke tests still run — UNLESS
+// BULKHEAD_REQUIRE_SEALED_KEY=1, in which case it fails closed rather than ever signing
+// the provenance/decision chain with a throwaway key.
 func loadSigningKey() (ed25519.PrivateKey, error) {
 	if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
 		if seed, err := os.ReadFile(filepath.Join(dir, "audit-seed")); err == nil && len(seed) >= ed25519.SeedSize {
 			return ed25519.NewKeyFromSeed(seed[:ed25519.SeedSize]), nil
 		}
+	}
+	if os.Getenv("BULKHEAD_REQUIRE_SEALED_KEY") == "1" {
+		return nil, fmt.Errorf("sealed audit key unavailable (CREDENTIALS_DIRECTORY=%q): refusing to sign with an ephemeral key",
+			os.Getenv("CREDENTIALS_DIRECTORY"))
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

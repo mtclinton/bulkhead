@@ -79,4 +79,7 @@
   increment.
 - Protecting against a compromised TPM or a malicious physical attacker with
   arbitrary hardware access.
-- Measured boot / remote attestation (production / Yocto phase).
+- Remote attestation (deferred; the measured-boot PCRs + a TPM AK are the seam — ADR-0008).
+  The audit-log signing key is now TPM-sealed (ADR-0008, sealed to PCR 7, fail-closed); the
+  measured-boot infrastructure (OVMF/GRUB/kernel/systemd-pcrphase) is in place, with live
+  firmware PCR measurement validated on bare metal (qemu vTPM can't, per ADR-0001 #12).

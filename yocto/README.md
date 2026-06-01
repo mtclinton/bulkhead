@@ -23,9 +23,11 @@ sudo apt-get install -y gawk wget git diffstat unzip texinfo gcc build-essential
 ## Build flow
 
 ```sh
-yocto/scripts/fetch-yocto.sh                 # clone poky + meta-openembedded + meta-rauc @ scarthgap
+yocto/scripts/fetch-yocto.sh                 # clone poky + meta-openembedded + meta-rauc(+community) + meta-security @ scarthgap
 source yocto/poky/oe-init-build-env yocto/build
-bitbake-layers add-layer ../meta-openembedded/meta-oe ../meta-rauc ../../meta-bulkhead
+bitbake-layers add-layer ../meta-openembedded/meta-oe ../meta-openembedded/meta-python \
+  ../meta-openembedded/meta-networking ../meta-rauc ../meta-rauc-community/meta-rauc-qemux86 \
+  ../meta-security ../meta-security/meta-tpm ../../meta-bulkhead   # meta-security/meta-tpm: measured boot + sealed audit key (ADR-0008)
 # select the bulkhead distro + a machine (qemux86-64 to mirror the prototype):
 echo 'DISTRO = "bulkhead"'     >> conf/local.conf
 echo 'MACHINE = "qemux86-64"'  >> conf/local.conf

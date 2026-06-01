@@ -6,7 +6,9 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git \
            file://bulkhead-collector-data.conf \
-           file://bulkhead-broker-data.conf"
+           file://bulkhead-broker-data.conf \
+           file://bulkhead-seal-audit-key.service \
+           file://bulkhead-seal-audit-key"
 SRCREV = "7af393b3ed8145d75489be774a48074c8fea8eb6"
 S = "${WORKDIR}/git"
 
@@ -39,6 +41,7 @@ SYSTEMD_SERVICE:${PN} = "\
     mnt-tsauth.mount \
     var-lib-bulkhead-models.mount \
     bulkhead-broker.socket \
+    bulkhead-seal-audit-key.service \
 "
 SYSTEMD_AUTO_ENABLE = "enable"
 
@@ -70,6 +73,10 @@ do_install() {
 	install -m0644 ${WORKDIR}/bulkhead-broker-data.conf \
 		${D}${systemd_system_unitdir}/bulkhead-broker.service.d/10-data-persistence.conf
 
+	# Yocto-only: first-boot TPM sealing of the audit signing seed (ADR-0008)
+	install -m0644 ${WORKDIR}/bulkhead-seal-audit-key.service ${D}${systemd_system_unitdir}/
+	install -Dm0755 ${WORKDIR}/bulkhead-seal-audit-key ${D}${bindir}/bulkhead-seal-audit-key
+
 	# nftables default-deny egress floor
 	install -Dm0644 ${OV}/etc/nftables.conf ${D}${sysconfdir}/nftables.conf
 
@@ -80,6 +87,7 @@ do_install() {
 FILES:${PN} = "\
     ${systemd_system_unitdir} \
     ${bindir}/bulkhead-agent-run \
+    ${bindir}/bulkhead-seal-audit-key \
     ${sysconfdir}/nftables.conf \
     ${localstatedir}/lib/bulkhead \
 "

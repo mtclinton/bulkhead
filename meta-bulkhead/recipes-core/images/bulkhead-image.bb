@@ -19,6 +19,7 @@ IMAGE_INSTALL += " \
     rauc \
     dnsmasq \
     kernel-image \
+    tpm2-tools \
 "
 # kernel-image puts /boot/bzImage in each rootfs slot so GRUB can load it per-slot
 # (rauc.slot=A|B). No kernel-modules: the security floor + qemu's virtio/ext4/vfat
@@ -26,8 +27,9 @@ IMAGE_INSTALL += " \
 # lockdown LSM would block loading unsigned modules regardless — so they'd be ~500M
 # of dead weight. Any genuinely-needed driver becomes a built-in in the fragment.
 # rauc carries the system.conf + ca keyring (meta-rauc/meta-rauc-qemux86).
-# tpm2-tss (for sealed credentials) needs meta-security/meta-tpm — added with
-# the measured-boot/attestation hardening step.
+# tpm2-tools (+ its tpm2-tss dep) from meta-security/meta-tpm: guest-side PCR read and
+# the measured-boot event log check (ADR-0008). systemd[tpm2] (distro PACKAGECONFIG)
+# pulls the tpm2-tss runtime that unseals LoadCredentialEncrypted via the TPM.
 
 # --- RAUC A/B disk assembly (wic) ---
 # wic = the partitioned A/B disk; ext4 = the per-slot rootfs the bundle ships;

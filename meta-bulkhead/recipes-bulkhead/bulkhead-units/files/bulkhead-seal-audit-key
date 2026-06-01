@@ -1,0 +1,29 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# First-boot sealing of the audit-log signing seed (ADR-0008). tpm2 sealing binds to the
+# DEVICE's own TPM, so the seed cannot be sealed at image-build time on another machine —
+# it is generated and sealed HERE, once, then only the ciphertext persists on /data.
+#
+# Idempotent: if the sealed credential already exists, do nothing (later boots just
+# unseal it via LoadCredentialEncrypted, giving a stable signing identity). The plaintext
+# seed never touches disk — it is piped straight into systemd-creds. Sealed to PCR 7
+# (Secure Boot state), which is stable across RAUC A/B updates; perturbing the policy
+# (a tampered measurement) makes the unseal — and thus the collector — fail closed.
+set -eu
+CRED="/data/bulkhead/audit-seed.cred"
+
+[ -e "$CRED" ] && { echo "bulkhead-seal: $CRED already present; leaving it"; exit 0; }
+mkdir -p /data/bulkhead
+
+# 32 random bytes (an Ed25519 seed) -> sealed credential named 'audit-seed'. --tpm2-pcrs=7
+# binds it to the boot's Secure Boot state. Written atomically (.tmp then mv).
+if head -c 32 /dev/urandom | systemd-creds encrypt --name=audit-seed \
+        --with-key=tpm2 --tpm2-pcrs=7 - "$CRED.tmp" 2>/dev/null; then
+	mv "$CRED.tmp" "$CRED"
+	chmod 0600 "$CRED"
+	echo "bulkhead-seal: sealed audit seed to the TPM (PCR 7) at $CRED"
+else
+	rm -f "$CRED.tmp"
+	echo "bulkhead-seal: ERROR sealing audit seed (no TPM / systemd-creds tpm2 unavailable)" >&2
+	exit 1
+fi

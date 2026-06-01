@@ -26,7 +26,10 @@ clone https://github.com/rauc/meta-rauc                    meta-rauc
 # meta-rauc-community/meta-rauc-qemux86: the qemux86-64 GRUB A/B reference (wks,
 # grub.cfg/grubenv, boot-image, system.conf) that bulkhead's wic A/B build reuses.
 clone https://github.com/rauc/meta-rauc-community          meta-rauc-community
+# meta-security (contains meta-tpm): tpm2-tss/tpm2-tools + systemd[tpm2] runtime deps
+# for measured boot + the TPM-sealed audit key (ADR-0008).
+clone https://git.yoctoproject.org/meta-security            meta-security
 
 echo
-echo "Fetched poky + meta-openembedded + meta-rauc + meta-rauc-community @ $BRANCH"
+echo "Fetched poky + meta-openembedded + meta-rauc + meta-rauc-community + meta-security @ $BRANCH"
 echo "Next: see yocto/README.md to set up the build (bitbake-layers, distro, image)."
