@@ -63,6 +63,24 @@ We checked the premises (May 2026):
 - v1 scope is unaffected. Multi-provider is a roadmap increment, prioritized by
   real demand, not by the (debunked) cost premise.
 
+## Implemented
+
+OpenAI + Gemini land as a `Backend` interface (`src/router/provider.go`): Anthropic keeps
+its translation (`anthropicBackend`), OpenAI + Gemini share one `openAICompatBackend`
+(OpenAI-compatible passthrough — Gemini via its `/v1beta/openai` endpoint). `selectProvider`
+(route.go) picks the vendor by model prefix (`claude*`/`gpt*`/`o1,o3,o4*`/`gemini*`, else a
+configured `BULKHEAD_API_PROVIDER` default) and runs ONLY after `decide()` returned
+RouteAPI — so it picks the vendor, never the tier: the prompt-length denial-of-wallet gate
+is unchanged. Per-provider invariants preserved: key-from-file-only, `validateBase`
+host-pin over TLS (a key only reaches its own host), the single no-redirect client (no
+cross-host key exfil), req/resp caps, generic client errors, and a re-marshalled upstream
+body (`openAIUpstreamRequest`) that cannot leak the bulkhead-only `route` field. A missing
+provider key 503s that provider only. The dnsmasq→nftset egress allowlist gains
+per-provider sets for `api.openai.com` + `generativelanguage.googleapis.com` (nftables.conf
++ dnsmasq.conf + the pre-warm). Streaming stays uniformly rejected; seams left for
+per-provider model maps + streaming. Unit-tested (selection, denial-of-wallet, shaping, key
+isolation, no-redirect) + qemu egress-verified; keys are TPM-/credential-bound per ADR-0008.
+
 ## Sources
 
 - Anthropic pricing: <https://www.tldl.io/resources/anthropic-api-pricing>

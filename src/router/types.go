@@ -47,6 +47,18 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// openAIUpstreamRequest is the body sent to an OpenAI-compatible upstream (OpenAI /
+// Gemini). It deliberately MIRRORS ChatRequest minus the bulkhead-only Route field, so
+// that field can never leak upstream — re-marshalling ChatRequest directly would re-leak
+// it the moment someone removed an omitempty. Stream is always sent false.
+type openAIUpstreamRequest struct {
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	Stream      bool          `json:"stream"`
+}
+
 // ---- Anthropic Messages API types (the 'api' backend) ----
 
 type anthropicRequest struct {

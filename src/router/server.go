@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"time"
 )
 
 const (
@@ -18,26 +17,18 @@ const (
 )
 
 type server struct {
-	cfg  config
-	key  string
-	http *http.Client
+	cfg         config
+	providers   map[string]Backend // paid 'api' backends, by canonical name
+	defaultName string             // provider for an api request whose model matches no prefix
+	http        *http.Client       // shared no-redirect client (proxyLocal + every backend)
 }
 
-func newServer(cfg config, key string) *server {
-	return &server{
-		cfg: cfg,
-		key: key,
-		http: &http.Client{
-			Timeout: 120 * time.Second,
-			// Never follow redirects: Go does NOT strip custom headers (our
-			// x-api-key) when redirecting to another host, so a 30x from an
-			// upstream could exfiltrate the key. Neither backend legitimately
-			// redirects, so stopping at the first response is safe.
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+func newServer(cfg config, providers map[string]Backend, hc *http.Client) *server {
+	def := cfg.APIProvider
+	if def == "" {
+		def = "anthropic"
 	}
+	return &server{cfg: cfg, providers: providers, defaultName: def, http: hc}
 }
 
 func (s *server) routes() http.Handler {
@@ -101,7 +92,18 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	switch d.Route {
 	case RouteAPI:
-		s.proxyAnthropic(r.Context(), w, &req)
+		// Pick WHICH paid provider serves this api request. selectProvider runs ONLY
+		// here, after decide() already returned RouteAPI — it chooses the vendor, never
+		// the tier, so it cannot turn a short prompt into a paid call.
+		name := selectProvider(req.Model, s.defaultName)
+		p, ok := s.providers[name]
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "api provider unavailable")
+			return
+		}
+		w.Header().Set("X-Bulkhead-Provider", p.Name())
+		log.Printf("api provider=%s model=%q", p.Name(), req.Model)
+		p.Proxy(r.Context(), w, &req)
 	default:
 		s.proxyLocal(r.Context(), w, body)
 	}

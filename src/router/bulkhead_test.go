@@ -32,6 +32,17 @@ func doChat(t *testing.T, s *server, body string) *httptest.ResponseRecorder {
 	return rr
 }
 
+// anthropicOnly builds a server whose only paid backend is Anthropic (the v1 shape), so
+// the existing tests exercise the api route via the Anthropic provider unchanged.
+func anthropicOnly(cfg config, key string) *server {
+	hc := newNoRedirectClient()
+	p := map[string]Backend{"anthropic": &anthropicBackend{
+		key: key, base: cfg.AnthropicBase, version: cfg.AnthropicVersion,
+		model: cfg.ClaudeModel, maxTokens: cfg.AnthropicMaxTokens, hc: hc,
+	}}
+	return newServer(cfg, p, hc)
+}
+
 func TestDecideDowngradeOnly(t *testing.T) {
 	short := []ChatMessage{{Role: "user", Content: "hi"}}
 	long := []ChatMessage{{Role: "user", Content: strings.Repeat("x", 2500)}}
@@ -194,7 +205,7 @@ func TestHandleChatLocal(t *testing.T) {
 
 	cfg := configDefaults()
 	cfg.LlamaURL = llama.URL
-	rr := doChat(t, newServer(cfg, ""), `{"messages":[{"role":"user","content":"hello"}]}`)
+	rr := doChat(t, anthropicOnly(cfg, ""), `{"messages":[{"role":"user","content":"hello"}]}`)
 	if rr.Code != 200 {
 		t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
 	}
@@ -232,7 +243,7 @@ func TestHandleChatAPI(t *testing.T) {
 	cfg := configDefaults()
 	cfg.AnthropicBase = anth.URL
 	cfg.Threshold = 0 // force the api route via the length rule (route field can't force api)
-	rr := doChat(t, newServer(cfg, "sk-ant-TEST"),
+	rr := doChat(t, anthropicOnly(cfg, "sk-ant-TEST"),
 		`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"}]}`)
 	if rr.Code != 200 {
 		t.Fatalf("status %d body %s", rr.Code, rr.Body.String())
@@ -252,14 +263,14 @@ func TestHandleChatAPI(t *testing.T) {
 func TestHandleChatAPINoKey(t *testing.T) {
 	cfg := configDefaults()
 	cfg.Threshold = 0
-	rr := doChat(t, newServer(cfg, ""), `{"messages":[{"role":"user","content":"hi"}]}`)
+	rr := doChat(t, anthropicOnly(cfg, ""), `{"messages":[{"role":"user","content":"hi"}]}`)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d body %s", rr.Code, rr.Body.String())
 	}
 }
 
 func TestStreamRejected(t *testing.T) {
-	rr := doChat(t, newServer(configDefaults(), ""),
+	rr := doChat(t, anthropicOnly(configDefaults(), ""),
 		`{"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for stream, got %d", rr.Code)
@@ -268,7 +279,7 @@ func TestStreamRejected(t *testing.T) {
 
 // A client tagging route=api must NOT reach the paid tier (denial-of-wallet guard).
 func TestRouteCannotForceAPI(t *testing.T) {
-	rr := doChat(t, newServer(configDefaults(), "sk-ant-TEST"),
+	rr := doChat(t, anthropicOnly(configDefaults(), "sk-ant-TEST"),
 		`{"route":"api","messages":[{"role":"user","content":"hi"}]}`)
 	if rr.Header().Get("X-Bulkhead-Route") != "local" {
 		t.Fatalf("client forced paid tier: route=%s", rr.Header().Get("X-Bulkhead-Route"))
@@ -293,7 +304,7 @@ func TestNoRedirectKeyLeak(t *testing.T) {
 	cfg := configDefaults()
 	cfg.AnthropicBase = anth.URL
 	cfg.Threshold = 0
-	rr := doChat(t, newServer(cfg, "sk-ant-LEAKME"),
+	rr := doChat(t, anthropicOnly(cfg, "sk-ant-LEAKME"),
 		`{"messages":[{"role":"user","content":"hi"}]}`)
 	if n := atomic.LoadInt32(&evilHits); n != 0 {
 		t.Fatalf("redirect was followed (%d hits) — key may have leaked", n)
@@ -305,7 +316,7 @@ func TestNoRedirectKeyLeak(t *testing.T) {
 
 func TestBodyTooLarge(t *testing.T) {
 	big := strings.Repeat("a", (8<<20)+1024)
-	rr := doChat(t, newServer(configDefaults(), ""), big)
+	rr := doChat(t, anthropicOnly(configDefaults(), ""), big)
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d", rr.Code)
 	}

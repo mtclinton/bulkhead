@@ -95,34 +95,45 @@ func fromAnthropic(ar *anthropicResponse) ChatResponse {
 	}
 }
 
-// proxyAnthropic translates the request, calls the Anthropic Messages API with
-// the file-sourced key, and translates the response back to OpenAI shape. The
-// key is sent only as the x-api-key header, never logged, and the client never
-// redirects (see newServer). Upstream error detail is logged server-side, not
-// echoed to the caller.
-func (s *server) proxyAnthropic(ctx context.Context, w http.ResponseWriter, req *ChatRequest) {
-	if s.key == "" {
+// anthropicBackend is the Anthropic provider for the 'api' route. Unlike the OpenAI/
+// Gemini passthroughs it TRANSLATES (OpenAI <-> Anthropic Messages). It holds only its
+// own key + validated base + the shared no-redirect client.
+type anthropicBackend struct {
+	key, base, version, model string
+	maxTokens                 int
+	hc                        *http.Client
+}
+
+func (b *anthropicBackend) Name() string     { return "anthropic" }
+func (b *anthropicBackend) Configured() bool { return b.key != "" }
+
+// Proxy translates the request, calls the Anthropic Messages API with the file-sourced
+// key, and translates the response back to OpenAI shape. The key is sent only as the
+// x-api-key header to b.base, never logged, and the client never redirects (key-exfil
+// guard). Upstream error detail is logged server-side, not echoed to the caller.
+func (b *anthropicBackend) Proxy(ctx context.Context, w http.ResponseWriter, req *ChatRequest) {
+	if b.key == "" {
 		writeError(w, http.StatusServiceUnavailable, "Anthropic API key not configured")
 		return
 	}
-	ar := toAnthropic(req, s.cfg.ClaudeModel, s.cfg.AnthropicMaxTokens)
+	ar := toAnthropic(req, b.model, b.maxTokens)
 	if len(ar.Messages) == 0 {
 		writeError(w, http.StatusBadRequest, "no user or assistant messages")
 		return
 	}
 	payload, _ := json.Marshal(ar)
 
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.AnthropicBase+"/v1/messages", bytes.NewReader(payload))
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.base+"/v1/messages", bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("anthropic: build request: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	hreq.Header.Set("content-type", "application/json")
-	hreq.Header.Set("x-api-key", s.key)
-	hreq.Header.Set("anthropic-version", s.cfg.AnthropicVersion)
+	hreq.Header.Set("x-api-key", b.key)
+	hreq.Header.Set("anthropic-version", b.version)
 
-	resp, err := s.http.Do(hreq)
+	resp, err := b.hc.Do(hreq)
 	if err != nil {
 		log.Printf("anthropic: upstream unreachable: %v", err)
 		writeError(w, http.StatusBadGateway, "upstream API unavailable")

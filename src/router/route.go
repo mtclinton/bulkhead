@@ -1,10 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 package main
 
+import "strings"
+
 // Decision is the outcome of the routing rule.
 type Decision struct {
 	Route  Route
 	Reason string
+}
+
+// selectProvider chooses WHICH paid provider serves a request, by model-name prefix with
+// a configured default. It is called ONLY after decide() has returned RouteAPI, so it can
+// never turn a short prompt into a paid call — it picks the vendor, never the tier
+// (preserving the denial-of-wallet guard). An explicit o1/o3/o4 list (not a bare "o"
+// prefix) avoids mis-routing unrelated model names.
+func selectProvider(model, def string) string {
+	switch m := strings.ToLower(strings.TrimSpace(model)); {
+	case strings.HasPrefix(m, "claude"):
+		return "anthropic"
+	case strings.HasPrefix(m, "gpt"),
+		strings.HasPrefix(m, "o1"), strings.HasPrefix(m, "o3"), strings.HasPrefix(m, "o4"):
+		return "openai"
+	case strings.HasPrefix(m, "gemini"):
+		return "gemini"
+	default:
+		return def
+	}
 }
 
 // promptLen approximates request size as the total characters of message
