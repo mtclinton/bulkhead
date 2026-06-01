@@ -5,7 +5,8 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git \
-           file://bulkhead-collector-data.conf"
+           file://bulkhead-collector-data.conf \
+           file://bulkhead-broker-data.conf"
 SRCREV = "253693e89397184e4850801f1e054b29ceddd744"
 S = "${WORKDIR}/git"
 
@@ -63,6 +64,11 @@ do_install() {
 	install -d ${D}${systemd_system_unitdir}/bulkhead-collector.service.d
 	install -m0644 ${WORKDIR}/bulkhead-collector-data.conf \
 		${D}${systemd_system_unitdir}/bulkhead-collector.service.d/10-data-persistence.conf
+
+	# Yocto-only: persist the broker's signed approval-decision log on /data
+	install -d ${D}${systemd_system_unitdir}/bulkhead-broker.service.d
+	install -m0644 ${WORKDIR}/bulkhead-broker-data.conf \
+		${D}${systemd_system_unitdir}/bulkhead-broker.service.d/10-data-persistence.conf
 
 	# nftables default-deny egress floor
 	install -Dm0644 ${OV}/etc/nftables.conf ${D}${sysconfdir}/nftables.conf

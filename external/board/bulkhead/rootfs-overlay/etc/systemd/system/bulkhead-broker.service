@@ -21,8 +21,12 @@ AmbientCapabilities=CAP_BPF
 CapabilityBoundingSet=CAP_BPF
 NoNewPrivileges=yes
 ProtectSystem=strict
-# The only writable hole it needs: the child's transient egress drop-in.
-ReadWritePaths=/run/systemd/system
+# Writable holes: the child's transient egress drop-in, the operator control socket
+# (/run/bulkhead/approve.sock, created by the broker at 0600), and its own signed
+# decision log under the state dir.
+ReadWritePaths=/run/systemd/system /run/bulkhead
+StateDirectory=bulkhead
+Environment=BULKHEAD_AUDIT_DIR=/var/lib/bulkhead/audit-broker
 ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelModules=yes

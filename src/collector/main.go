@@ -182,6 +182,8 @@ func main() {
 		cmdBroker()
 	case "delegate":
 		cmdDelegate(os.Args[2:])
+	case "approve":
+		cmdApprove(os.Args[2:])
 	case "status":
 		cmdStatus()
 	default:
@@ -190,7 +192,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|broker|delegate <child-suffix> <classes>|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|broker|delegate <child-suffix> <classes>|approve list|allow <id>|deny <id>|status")
 	os.Exit(2)
 }
 
