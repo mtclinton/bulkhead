@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Activation socket for the inter-agent delegation broker (ADR-0006). A jailed agent
+# connects here (AF_UNIX, class 'other') to ask for a child; the broker attests the
+# caller's cgroup from the kernel. SocketMode=0666 is safe: authorization is PURELY the
+# kernel-attested peer cgroup (SO_PEERPIDFD) — a non-agent connector maps to a non-agent
+# cgroup and is rejected. RuntimeDirectory makes /run/bulkhead (0755, traversable).
+[Unit]
+Description=bulkhead inter-agent delegation broker socket
+Documentation=https://github.com/mtclinton/bulkhead
+
+[Socket]
+ListenStream=/run/bulkhead/broker.sock
+SocketMode=0666
+RuntimeDirectory=bulkhead
+RemoveOnStop=yes
+Accept=no
+
+[Install]
+WantedBy=sockets.target

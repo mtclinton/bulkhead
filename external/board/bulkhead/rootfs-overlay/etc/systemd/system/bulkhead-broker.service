@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Inter-agent egress delegation broker (ADR-0006). Socket-activated by
+# bulkhead-broker.socket. Computes child = parent ∩ requested (narrow-never-widen) and
+# launches the child as a normal bulkhead-agent@ instance, so ADR-0005's verified
+# +ExecStartPre ordering closes the connect-vs-manifest race. TCB but caged.
+[Unit]
+Description=bulkhead inter-agent delegation broker
+Documentation=https://github.com/mtclinton/bulkhead
+After=bulkhead-collector.service
+Requires=bulkhead-collector.service
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/bulkhead-collector broker
+# TCB side: read the pinned egress_policy/tcb_cgroups maps (CAP_BPF) and self-register
+# this unit's cgroup into tcb_cgroups (so its bpf() survives E0 and its IPC is E2-exempt);
+# launch child jails by asking PID-1 (root over the private bus). NB: self-registration
+# needs E0 OFF at first run — the MVP default (see ADR-0006).
+User=root
+AmbientCapabilities=CAP_BPF
+CapabilityBoundingSet=CAP_BPF
+NoNewPrivileges=yes
+ProtectSystem=strict
+# The only writable hole it needs: the child's transient egress drop-in.
+ReadWritePaths=/run/systemd/system
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+# Broker speaks only AF_UNIX (its activation socket, PID-1's private bus) + reads /proc;
+# it NEVER makes outbound network connections.
+RestrictAddressFamilies=AF_UNIX
+MemoryDenyWriteExecute=no
+# No [Install]: started on demand by bulkhead-broker.socket.

@@ -37,6 +37,7 @@ SYSTEMD_SERVICE:${PN} = "\
     tailscale-up.service \
     mnt-tsauth.mount \
     var-lib-bulkhead-models.mount \
+    bulkhead-broker.socket \
 "
 SYSTEMD_AUTO_ENABLE = "enable"
 
@@ -45,6 +46,7 @@ do_install() {
 	install -m0644 ${OV}/etc/systemd/system/*.service ${D}${systemd_system_unitdir}/
 	install -m0644 ${OV}/etc/systemd/system/*.mount   ${D}${systemd_system_unitdir}/
 	install -m0644 ${OV}/etc/systemd/system/*.slice   ${D}${systemd_system_unitdir}/
+	install -m0644 ${OV}/etc/systemd/system/*.socket  ${D}${systemd_system_unitdir}/
 	install -d ${D}${systemd_system_unitdir}/bulkhead-router.service.d
 	install -m0644 ${OV}/etc/systemd/system/bulkhead-router.service.d/*.conf \
 		${D}${systemd_system_unitdir}/bulkhead-router.service.d/

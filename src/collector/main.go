@@ -178,6 +178,10 @@ func main() {
 		cmdEgress(os.Args[2:])
 	case "probe":
 		cmdProbe(os.Args[2:])
+	case "broker":
+		cmdBroker()
+	case "delegate":
+		cmdDelegate(os.Args[2:])
 	case "status":
 		cmdStatus()
 	default:
@@ -186,7 +190,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|broker|delegate <child-suffix> <classes>|status")
 	os.Exit(2)
 }
 

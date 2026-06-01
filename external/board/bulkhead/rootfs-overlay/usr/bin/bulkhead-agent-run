@@ -14,6 +14,18 @@
 id="${1:-?}"
 pub="${BULKHEAD_AGENT_PROBE:-https://api.anthropic.com/}"
 
+# Delegation (ADR-0006): if BULKHEAD_AGENT_DELEGATE is set this agent acts as a PARENT
+# and asks the broker to spawn a child whose egress = parent ∩ requested. The connect to
+# the broker originates from THIS parent's cgroup, so the broker attests the parent
+# ceiling from the kernel — the request body carries no identity to forge. The OK line
+# (printed here) names the broker-minted child instance, which the child then probes.
+if [ -n "${BULKHEAD_AGENT_DELEGATE:-}" ]; then
+	echo "bulkhead-agent[$id]: delegating -> ${BULKHEAD_AGENT_DELEGATE}"
+	bulkhead-collector delegate ${BULKHEAD_AGENT_DELEGATE}
+	echo "bulkhead-agent[$id]: delegate rc=$?"
+	exit 0
+fi
+
 curl -s -o /dev/null --noproxy '*' --max-time 8 "$pub"
 rcp=$?
 curl -s -o /dev/null --noproxy '*' --max-time 4 http://127.0.0.1:5353/
