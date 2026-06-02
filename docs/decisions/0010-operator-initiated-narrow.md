@@ -104,6 +104,17 @@ The clamp is live map state: a restart re-applies the agent's configured manifes
 drop-in. No new BPF/map; the verified E0-E3 object is byte-for-byte unchanged; no new
 systemd unit.
 
+## Broker availability (prerequisite)
+
+`narrow` (like `approve list|allow|deny`) talks to `approve.sock`, which the broker creates
+on startup. The broker is currently socket-activated by the *delegation* socket, so in a
+narrow-only flow (no preceding agent delegate/expand) it may not be running. For incident
+response the broker must be up independently of agent traffic; a deployment runs
+`bulkhead-broker.service` always-on (or socket-activates `approve.sock` separately). The
+qemu harness starts the broker explicitly before the operator commands. Making the broker
+always-on is a clean follow-up to the ADR-0006/0007 socket-activation model and is **not**
+done here.
+
 ## Seam left clean
 
 Narrow is operator-direct via `recordDecision`/`recordNarrow`; it deliberately does NOT

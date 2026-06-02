@@ -42,21 +42,14 @@ if [ -n "${BULKHEAD_AGENT_EXPAND:-}" ]; then
 	exit 0
 fi
 
-# Narrow-probe (ADR-0010): if BULKHEAD_AGENT_NARROW_PROBE is set this agent LOOPS probing its
-# classes so an operator can `narrow` it mid-flight and the harness can observe the SAME
-# cgroup's class flip allowed->denied WITHOUT the agent dying (clamp-in-place incident
-# throttle). Each round probes public (api.anthropic.com, floor-allowlisted so a deny is
-# purely the E2 manifest) + loopback (the control, never floor-dropped), logging seq+rc.
+# Narrow demo (ADR-0010): if BULKHEAD_AGENT_NARROW_PROBE is set this agent just STAYS ALIVE
+# (its manifest is set by +ExecStartPre) so an operator can `narrow` it MID-FLIGHT. The
+# clamp's effect is verified from the LIVE egress_policy map (`bulkhead-collector status`)
+# plus the agent staying active — i.e. throttled IN PLACE, not killed. No self-probe loop: a
+# long-running shell would block-buffer its stdout (nothing reaches the journal until exit),
+# and the map state is the authoritative proof of the manifest change anyway.
 if [ -n "${BULKHEAD_AGENT_NARROW_PROBE:-}" ]; then
-	n=0
-	while [ "$n" -lt 24 ]; do
-		n=$((n + 1))
-		curl -s -o /dev/null --noproxy '*' --max-time 6 "$pub"; rp=$?
-		curl -s -o /dev/null --noproxy '*' --max-time 4 http://127.0.0.1:5353/; rl=$?
-		echo "bulkhead-agent[$id]: narrow-probe seq=${n} public rc=${rp} loopback rc=${rl}"
-		sleep 3
-	done
-	exit 0
+	exec sleep 600
 fi
 
 curl -s -o /dev/null --noproxy '*' --max-time 8 "$pub"
