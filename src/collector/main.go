@@ -186,6 +186,8 @@ func main() {
 		cmdExpand(os.Args[2:])
 	case "approve":
 		cmdApprove(os.Args[2:])
+	case "verify-audit":
+		cmdVerifyAudit(os.Args[2:])
 	case "status":
 		cmdStatus()
 	default:
@@ -194,7 +196,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
 	os.Exit(2)
 }
 
@@ -634,7 +636,15 @@ func openAuditLog() (*auditLog, error) {
 		f.Close()
 		return nil, err
 	}
-	return &auditLog{f: f, path: f.Name(), priv: priv, prevHash: make([]byte, sha256.Size)}, nil
+	a := &auditLog{f: f, path: f.Name(), priv: priv, prevHash: make([]byte, sha256.Size)}
+	// F5: export the public key beside the chain so it can be verified OFFLINE (ship the
+	// log + this pubkey off-box; `verify-audit <chain> @audit-pub.txt`). Best-effort — the
+	// chain itself is the critical path, and the on-box boot gate verifies against the
+	// SEALED seed (which an attacker cannot rewrite to match a forged chain), not this file.
+	if err := os.WriteFile(filepath.Join(dir, "audit-pub.txt"), []byte(a.pubHex()+"\n"), 0o644); err != nil {
+		log.Printf("audit: export public key: %v", err)
+	}
+	return a, nil
 }
 
 // loadSigningKey reads a 32-byte Ed25519 seed from the systemd credential dir. On the
