@@ -5,7 +5,7 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-SRCREV = "697d67b89f16c3bcbc318c78ab1ceeedfcda7b90"
+SRCREV = "8e7bb9a044bff8352db021086da413450f3f88a7"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"

@@ -13,6 +13,14 @@
 Description=bulkhead first-boot provisioning of the audit signing seed
 Documentation=https://github.com/mtclinton/bulkhead
 RequiresMountsFor=/data
+# F6: /data is fstab `nofail`, so a missing/failed data partition does NOT block boot —
+# but it MUST block sealing. Without this guard the seed would be written to whatever
+# /data resolves to while unmounted (an empty dir on the read-only rootfs, or an ephemeral
+# tmpfs), and a present-but-ephemeral seed would masquerade as the persistent sealed key.
+# Refuse to provision unless /data is a genuine mount; if it isn't, no seed is written and
+# the collector/broker fail closed (missing credential + BULKHEAD_REQUIRE_SEALED_KEY=1)
+# rather than signing the audit chain with an ephemeral key. The box still boots (nofail).
+ConditionPathIsMountPoint=/data
 Before=bulkhead-collector.service bulkhead-broker.service
 
 [Service]

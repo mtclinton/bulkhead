@@ -8,8 +8,10 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-collector-data.conf \
            file://bulkhead-broker-data.conf \
            file://bulkhead-seal-audit-key.service \
-           file://bulkhead-seal-audit-key"
-SRCREV = "08739af189a139028d22451ae245206b7447eb1a"
+           file://bulkhead-seal-audit-key \
+           file://bulkhead-verify-audit.service \
+           file://bulkhead-selftest-verify.conf"
+SRCREV = "8e7bb9a044bff8352db021086da413450f3f88a7"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
@@ -42,6 +44,7 @@ SYSTEMD_SERVICE:${PN} = "\
     var-lib-bulkhead-models.mount \
     bulkhead-broker.socket \
     bulkhead-seal-audit-key.service \
+    bulkhead-verify-audit.service \
 "
 SYSTEMD_AUTO_ENABLE = "enable"
 
@@ -76,6 +79,13 @@ do_install() {
 	# Yocto-only: first-boot TPM sealing of the audit signing seed (ADR-0008)
 	install -m0644 ${WORKDIR}/bulkhead-seal-audit-key.service ${D}${systemd_system_unitdir}/
 	install -Dm0755 ${WORKDIR}/bulkhead-seal-audit-key ${D}${bindir}/bulkhead-seal-audit-key
+
+	# Yocto-only: audit-chain verification boot gate (F5) + drop-in folding it into the
+	# selftest gate (so a broken/forged chain refuses the boot).
+	install -m0644 ${WORKDIR}/bulkhead-verify-audit.service ${D}${systemd_system_unitdir}/
+	install -d ${D}${systemd_system_unitdir}/bulkhead-selftest.service.d
+	install -m0644 ${WORKDIR}/bulkhead-selftest-verify.conf \
+		${D}${systemd_system_unitdir}/bulkhead-selftest.service.d/10-verify-chain.conf
 
 	# nftables default-deny egress floor
 	install -Dm0644 ${OV}/etc/nftables.conf ${D}${sysconfdir}/nftables.conf

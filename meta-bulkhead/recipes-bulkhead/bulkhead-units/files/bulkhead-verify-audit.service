@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# F5: boot-time verification of the persisted, signed audit chains. The collector and broker
+# Ed25519-sign every record over a SHA-256 hash chain (ADR-0008); this unit is the missing
+# reader — it recomputes the canonical encoding, hash, prev-hash linkage and signature for
+# every record persisted on /data from prior boots, BEFORE the collector/broker append new
+# records. A tampered or forged chain fails this unit; the selftest gate Requires= it (via a
+# Yocto drop-in), so a broken chain refuses the boot.
+#
+# Verifies against the SEALED seed (LoadCredential audit-seed -> sealedAuditPub), NOT the
+# exported audit-pub.txt: an attacker who rewrites a chain can also rewrite a sibling pubkey
+# file, but cannot forge a signature under the sealed/persistent seed. Runs as root (the
+# chains are 0600, owned by the collector/broker DynamicUser uids, and the seed credential
+# is 0400) — it only READS, holds no capabilities, and writes nothing.
+#
+# Yocto-only (needs /data + the sealed seed). ConditionPathIsMountPoint=/data mirrors the
+# seal service (F6): no real /data => nothing trustworthy to verify, skip and let the
+# collector fail closed on the missing sealed key rather than hard-failing the boot here.
+[Unit]
+Description=bulkhead audit-chain verification (boot gate)
+Documentation=https://github.com/mtclinton/bulkhead
+RequiresMountsFor=/data
+ConditionPathIsMountPoint=/data
+After=bulkhead-seal-audit-key.service
+Requires=bulkhead-seal-audit-key.service
+Before=bulkhead-collector.service bulkhead-broker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Same sealed seed the signer uses -> verify-audit derives the public key from it.
+LoadCredential=audit-seed:/data/bulkhead/audit-seed
+ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit/provenance.jsonl
+ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit-broker/provenance.jsonl
+User=root
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
