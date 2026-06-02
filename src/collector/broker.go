@@ -261,7 +261,7 @@ func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f [
 		reply("ERR no-parent-manifest")
 		return
 	}
-	childMask := parentMask & reqMask // NARROW-never-widen: bitwise AND only clears bits
+	childMask := parentMask & reqMask // request-time view; ADVISORY (re-derived in execute)
 	p := &pending{
 		kind: actDelegate, parentCgID: parentCgID, parentPath: parentPath, suffix: suffix,
 		instance: "d-" + randHex8() + "-" + suffix, reqMask: reqMask, childMask: childMask,
@@ -271,10 +271,22 @@ func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f [
 	p.execute = func(p *pending) (string, error) {
 		launchMu.Lock()
 		defer launchMu.Unlock()
-		if err := launchChild(p.instance, classNames(p.childMask)); err != nil {
+		// F3: re-derive from LIVE parent state after the gate. If the parent exited and its
+		// cgroup recycled, or it NARROWED its own manifest during the approval gap, the
+		// request-time childMask is stale and could over-grant. Re-stat the parent's identity
+		// and re-read its live mask; recompute child = liveParent ∩ requested. Fail closed.
+		if err := reverifyCgroup(p.parentPath, p.parentCgID); err != nil {
 			return "", err
 		}
-		return p.instance + " " + classNames(p.childMask), nil
+		liveParent, err := lookupEgressMask(p.parentCgID)
+		if err != nil {
+			return "", fmt.Errorf("parent manifest vanished: %w", err)
+		}
+		liveChild := liveParent & p.reqMask
+		if err := launchChild(p.instance, classNames(liveChild)); err != nil {
+			return "", err
+		}
+		return p.instance + " " + classNames(liveChild), nil
 	}
 	_ = conn.SetDeadline(time.Now().Add(approvalTimeout + 15*time.Second))
 	finishGated(conn, p)
@@ -318,6 +330,12 @@ func handleExpandTail(conn net.Conn, agentCgID uint64, agentPath string, f []str
 		reqMask: reqMask, curMask: curMask, created: time.Now(),
 	}
 	p.execute = func(p *pending) (string, error) {
+		// F1: re-bind identity to the LIVE cgroup before touching its manifest. UpdateExist
+		// is necessary but NOT sufficient — if cgID was recycled onto a new agent that wrote
+		// its own manifest, UpdateExist succeeds and we widen the WRONG agent. Re-stat first.
+		if err := reverifyCgroup(p.parentPath, cgID); err != nil {
+			return "", err
+		}
 		m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "egress_policy"), nil)
 		if err != nil {
 			return "", err
@@ -344,15 +362,24 @@ func finishGated(conn net.Conn, p *pending) {
 	reply := func(s string) { fmt.Fprintln(conn, s) }
 	ok, verdict := approve(p)
 	if !ok {
-		reply("ERR " + verdict) // deny | timeout | busy — no side effect
+		// deny | timeout | busy — no side effect ran; record the (non-)decision.
+		recordDecision(p, verdict, p.operator, "(not applied)")
+		reply("ERR " + verdict)
 		return
 	}
+	// execute() re-derives the live kernel/map state under the attested identity and
+	// fails closed on any mismatch (cgroup recycle, parent narrowed) — request-time
+	// captures are advisory only. The signed record below is written AFTER the side
+	// effect and reflects what was ACTUALLY applied, so the audit can neither claim a
+	// widen that did not land nor miss one that did.
 	detail, err := p.execute(p)
 	if err != nil {
 		log.Printf("broker: execute %s id=%d: %v", p.kind, p.id, err)
+		recordDecision(p, "error", p.operator, "(execute failed: "+err.Error()+")")
 		reply("ERR exec")
 		return
 	}
+	recordDecision(p, verdict, p.operator, detail)
 	log.Printf("broker: %s cg=%d -> %s [operator %s]", p.kind, p.parentCgID, detail, p.operator)
 	reply("OK " + detail)
 }
@@ -432,6 +459,27 @@ func cgroupPathFromBytes(data []byte) string {
 	return ""
 }
 
+// reverifyCgroup re-binds the requester's identity at execute() time. SO_PEERPIDFD attested
+// (want, path) at REQUEST time, but the operator gate opens a human-paced gap during which
+// the agent can exit and its cgroup inode can be RECYCLED onto a different live agent at the
+// same path (a restart) or the path can vanish. We re-stat the path and demand the live
+// cgroup id still equals the attested one — request-time captures are advisory; only this
+// live re-derivation may be trusted to drive a side effect. Fail-closed: a vanished path or
+// any id mismatch returns an error and execute() applies NOTHING. This is the single rule
+// that closes the F1 (expand widens wrong agent) / F3 (delegate off a recycled parent)
+// inode-identity cluster; ebpf.UpdateExist alone does NOT (it refuses only to CREATE a
+// missing key — it happily writes a recycled key that a new agent's ExecStartPre populated).
+func reverifyCgroup(path string, want uint64) error {
+	live, err := cgroupIDFromInode(filepath.Join("/sys/fs/cgroup", path))
+	if err != nil {
+		return fmt.Errorf("requester cgroup gone (%s): %w", path, err)
+	}
+	if live != want {
+		return fmt.Errorf("requester cgroup recycled (%s: live=%d attested=%d)", path, live, want)
+	}
+	return nil
+}
+
 func lookupEgressMask(cgID uint64) (uint32, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "egress_policy"), nil)
 	if err != nil {
@@ -494,13 +542,13 @@ func launchChild(instance, classes string) error {
 // the verdict exactly-once); fail-closed on every non-approve path.
 func approve(p *pending) (bool, string) {
 	if !register(p) {
-		recordDecision(p, "deny", "broker:flood")
-		return false, "busy"
+		return false, "busy" // flood; finishGated records it (no side effect ran)
 	}
 	timer := time.AfterFunc(approvalTimeout, func() { resolve(p.id, false, "timeout", "-") })
 	ok := <-p.decision // single source of truth; verdict/operator set under lock before the send
 	timer.Stop()
-	recordDecision(p, p.verdict, p.operator)
+	// NB: recording is done by finishGated AFTER execute(), so the signed record reflects
+	// the ACTUALLY-APPLIED state + the re-verified identity (not the request-time capture).
 	return ok, p.verdict
 }
 
@@ -629,24 +677,27 @@ func handleApprove(conn net.Conn) {
 }
 
 // recordDecision appends one signed record to the broker's OWN chain (never the
-// collector's). Overloads provEvent's 6 fields: cgroup=parent, comm=child instance,
-// hook="delegate", decision=verdict, mode="<operator> <req>-><grant>".
-func recordDecision(p *pending, verdict, operator string) {
+// collector's). Overloads provEvent's 6 fields: cgroup=requester, comm=child instance/self,
+// hook=kind, decision=verdict, mode="<operator> req=<requested> applied=<actual>".
+//
+// Called exactly once per request, by finishGated AFTER execute(). `applied` is execute()'s
+// returned detail — the ACTUALLY-applied grant — or "(not applied)"/"(execute failed: …)"
+// when no side effect landed. The record therefore reflects what the kernel/map state truly
+// became (F4), never the request-time intent, and never a widen that was refused by the
+// execute()-time re-verification (F1/F3).
+func recordDecision(p *pending, verdict, operator, applied string) {
 	if brokerAL == nil {
 		return
 	}
-	// Overload provEvent's fields per action kind; canonical()/the chain are untouched.
 	hook := string(p.kind)
 	comm := p.instance // delegate: the minted child instance
-	mode := fmt.Sprintf("%s %s->%s", operator, classNames(p.reqMask), classNames(p.childMask))
 	if p.kind == actExpandEgress {
 		comm = "self"
-		mode = fmt.Sprintf("%s %s|%s->%s", operator, classNames(p.curMask),
-			classNames(p.reqMask), classNames(expandMask(p.curMask, p.reqMask, expandCeiling)))
 	}
 	if len(comm) > 16 {
 		comm = comm[:16]
 	}
+	mode := fmt.Sprintf("%s req=%s applied=%s", operator, classNames(p.reqMask), applied)
 	ev := provEvent{CgroupID: p.parentCgID, PID: 0, Comm: comm, Hook: hook, Decision: verdict, Mode: mode}
 	if err := brokerAL.append(ev); err != nil {
 		log.Printf("broker: decision audit append: %v", err)

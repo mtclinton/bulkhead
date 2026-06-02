@@ -7,9 +7,31 @@
 package main
 
 import (
+	"path/filepath"
 	"sync"
 	"testing"
 )
+
+// TestReverifyCgroupRebindsIdentity guards the F1/F3 re-binding: at execute() time the
+// requester's attested cgroup id must still match the LIVE inode at its path, or the action
+// fails closed (recycle onto a new agent, or a vanished cgroup). Exercised against the
+// cgroup root, which always exists on a cgroup-v2 host.
+func TestReverifyCgroupRebindsIdentity(t *testing.T) {
+	const root = "" // filepath.Join("/sys/fs/cgroup", "") -> /sys/fs/cgroup
+	live, err := cgroupIDFromInode(filepath.Join("/sys/fs/cgroup", root))
+	if err != nil {
+		t.Skipf("no cgroupfs on build host: %v", err)
+	}
+	if err := reverifyCgroup(root, live); err != nil {
+		t.Fatalf("reverify of the live id must pass: %v", err)
+	}
+	if err := reverifyCgroup(root, live+1); err == nil {
+		t.Fatal("reverify of a recycled (mismatched) id must fail closed")
+	}
+	if err := reverifyCgroup("/bulkhead-nonexistent.slice/nope.service", live); err == nil {
+		t.Fatal("reverify of a vanished path must fail closed")
+	}
+}
 
 // resetPend clears the global registry between tests.
 func resetPend() {
