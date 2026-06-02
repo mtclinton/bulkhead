@@ -21,6 +21,17 @@ type bpfEvent struct {
 	Mode     uint32
 }
 
+type bpfGrantKey struct {
+	Cgid uint64
+	Hook uint32
+	Pad  uint32
+}
+
+type bpfGrantVal struct {
+	Count    uint64
+	ExpireNs uint64
+}
+
 // loadBpf returns the embedded CollectionSpec for bpf.
 func loadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)
@@ -77,6 +88,7 @@ type bpfMapSpecs struct {
 	EgressPolicy *ebpf.MapSpec `ebpf:"egress_policy"`
 	EnforceFlags *ebpf.MapSpec `ebpf:"enforce_flags"`
 	Events       *ebpf.MapSpec `ebpf:"events"`
+	GrantOnce    *ebpf.MapSpec `ebpf:"grant_once"`
 	TcbCgroups   *ebpf.MapSpec `ebpf:"tcb_cgroups"`
 }
 
@@ -110,6 +122,7 @@ type bpfMaps struct {
 	EgressPolicy *ebpf.Map `ebpf:"egress_policy"`
 	EnforceFlags *ebpf.Map `ebpf:"enforce_flags"`
 	Events       *ebpf.Map `ebpf:"events"`
+	GrantOnce    *ebpf.Map `ebpf:"grant_once"`
 	TcbCgroups   *ebpf.Map `ebpf:"tcb_cgroups"`
 }
 
@@ -118,6 +131,7 @@ func (m *bpfMaps) Close() error {
 		m.EgressPolicy,
 		m.EnforceFlags,
 		m.Events,
+		m.GrantOnce,
 		m.TcbCgroups,
 	)
 }

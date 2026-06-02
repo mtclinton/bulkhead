@@ -42,6 +42,25 @@ if [ -n "${BULKHEAD_AGENT_EXPAND:-}" ]; then
 	exit 0
 fi
 
+# Grant-once demo (ADR-0011): if BULKHEAD_AGENT_GRANT=<ptrace|setuid|capset> is set, this agent
+# proves the kernel-enforced one-shot privilege grant for that E1/E3 op: probe (expect DENY
+# while armed) -> request a one-shot grant (blocks for operator approval) -> probe (expect the
+# SINGLE granted ALLOW) -> probe again (expect DENY: consumed exactly once). Each probe's rc is
+# logged for the harness (0=allowed, 1=denied, 3=setup). Like @expander, all in this cgroup.
+if [ -n "${BULKHEAD_AGENT_GRANT:-}" ]; then
+	op="${BULKHEAD_AGENT_GRANT}"
+	bulkhead-collector probe "$op" >/dev/null 2>&1; b=$?
+	echo "bulkhead-agent[$id]: pre-grant ${op} rc=${b}"
+	echo "bulkhead-agent[$id]: requesting grant-once ${op}"
+	bulkhead-collector grant-once "$op"; g=$?
+	echo "bulkhead-agent[$id]: grant-once rc=${g}"
+	bulkhead-collector probe "$op" >/dev/null 2>&1; a1=$?
+	echo "bulkhead-agent[$id]: post-grant ${op} rc=${a1}"
+	bulkhead-collector probe "$op" >/dev/null 2>&1; a2=$?
+	echo "bulkhead-agent[$id]: second ${op} rc=${a2}"
+	exit 0
+fi
+
 # Narrow demo (ADR-0010): if BULKHEAD_AGENT_NARROW_PROBE is set this agent just STAYS ALIVE
 # (its manifest is set by +ExecStartPre) so an operator can `narrow` it MID-FLIGHT. The
 # clamp's effect is verified from the LIVE egress_policy map (`bulkhead-collector status`)

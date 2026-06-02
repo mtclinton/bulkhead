@@ -35,6 +35,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -188,6 +189,8 @@ func main() {
 		cmdApprove(os.Args[2:])
 	case "narrow":
 		cmdNarrow(os.Args[2:])
+	case "grant-once":
+		cmdGrantOnce(os.Args[2:])
 	case "verify-audit":
 		cmdVerifyAudit(os.Args[2:])
 	case "status":
@@ -198,7 +201,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|narrow <target> <classes>|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|ptrace|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|narrow <target> <classes>|grant-once <ptrace|setuid|capset>|clear self|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
 	os.Exit(2)
 }
 
@@ -315,12 +318,37 @@ func cmdEgress(args []string) {
 // then tries to REGAIN it (which the kernel permits but E3 denies when armed).
 // Prints ALLOWED/DENIED and exits 0 (regain allowed) / 1 (regain denied) / 3 (setup).
 func cmdProbe(args []string) {
-	if len(args) < 1 || (args[0] != "setuid" && args[0] != "capset") {
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe setuid|capset")
+	if len(args) < 1 || (args[0] != "setuid" && args[0] != "capset" && args[0] != "ptrace") {
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe setuid|capset|ptrace")
 		os.Exit(2)
 	}
-	// setuid/capset are per-thread on Linux; keep both calls on one OS thread.
+	// setuid/capset/ptrace are per-thread on Linux; keep the calls on one OS thread.
 	runtime.LockOSThread()
+
+	if args[0] == "ptrace" {
+		// PTRACE_ATTACH to our OWN child triggers security_ptrace_access_check (E1) — the
+		// kernel/Yama permit attaching to a descendant, so a denial here is purely E1. A
+		// self-contained probe (no setpriv/su): exit 1 = denied, 0 = allowed, 3 = setup.
+		child := exec.Command("/bin/sleep", "10")
+		if err := child.Start(); err != nil {
+			fmt.Printf("PROBE ptrace: spawn child failed: %v\n", err)
+			os.Exit(3)
+		}
+		pid := child.Process.Pid
+		if err := unix.PtraceAttach(pid); err != nil {
+			fmt.Printf("PROBE ptrace: attach to child %d DENIED (%v)\n", pid, err)
+			_ = child.Process.Kill()
+			_, _ = child.Process.Wait()
+			os.Exit(1)
+		}
+		var ws unix.WaitStatus
+		_, _ = unix.Wait4(pid, &ws, 0, nil) // reap the attach-stop
+		_ = unix.PtraceDetach(pid)
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+		fmt.Printf("PROBE ptrace: attach to child %d ALLOWED\n", pid)
+		os.Exit(0)
+	}
 
 	if args[0] == "setuid" {
 		// Drop euid to 1000 but retain suid=0 (a real escalation primitive). E3
@@ -408,6 +436,25 @@ func cmdStatus() {
 			fmt.Println("  (none — every cgroup unrestricted; nftables floor applies)")
 		}
 	}
+	if gm, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "grant_once"), nil); err == nil {
+		defer gm.Close()
+		fmt.Println("one-shot grants (cgroup,hook -> remaining; ADR-0011):")
+		var k bpfGrantKey
+		var v bpfGrantVal
+		it := gm.Iterate()
+		any := false
+		for it.Next(&k, &v) {
+			name := hookNames[k.Hook]
+			if name == "" {
+				name = fmt.Sprintf("hook%d", k.Hook)
+			}
+			fmt.Printf("  cg=%-18d %-8s count=%d\n", k.Cgid, name, v.Count)
+			any = true
+		}
+		if !any {
+			fmt.Println("  (none)")
+		}
+	}
 }
 
 // ---- collector: provenance + opt-in enforce --------------------------------
@@ -482,6 +529,12 @@ func runCollector() {
 	// E2: pin the per-agent egress manifest map for the `egress`/`status` subcommands.
 	if err := objs.EgressPolicy.Pin(filepath.Join(pinDir, "egress_policy")); err != nil {
 		log.Fatalf("pin egress_policy: %v", err)
+	}
+	// ADR-0011: pin the one-shot E1/E3 grant map for the broker `grant-once` action +
+	// `status`. RemoveAll above wiped any prior grants on restart (the fail-safe: a
+	// restart resets enforce to observe AND drops outstanding grants).
+	if err := objs.GrantOnce.Pin(filepath.Join(pinDir, "grant_once")); err != nil {
+		log.Fatalf("pin grant_once: %v", err)
 	}
 
 	al, err := openAuditLog()

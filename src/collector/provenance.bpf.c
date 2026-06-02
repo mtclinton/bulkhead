@@ -99,6 +99,52 @@ struct {
 	__type(value, __u32); // allowed DST_* mask
 } egress_policy SEC(".maps");
 
+// One-shot E1/E3 privilege grant (ADR-0011). A human-gated SINGLE-USE exception: when a
+// hook is ARMED, an operator-approved grant lets an agent perform exactly ONE otherwise-
+// denied ptrace/setuid/capset. Keyed PER (cgroup, hook) so a grant for one hook can NEVER
+// satisfy another, and HOOK_BPF (E0) is never even looked up here (ungrantable). The
+// explicit pads make the 16-byte key/value layout deterministic (no compiler tail padding
+// the loader/verifier could disagree on) — same discipline as the fixed-offset probe_reads.
+struct grant_key {
+	__u64 cgid;
+	__u32 hook; // HOOK_* id
+	__u32 _pad;
+};
+struct grant_val {
+	__u64 count;      // 1 = one unused grant; CAS 1->0 burns it. 64-bit: the BPF backend
+	                  // (-mcpu=v1) only supports 64-bit atomic compare-and-swap.
+	__u64 expire_ns;  // 0 = no TTL (v1 always writes 0; field reserved for a future TTL)
+};
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);
+	__type(key, struct grant_key);
+	__type(value, struct grant_val);
+} grant_once SEC(".maps");
+
+// try_consume_grant: returns 1 iff THIS caller won a live single-use grant for (cg,hook) and
+// atomically burned it; 0 otherwise. Called ONLY on the would-deny path. CMPXCHG(count,1,0)
+// resolves N racing agent threads to EXACTLY ONE winner: at most one sees prior==1, the count
+// can never go negative (it only ever swaps to a fixed 0), and a double-consume is impossible
+// (a second CAS sees 0 != 1). A miss / corrupted count / lapsed TTL => 0 => normal deny
+// (fail-closed on the grant; the hook's underlying deny still stands).
+static __always_inline int try_consume_grant(__u64 cg, __u32 hook)
+{
+	struct grant_key k = {};
+	k.cgid = cg;
+	k.hook = hook; // _pad stays 0 (zero-init): no uninitialized key bytes
+	struct grant_val *v = bpf_map_lookup_elem(&grant_once, &k);
+	if (!v)
+		return 0;
+	if (v->expire_ns != 0 && bpf_ktime_get_ns() > v->expire_ns)
+		return 0; // TTL lapse (v1 writes 0 => never taken)
+	if (__sync_val_compare_and_swap(&v->count, 1, 0) == 1) {
+		bpf_map_delete_elem(&grant_once, &k); // tidy: no count==0 zombie (best-effort)
+		return 1;                             // the single granted instance -> allow
+	}
+	return 0; // lost the race / already spent
+}
+
 static __always_inline void log_decision(__u64 cg, __u32 hook, __u32 decision, __u32 mode)
 {
 	struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -189,7 +235,11 @@ int BPF_PROG(prov_socket_connect, struct socket *sock, struct sockaddr *address,
 // Shared fail-open enforce verdict (identical skeleton for every enforce hook):
 // deny ONLY when ret==0 AND the cgroup is not in the TCB allowlist AND the hook's
 // enforce flag is explicitly 1. Every other path returns the incoming ret (allow).
-static __always_inline int enforce_verdict(__u32 hook, int ret)
+// enforce_verdict_g is the grant-aware core. grantable=0 => the one-shot grant is NEVER
+// consulted (E0/bpf passes 0, so no grant lookup is even compiled into that program — E0 is
+// ungrantable BY CONSTRUCTION, not by a runtime branch). grantable=1 => on the ARMED
+// would-deny path, an operator-approved single-use grant turns this one denial into an allow.
+static __always_inline int enforce_verdict_g(__u32 hook, int ret, int grantable)
 {
 	if (ret != 0)
 		return ret; // honor a prior LSM deny; never revert (one-way ratchet)
@@ -198,19 +248,32 @@ static __always_inline int enforce_verdict(__u32 hook, int ret)
 
 	__u32 *tcb = bpf_map_lookup_elem(&tcb_cgroups, &cg);
 	if (tcb && *tcb == 1)
-		return 0; // TCB (collector / init): always allow
+		return 0; // TCB (collector / init): always allow — BEFORE any grant consume
 
 	__u32 *on = bpf_map_lookup_elem(&enforce_flags, &hook);
 	__u32 enforce = (on && *on == 1) ? 1 : 0; // miss / 0 -> observe (fail-open)
 
-	log_decision(cg, hook, enforce ? 1 : 0, enforce);
-
-	if (!enforce)
-		return 0;      // observe: logged the would-deny, but ALLOW
-	return -EPERM;         // enforce: deny the agent-originated action
+	if (!enforce) {
+		log_decision(cg, hook, 0, 0); // observe: logged the would-deny, ALLOW, NO consume
+		return 0;
+	}
+	// ARMED would-deny path reached ONLY here. E0 (grantable==0) short-circuits => no lookup.
+	if (grantable && try_consume_grant(cg, hook)) {
+		log_decision(cg, hook, 0, 1); // decision=allowed, mode=enforce: a single granted op
+		return 0;
+	}
+	log_decision(cg, hook, 1, 1);
+	return -EPERM; // enforce: deny the agent-originated action
 }
 
-// E0: deny bpf() from agent cgroups (protect the BPF substrate the TCB rests on).
+// Backward-compatible non-consuming wrapper (E0 path is textually unchanged).
+static __always_inline int enforce_verdict(__u32 hook, int ret)
+{
+	return enforce_verdict_g(hook, ret, 0);
+}
+
+// E0: deny bpf() from agent cgroups (protect the BPF substrate the TCB rests on). NOT
+// one-shot-grantable: the substrate must never be relaxable, even by an operator.
 SEC("lsm/bpf")
 int BPF_PROG(enforce_bpf, int cmd, union bpf_attr *attr, unsigned int size, int ret)
 {
@@ -218,11 +281,11 @@ int BPF_PROG(enforce_bpf, int cmd, union bpf_attr *attr, unsigned int size, int 
 }
 
 // E1: deny ptrace_access_check from agent cgroups (agents may not ptrace/inspect
-// other processes). Yama's ptrace_scope is host-wide; this is per-agent.
+// other processes). Yama's ptrace_scope is host-wide; this is per-agent. GRANTABLE.
 SEC("lsm/ptrace_access_check")
 int BPF_PROG(enforce_ptrace, struct task_struct *child, unsigned int mode, int ret)
 {
-	return enforce_verdict(HOOK_PTRACE, ret);
+	return enforce_verdict_g(HOOK_PTRACE, ret, 1);
 }
 
 // Shared gate for E3 privilege-GAIN hooks: deny (when armed) a non-TCB cgroup that
@@ -242,10 +305,17 @@ static __always_inline int enforce_gain(__u32 hook, int ret, int gain)
 
 	__u32 *on = bpf_map_lookup_elem(&enforce_flags, &hook);
 	__u32 enforce = (on && *on == 1) ? 1 : 0; // miss/0 -> observe (fail-open)
-	log_decision(cg, hook, 1, enforce);       // (would-)deny a privilege gain
-	if (!enforce)
-		return 0;   // observe: logged the would-deny, but ALLOW
-	return -EPERM;      // enforce: deny the escalation
+	if (!enforce) {
+		log_decision(cg, hook, 1, 0); // observe would-deny: logged, ALLOW, NO consume
+		return 0;
+	}
+	// ARMED + gain + non-TCB: a one-shot grant (ADR-0011) spends here, before the deny.
+	if (try_consume_grant(cg, hook)) {
+		log_decision(cg, hook, 0, 1); // decision=allowed, mode=enforce: a single granted gain
+		return 0;
+	}
+	log_decision(cg, hook, 1, 1);
+	return -EPERM; // enforce: deny the escalation
 }
 
 // E3: deny an agent cgroup GAINING effective root via the setuid family; allow

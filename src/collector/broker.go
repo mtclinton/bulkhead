@@ -57,6 +57,7 @@ const (
 	actDelegate     actionKind = "delegate"      // spawn a child with parent ∩ requested (ADR-0006)
 	actExpandEgress actionKind = "expand-egress" // widen the requester's OWN manifest (ADR-0009)
 	actNarrowEgress actionKind = "narrow-egress" // operator clamps an agent's manifest (ADR-0010)
+	actGrantOnce    actionKind = "grant-once"    // one-shot E1/E3 privilege grant (ADR-0011)
 )
 
 // expandCeiling is the hard per-deployment cap an EXPAND can never exceed, even with
@@ -87,9 +88,10 @@ type pending struct {
 	parentPath string
 	suffix     string // delegate only
 	instance   string // delegate only: broker-minted child unit instance (bound into the audit record)
-	reqMask    uint32 // requested classes (both kinds)
+	reqMask    uint32 // requested classes (delegate/expand)
 	childMask  uint32 // delegate: resolved child mask (parent & requested)
 	curMask    uint32 // expand: requester's current manifest (for LIST/audit)
+	grantHook  uint32 // grant-once: the HOOK_* id being one-shot-granted
 	created    time.Time
 	decision   chan bool                      // buffered cap-1; resolve() sends exactly once, never blocks
 	verdict    string                         // "approve"|"deny"|"timeout"; set under pendMu before the send
@@ -108,6 +110,9 @@ var (
 	// LIVE mask with no lost update. Distinct from launchMu so it never blocks behind
 	// launchChild's slow daemon-reload/systemctl section, and narrow never touches pendMu.
 	egressMu sync.Mutex
+	// grantMu serializes broker writes to the grant_once map (ADR-0011); distinct from
+	// egressMu (different map) and launchMu (no launchChild coupling).
+	grantMu  sync.Mutex
 	brokerAL *auditLog // broker-owned signed decision chain (separate from the collector's)
 )
 
@@ -237,6 +242,8 @@ func handleBrokerConn(conn net.Conn) {
 		handleDelegateTail(conn, cgID, cgPath, f)
 	case "EXPAND":
 		handleExpandTail(conn, cgID, cgPath, f)
+	case "GRANT-ONCE":
+		handleGrantOnceTail(conn, cgID, cgPath, f)
 	default:
 		reply("ERR protocol")
 	}
@@ -613,6 +620,10 @@ func listPending() string {
 			fmt.Fprintf(&b, "id=%d action=expand-egress agent=%s current=%s requested=%s grant=%s age=%ds\n",
 				p.id, p.parentPath, classNames(p.curMask), classNames(p.reqMask),
 				classNames(expandMask(p.curMask, p.reqMask, expandCeiling)), age)
+		case actGrantOnce:
+			// "agent X wants ONE <hook> op": the operator authorizes a single E1/E3 exception.
+			fmt.Fprintf(&b, "id=%d action=grant-once agent=%s hook=%s grant=count=1 age=%ds\n",
+				p.id, p.parentPath, hookNames[p.grantHook], age)
 		default: // delegate
 			fmt.Fprintf(&b, "id=%d action=delegate parent=%s suffix=%s requested=%s granted=%s age=%ds\n",
 				p.id, p.parentPath, p.suffix, classNames(p.reqMask), classNames(p.childMask), age)
@@ -707,13 +718,17 @@ func recordDecision(p *pending, verdict, operator, applied string) {
 	}
 	hook := string(p.kind)
 	comm := p.instance // delegate: the minted child instance
-	if p.kind == actExpandEgress {
+	if p.kind == actExpandEgress || p.kind == actGrantOnce {
 		comm = "self"
 	}
 	if len(comm) > 16 {
 		comm = comm[:16]
 	}
 	mode := fmt.Sprintf("%s req=%s applied=%s", operator, classNames(p.reqMask), applied)
+	if p.kind == actGrantOnce {
+		// grant-once has no class mask; render the granted hook instead of classNames(0).
+		mode = fmt.Sprintf("%s op=%s applied=%s", operator, hookNames[p.grantHook], applied)
+	}
 	ev := provEvent{CgroupID: p.parentCgID, PID: 0, Comm: comm, Hook: hook, Decision: verdict, Mode: mode}
 	if err := brokerAL.append(ev); err != nil {
 		log.Printf("broker: decision audit append: %v", err)

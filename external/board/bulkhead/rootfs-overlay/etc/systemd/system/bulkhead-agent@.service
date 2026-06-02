@@ -36,9 +36,11 @@ ExecStartPre=+/usr/bin/bulkhead-collector egress set self ${BULKHEAD_AGENT_EGRES
 # --- the caged payload (MVP stub probe; the real agent runtime replaces it later) ---
 ExecStart=/usr/bin/bulkhead-agent-run %i
 
-# --- cgroup-inode-reuse hygiene: drop this cgroup's manifest on exit (+ for caps,
+# --- cgroup-inode-reuse hygiene: drop this cgroup's manifest AND any unconsumed one-shot
+#     grants (ADR-0011) on exit, so a recycled cgroup can inherit neither. (+ for caps,
 #     leading - so a missing entry / down collector never fails the stop). ---
 ExecStopPost=-+/usr/bin/bulkhead-collector egress clear self
+ExecStopPost=-+/usr/bin/bulkhead-collector grant-once clear self
 
 # --- fail-closed hardening floor (the bulkhead-selftest/llama-server profile). ---
 DynamicUser=yes
