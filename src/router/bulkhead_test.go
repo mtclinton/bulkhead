@@ -67,6 +67,25 @@ func TestDecideDowngradeOnly(t *testing.T) {
 	}
 }
 
+// TestPromptLenCountsRunesNotBytes guards F2 (denial-of-wallet via byte counting). The
+// paid-path gate fires when promptLen >= threshold. Counting BYTES let a caller trip the
+// expensive upstream tier with a tiny multi-byte payload — 500 four-byte emoji = 2000 bytes
+// >= 2000, an "interactive-sized" message forcing a paid call. Counting RUNES keeps those
+// 500 code points below threshold (local, free) while genuinely long content still routes.
+func TestPromptLenCountsRunesNotBytes(t *testing.T) {
+	emoji := strings.Repeat("🦀", 500) // 500 runes, 2000 bytes
+	if got := promptLen(&ChatRequest{Messages: []ChatMessage{{Content: emoji}}}); got != 500 {
+		t.Fatalf("promptLen = %d, want 500 (runes, not bytes)", got)
+	}
+	if got := decide(&ChatRequest{Messages: []ChatMessage{{Content: emoji}}}, 2000, RouteLocal); got.Route != RouteLocal {
+		t.Fatalf("compact multi-byte prompt routed %s, want local (byte-count is a DoW bypass)", got.Route)
+	}
+	long := strings.Repeat("🦀", 2000) // 2000 runes -> genuinely long, must still trip the gate
+	if got := decide(&ChatRequest{Messages: []ChatMessage{{Content: long}}}, 2000, RouteLocal); got.Route != RouteAPI {
+		t.Fatalf("2000-rune prompt routed %s, want api", got.Route)
+	}
+}
+
 func TestToAnthropic(t *testing.T) {
 	req := &ChatRequest{
 		Model: "local-3b",

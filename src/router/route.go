@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 package main
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Decision is the outcome of the routing rule.
 type Decision struct {
@@ -28,14 +31,17 @@ func selectProvider(model, def string) string {
 	}
 }
 
-// promptLen approximates request size as the total characters of message
-// content. It is a coarse, deterministic proxy that separates short interactive
-// prompts from long ones. It is not tokenization, and intentionally so: the rule
-// must be simple and predictable.
+// promptLen approximates request size as the total RUNES (Unicode code points) of message
+// content. It is a coarse, deterministic proxy that separates short interactive prompts from
+// long ones. It is not tokenization, and intentionally so: the rule must be simple and
+// predictable. Runes, NOT bytes (F2): the paid-path gate keys off this length, and a caller
+// who can shrink the count below threshold dodges the gate — a denial-of-wallet bypass. A
+// prompt of N multi-byte characters (CJK, emoji) is N "characters" of work to a tokenizer,
+// regardless of its UTF-8 byte length, so the gate must count characters too.
 func promptLen(req *ChatRequest) int {
 	n := 0
 	for _, m := range req.Messages {
-		n += len(m.Content)
+		n += utf8.RuneCountInString(m.Content)
 	}
 	return n
 }
