@@ -42,3 +42,8 @@ RestrictAddressFamilies=AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
+
+[Install]
+# Independently enabled AND pulled in by the selftest gate's Requires= (the drop-in) —
+# either path makes a broken chain block the boot; both is belt-and-suspenders.
+WantedBy=multi-user.target
