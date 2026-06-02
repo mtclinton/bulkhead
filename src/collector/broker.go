@@ -56,6 +56,7 @@ type actionKind string
 const (
 	actDelegate     actionKind = "delegate"      // spawn a child with parent ∩ requested (ADR-0006)
 	actExpandEgress actionKind = "expand-egress" // widen the requester's OWN manifest (ADR-0009)
+	actNarrowEgress actionKind = "narrow-egress" // operator clamps an agent's manifest (ADR-0010)
 )
 
 // expandCeiling is the hard per-deployment cap an EXPAND can never exceed, even with
@@ -102,7 +103,12 @@ var (
 	pend       = map[uint64]*pending{}
 	pendPerPar = map[uint64]int{}
 	launchMu   sync.Mutex // serialize launchChild's daemon-reload/start (one PID-1 op at a time)
-	brokerAL   *auditLog  // broker-owned signed decision chain (separate from the collector's)
+	// egressMu serializes ALL broker read-modify-writes on egress_policy (operator NARROW +
+	// agent EXPAND) so a narrow racing an approved expand on the SAME cgroup composes from the
+	// LIVE mask with no lost update. Distinct from launchMu so it never blocks behind
+	// launchChild's slow daemon-reload/systemctl section, and narrow never touches pendMu.
+	egressMu sync.Mutex
+	brokerAL *auditLog // broker-owned signed decision chain (separate from the collector's)
 )
 
 // ---- broker (TCB listener) -------------------------------------------------
@@ -330,6 +336,12 @@ func handleExpandTail(conn net.Conn, agentCgID uint64, agentPath string, f []str
 		reqMask: reqMask, curMask: curMask, created: time.Now(),
 	}
 	p.execute = func(p *pending) (string, error) {
+		// Serialize against operator NARROW (ADR-0010): both read-modify-write egress_policy,
+		// so without a shared lock a concurrent narrow could lose this widen (or vice versa).
+		// Each holder re-reads the LIVE mask under egressMu, so the result composes by
+		// lock-acquisition order. (launchChild is never called here, so no lock-order issue.)
+		egressMu.Lock()
+		defer egressMu.Unlock()
 		// F1: re-bind identity to the LIVE cgroup before touching its manifest. UpdateExist
 		// is necessary but NOT sufficient — if cgID was recycled onto a new agent that wrote
 		// its own manifest, UpdateExist succeeds and we widen the WRONG agent. Re-stat first.
@@ -671,6 +683,10 @@ func handleApprove(conn net.Conn) {
 		} else {
 			fmt.Fprintln(conn, "ERR no-such-pending")
 		}
+	case "NARROW":
+		// Operator-initiated, ungated (ADR-0010): the operator IS the authority the gate
+		// consults, so a narrow runs synchronously here — no pending, no approval block.
+		handleNarrow(conn, operator, f)
 	default:
 		fmt.Fprintln(conn, "ERR protocol")
 	}

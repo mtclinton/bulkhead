@@ -7,10 +7,72 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
 )
+
+// TestNarrowComputesMask guards ADR-0010's clamp arithmetic: narrowMask = cur &^ req can only
+// CLEAR bits (monotone-decreasing, fail-safe direction), and a requested class the agent
+// lacks is a no-op on that class.
+func TestNarrowComputesMask(t *testing.T) {
+	lp, _ := parseClasses("loopback")
+	pub, _ := parseClasses("public")
+	oth, _ := parseClasses("other")
+	all, _ := parseClasses("loopback,linklocal,private,public,other")
+	cases := []struct {
+		name           string
+		cur, req, want uint32
+	}{
+		{"clears a held bit", lp | pub, pub, lp},
+		{"unheld class is a no-op on it", lp | oth, pub, lp | oth},
+		{"clamp all -> none", all, all, 0},
+		{"multi clear", lp | pub | oth, pub | oth, lp},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := narrowMask(c.cur, c.req)
+			if got != c.want {
+				t.Fatalf("narrowMask(%#x,%#x)=%#x, want %#x", c.cur, c.req, got, c.want)
+			}
+			if got&^c.cur != 0 {
+				t.Fatalf("narrow SET a bit: %#x is not a subset of cur %#x", got, c.cur)
+			}
+			if got&c.req != 0 {
+				t.Fatalf("narrow left a requested bit set: req %#x still in %#x", c.req, got)
+			}
+		})
+	}
+}
+
+// TestResolveAgentTargetRejectsNonAgent guards ADR-0010's target gate: narrow may only ever
+// resolve a cgroup under /bulkhead-agent.slice/bulkhead-agent@ — never the TCB, PID-1, the
+// operator's own session, an id:N, a traversal, or a malformed instance.
+func TestResolveAgentTargetRejectsNonAgent(t *testing.T) {
+	if _, _, err := resolveAgentTarget("id:42"); !errors.Is(err, errNarrowID) {
+		t.Fatalf("id:42 -> %v, want errNarrowID", err)
+	}
+	for _, p := range []string{
+		"/system.slice/bulkhead-collector.service",
+		"/sys/fs/cgroup/system.slice/bulkhead-broker.service",
+		"/bulkhead-agent.slice/../system.slice/x.service", // traversal escaping the slice
+	} {
+		if _, _, err := resolveAgentTarget(p); !errors.Is(err, errNarrowNotAgent) {
+			t.Fatalf("%q -> %v, want errNarrowNotAgent", p, err)
+		}
+	}
+	for _, b := range []string{"../etc", "a/b", "WithCaps", "has.dot"} {
+		if _, _, err := resolveAgentTarget(b); !errors.Is(err, errNarrowBadInst) {
+			t.Fatalf("bad instance %q -> %v, want errNarrowBadInst", b, err)
+		}
+	}
+	// A well-formed but nonexistent agent passes the slice predicate, then fails at the live
+	// stat — proving the gate did NOT reject it (it's a real attempt that simply isn't running).
+	if _, _, err := resolveAgentTarget("nonexistent-agent-xyz"); !errors.Is(err, errNarrowGone) {
+		t.Fatalf("nonexistent agent -> %v, want errNarrowGone", err)
+	}
+}
 
 // TestReverifyCgroupRebindsIdentity guards the F1/F3 re-binding: at execute() time the
 // requester's attested cgroup id must still match the LIVE inode at its path, or the action

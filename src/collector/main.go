@@ -186,6 +186,8 @@ func main() {
 		cmdExpand(os.Args[2:])
 	case "approve":
 		cmdApprove(os.Args[2:])
+	case "narrow":
+		cmdNarrow(os.Args[2:])
 	case "verify-audit":
 		cmdVerifyAudit(os.Args[2:])
 	case "status":
@@ -196,7 +198,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|narrow <target> <classes>|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
 	os.Exit(2)
 }
 
