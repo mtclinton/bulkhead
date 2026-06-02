@@ -6,7 +6,7 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
 # Pinned to the source snapshot with the cilium/ebpf v0.17.3 re-pin (Go 1.22-buildable).
-SRCREV = "8e7bb9a044bff8352db021086da413450f3f88a7"
+SRCREV = "d2e7b2d109a8a005c23b1ec180b1c5bc0b920e3f"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
