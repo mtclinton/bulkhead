@@ -49,19 +49,51 @@ var approvalTimeout = func() time.Duration {
 	return 120 * time.Second
 }()
 
-// pending is one in-flight delegation awaiting an operator decision.
+// actionKind names a gated sensitive action. The approval gate (register/approve/resolve/
+// handleApprove/the signed chain) is action-agnostic; each kind supplies its own executor.
+type actionKind string
+
+const (
+	actDelegate     actionKind = "delegate"      // spawn a child with parent ∩ requested (ADR-0006)
+	actExpandEgress actionKind = "expand-egress" // widen the requester's OWN manifest (ADR-0009)
+)
+
+// expandCeiling is the hard per-deployment cap an EXPAND can never exceed, even with
+// operator approval (defense-in-depth). Default = all DST_* classes (the operator is sole
+// authority out of the box); set BULKHEAD_EXPAND_CEILING to clamp. Fail-closed on a bad value.
+var expandCeiling = func() uint32 {
+	v := os.Getenv("BULKHEAD_EXPAND_CEILING")
+	if v == "" {
+		return dstLoopback | dstLinklocal | dstPrivate | dstPublic | dstOther
+	}
+	m, err := parseClasses(v)
+	if err != nil {
+		log.Fatalf("broker: bad BULKHEAD_EXPAND_CEILING %q: %v", v, err)
+	}
+	return m
+}()
+
+// expandMask computes the widened manifest: keep everything current, add the requested
+// classes that fall within the ceiling. A bare OR after an AND-with-ceiling — it can only
+// ADD bits already permitted by the ceiling, never grant beyond it.
+func expandMask(cur, req, ceiling uint32) uint32 { return cur | (req & ceiling) }
+
+// pending is one in-flight sensitive action awaiting an operator decision.
 type pending struct {
 	id         uint64
-	parentCgID uint64
+	kind       actionKind // which sensitive action
+	parentCgID uint64     // kernel-attested REQUESTER cgroup (parent for delegate, self for expand); flood key
 	parentPath string
-	suffix     string
-	instance   string // broker-minted child unit instance (also bound into the audit record)
-	reqMask    uint32
-	childMask  uint32
+	suffix     string // delegate only
+	instance   string // delegate only: broker-minted child unit instance (bound into the audit record)
+	reqMask    uint32 // requested classes (both kinds)
+	childMask  uint32 // delegate: resolved child mask (parent & requested)
+	curMask    uint32 // expand: requester's current manifest (for LIST/audit)
 	created    time.Time
-	decision   chan bool // buffered cap-1; resolve() sends exactly once, never blocks
-	verdict    string    // "approve"|"deny"|"timeout"; set under pendMu before the send
-	operator   string    // operator identity; set under pendMu before the send
+	decision   chan bool                      // buffered cap-1; resolve() sends exactly once, never blocks
+	verdict    string                         // "approve"|"deny"|"timeout"; set under pendMu before the send
+	operator   string                         // operator identity; set under pendMu before the send
+	execute    func(*pending) (string, error) // per-action executor; runs ONLY after approval (ok==true)
 }
 
 var (
@@ -105,7 +137,7 @@ func cmdBroker() {
 	// approval gate must NOT wedge the broker from accepting the operator's decision
 	// (the serialized inline-handle loop would self-deadlock).
 	go acceptLoop(approveLn, handleApprove)
-	acceptLoop(delegLn, handleDelegate)
+	acceptLoop(delegLn, handleBrokerConn)
 }
 
 func acceptLoop(ln net.Listener, h func(net.Conn)) {
@@ -162,33 +194,53 @@ func brokerSelfRegisterTCB() error {
 	return m.Update(cg, uint32(1), ebpf.UpdateAny)
 }
 
-func handleDelegate(conn net.Conn) {
+// handleBrokerConn serves one agent request on the delegation socket. It peer-attests the
+// requester from the kernel, reads one verb line, and dispatches: DELEGATE (spawn a
+// narrowed child, ADR-0006) or EXPAND (widen the requester's OWN manifest, ADR-0009). Both
+// flow through the same approval gate (finishGated); only the executor differs.
+func handleBrokerConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second)) // a slow/hostile peer can't wedge the loop
 	reply := func(s string) { fmt.Fprintln(conn, s) }
 
-	// 1. Kernel-attested parent identity (NEVER from the request body).
-	parentCgID, parentPath, err := peerParentCgID(conn)
+	// Kernel-attested requester identity (NEVER from the request body).
+	cgID, cgPath, err := peerParentCgID(conn)
 	if err != nil {
 		log.Printf("broker: peer-auth: %v", err)
 		reply("ERR peer-auth")
 		return
 	}
-	// Only a real jailed agent may delegate (and a TCB process must not use this path).
-	if !strings.Contains(parentPath, "/bulkhead-agent.slice/bulkhead-agent@") {
-		log.Printf("broker: reject non-agent parent cgroup %q", parentPath)
+	// Only a real jailed agent may use the broker (a TCB process must not).
+	if !strings.Contains(cgPath, "/bulkhead-agent.slice/bulkhead-agent@") {
+		log.Printf("broker: reject non-agent cgroup %q", cgPath)
 		reply("ERR not-an-agent")
 		return
 	}
-
-	// 2. Request line: DELEGATE <child-suffix> <requested-classes>
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
 		reply("ERR read")
 		return
 	}
 	f := strings.Fields(strings.TrimSpace(line))
-	if len(f) != 3 || f[0] != "DELEGATE" {
+	if len(f) == 0 {
+		reply("ERR protocol")
+		return
+	}
+	switch f[0] {
+	case "DELEGATE":
+		handleDelegateTail(conn, cgID, cgPath, f)
+	case "EXPAND":
+		handleExpandTail(conn, cgID, cgPath, f)
+	default:
+		reply("ERR protocol")
+	}
+}
+
+// handleDelegateTail: DELEGATE <child-suffix> <requested-classes> — spawn a child whose
+// manifest is parent ∩ requested (NARROW-never-widen, ADR-0006).
+func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f []string) {
+	reply := func(s string) { fmt.Fprintln(conn, s) }
+	if len(f) != 3 {
 		reply("ERR protocol")
 		return
 	}
@@ -202,46 +254,107 @@ func handleDelegate(conn net.Conn) {
 		reply("ERR bad-classes")
 		return
 	}
-
-	// 3. Parent's CURRENT ceiling from the live pinned map. Miss => cannot delegate
-	//    (you cannot safely subset "unrestricted"). Fail-closed.
+	// Parent's CURRENT ceiling from the live pinned map. Miss => cannot delegate (you
+	// cannot safely subset "unrestricted"). Fail-closed.
 	parentMask, err := lookupEgressMask(parentCgID)
 	if err != nil {
 		reply("ERR no-parent-manifest")
 		return
 	}
-
-	// 4. NARROW-NEVER-WIDEN: bitwise AND can only clear bits.
-	childMask := parentMask & reqMask
-
-	// 5. Human approval-gate (ADR-0007): block for an operator decision. Mint the child
-	//    instance up front so LIST and the signed record can name it; extend the conn
-	//    deadline to cover the (human-latency) approval wait.
+	childMask := parentMask & reqMask // NARROW-never-widen: bitwise AND only clears bits
 	p := &pending{
-		parentCgID: parentCgID, parentPath: parentPath, suffix: suffix,
+		kind: actDelegate, parentCgID: parentCgID, parentPath: parentPath, suffix: suffix,
 		instance: "d-" + randHex8() + "-" + suffix, reqMask: reqMask, childMask: childMask,
 		created: time.Now(),
 	}
+	// The child's own +ExecStartPre writes its (narrowed) manifest before its payload forks.
+	p.execute = func(p *pending) (string, error) {
+		launchMu.Lock()
+		defer launchMu.Unlock()
+		if err := launchChild(p.instance, classNames(p.childMask)); err != nil {
+			return "", err
+		}
+		return p.instance + " " + classNames(p.childMask), nil
+	}
 	_ = conn.SetDeadline(time.Now().Add(approvalTimeout + 15*time.Second))
-	ok, verdict := approveDelegation(p)
-	if !ok {
-		reply("ERR " + verdict) // deny | timeout | busy — fail-closed, no child created
-		return
-	}
+	finishGated(conn, p)
+}
 
-	// 6. Approved: launch the child jail; its +ExecStartPre writes the (narrowed)
-	//    manifest in the child's own cgroup before the payload forks. Serialized.
-	launchMu.Lock()
-	lerr := launchChild(p.instance, classNames(childMask))
-	launchMu.Unlock()
-	if lerr != nil {
-		log.Printf("broker: launch %s: %v", p.instance, lerr)
-		reply("ERR launch")
+// handleExpandTail: EXPAND <classes> — the requester asks to WIDEN ITS OWN manifest. The
+// target is the kernel-attested SELF (agentCgID); the request body carries no identity, so
+// an agent can only ever widen itself, never another. The map write happens in execute() —
+// ONLY after operator approval — re-reading the LIVE mask and using UpdateExist, so a
+// request that outlived its agent (cgroup exited/recycled) can never resurrect a manifest.
+func handleExpandTail(conn net.Conn, agentCgID uint64, agentPath string, f []string) {
+	reply := func(s string) { fmt.Fprintln(conn, s) }
+	if len(f) != 2 {
+		reply("ERR protocol")
 		return
 	}
-	log.Printf("broker: delegated parent-cg=%d (mask 0x%02x) requested 0x%02x -> child %s mask 0x%02x (%s) [operator %s]",
-		parentCgID, parentMask, reqMask, p.instance, childMask, classNames(childMask), p.operator)
-	reply(fmt.Sprintf("OK %s %s", p.instance, classNames(childMask)))
+	reqMask, err := parseClasses(f[1])
+	if err != nil {
+		reply("ERR bad-classes")
+		return
+	}
+	curMask, err := lookupEgressMask(agentCgID)
+	if err != nil {
+		// Unrestricted (no manifest): nothing to widen, and CREATING one would NARROW the
+		// agent (every unset class becomes a deny once E2 bites). Refuse.
+		reply("ERR no-manifest")
+		return
+	}
+	newMask := expandMask(curMask, reqMask, expandCeiling)
+	if newMask == curMask { // no new grantable bit — don't burn an operator decision
+		if reqMask&^curMask != 0 {
+			reply("ERR above-ceiling") // asked for new classes, all clamped by the ceiling
+		} else {
+			reply("OK " + classNames(curMask) + " (no-op)") // already holds everything requested
+		}
+		return
+	}
+	cgID := agentCgID // capture the ATTESTED id for the closure — never peer-supplied
+	p := &pending{
+		kind: actExpandEgress, parentCgID: agentCgID, parentPath: agentPath,
+		reqMask: reqMask, curMask: curMask, created: time.Now(),
+	}
+	p.execute = func(p *pending) (string, error) {
+		m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "egress_policy"), nil)
+		if err != nil {
+			return "", err
+		}
+		defer m.Close()
+		var live uint32
+		if err := m.Lookup(cgID, &live); err != nil {
+			return "", fmt.Errorf("manifest vanished") // agent exited/cleared -> refuse
+		}
+		final := expandMask(live, p.reqMask, expandCeiling) // recompute from LIVE; never past the ceiling
+		if err := m.Update(cgID, final, ebpf.UpdateExist); err != nil {
+			return "", err // UpdateExist: never CREATE on a stale/recycled cgroup
+		}
+		return classNames(final), nil
+	}
+	_ = conn.SetDeadline(time.Now().Add(approvalTimeout + 15*time.Second))
+	finishGated(conn, p)
+}
+
+// finishGated runs the single blocking approval gate, then (only on approve) the action's
+// executor, then replies. The ONLY place execute() is ever called — deny/timeout/flood
+// reply ERR and never reach a side effect.
+func finishGated(conn net.Conn, p *pending) {
+	reply := func(s string) { fmt.Fprintln(conn, s) }
+	ok, verdict := approve(p)
+	if !ok {
+		reply("ERR " + verdict) // deny | timeout | busy — no side effect
+		return
+	}
+	detail, err := p.execute(p)
+	if err != nil {
+		log.Printf("broker: execute %s id=%d: %v", p.kind, p.id, err)
+		reply("ERR exec")
+		return
+	}
+	log.Printf("broker: %s cg=%d -> %s [operator %s]", p.kind, p.parentCgID, detail, p.operator)
+	reply("OK " + detail)
 }
 
 // peerParentCgID attests the connecting agent's cgroup id from the kernel. SO_PEERPIDFD
@@ -379,7 +492,7 @@ func launchChild(instance, classes string) error {
 // the signed decision. Returns (allowed, verdict). The pending entry is removed by
 // whichever of the operator-decision or the timeout fires first (delete-under-lock makes
 // the verdict exactly-once); fail-closed on every non-approve path.
-func approveDelegation(p *pending) (bool, string) {
+func approve(p *pending) (bool, string) {
 	if !register(p) {
 		recordDecision(p, "deny", "broker:flood")
 		return false, "busy"
@@ -429,13 +542,21 @@ func listPending() string {
 	pendMu.Lock()
 	defer pendMu.Unlock()
 	if len(pend) == 0 {
-		return "(no pending delegation requests)\n"
+		return "(no pending requests)\n"
 	}
 	var b strings.Builder
 	for _, p := range pend {
-		fmt.Fprintf(&b, "id=%d parent=%s suffix=%s requested=%s granted=%s age=%ds\n",
-			p.id, p.parentPath, p.suffix, classNames(p.reqMask), classNames(p.childMask),
-			int(time.Since(p.created).Seconds()))
+		age := int(time.Since(p.created).Seconds())
+		switch p.kind {
+		case actExpandEgress:
+			// The operator reads "agent X wants to ADD <classes>": current -> proposed-new.
+			fmt.Fprintf(&b, "id=%d action=expand-egress agent=%s current=%s requested=%s grant=%s age=%ds\n",
+				p.id, p.parentPath, classNames(p.curMask), classNames(p.reqMask),
+				classNames(expandMask(p.curMask, p.reqMask, expandCeiling)), age)
+		default: // delegate
+			fmt.Fprintf(&b, "id=%d action=delegate parent=%s suffix=%s requested=%s granted=%s age=%ds\n",
+				p.id, p.parentPath, p.suffix, classNames(p.reqMask), classNames(p.childMask), age)
+		}
 	}
 	return b.String()
 }
@@ -514,18 +635,19 @@ func recordDecision(p *pending, verdict, operator string) {
 	if brokerAL == nil {
 		return
 	}
-	comm := p.instance
+	// Overload provEvent's fields per action kind; canonical()/the chain are untouched.
+	hook := string(p.kind)
+	comm := p.instance // delegate: the minted child instance
+	mode := fmt.Sprintf("%s %s->%s", operator, classNames(p.reqMask), classNames(p.childMask))
+	if p.kind == actExpandEgress {
+		comm = "self"
+		mode = fmt.Sprintf("%s %s|%s->%s", operator, classNames(p.curMask),
+			classNames(p.reqMask), classNames(expandMask(p.curMask, p.reqMask, expandCeiling)))
+	}
 	if len(comm) > 16 {
 		comm = comm[:16]
 	}
-	ev := provEvent{
-		CgroupID: p.parentCgID,
-		PID:      0,
-		Comm:     comm,
-		Hook:     "delegate",
-		Decision: verdict,
-		Mode:     fmt.Sprintf("%s %s->%s", operator, classNames(p.reqMask), classNames(p.childMask)),
-	}
+	ev := provEvent{CgroupID: p.parentCgID, PID: 0, Comm: comm, Hook: hook, Decision: verdict, Mode: mode}
 	if err := brokerAL.append(ev); err != nil {
 		log.Printf("broker: decision audit append: %v", err)
 	}
@@ -600,6 +722,44 @@ func cmdDelegate(args []string) {
 	resp, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "delegate: read reply: %v\n", err)
+		os.Exit(1)
+	}
+	resp = strings.TrimSpace(resp)
+	fmt.Println(resp)
+	if !strings.HasPrefix(resp, "OK ") {
+		os.Exit(1)
+	}
+}
+
+// ---- expand (client run by an agent INSIDE its jail to widen its OWN egress) -----
+
+func cmdExpand(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector expand <requested-classes>")
+		os.Exit(2)
+	}
+	conn, err := net.DialTimeout("unix", brokerSockPath, 5*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "expand: dial broker: %v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+	// Deadline must exceed the broker's approval timeout so its definite OK/ERR always
+	// lands first. Default 180s; the demo lowers it (still > the broker timeout).
+	to := 180 * time.Second
+	if v := os.Getenv("BULKHEAD_EXPAND_TIMEOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			to = time.Duration(n) * time.Second
+		}
+	}
+	_ = conn.SetDeadline(time.Now().Add(to))
+	if _, err := fmt.Fprintf(conn, "EXPAND %s\n", args[0]); err != nil {
+		fmt.Fprintf(os.Stderr, "expand: send: %v\n", err)
+		os.Exit(1)
+	}
+	resp, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "expand: read reply: %v\n", err)
 		os.Exit(1)
 	}
 	resp = strings.TrimSpace(resp)

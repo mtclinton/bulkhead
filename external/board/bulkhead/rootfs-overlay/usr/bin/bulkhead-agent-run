@@ -26,6 +26,22 @@ if [ -n "${BULKHEAD_AGENT_DELEGATE:-}" ]; then
 	exit 0
 fi
 
+# Egress expansion (ADR-0009): if BULKHEAD_AGENT_EXPAND is set this agent asks the broker
+# (which blocks for operator approval) to WIDEN its OWN manifest. Probe public BEFORE
+# (expect E2 deny=7), request the expansion (the `expand` call blocks across the gate, all
+# in THIS process/cgroup), then probe public AFTER — on approval the same cgroup's public
+# class flips denied->allowed. Both rcs logged for the harness.
+if [ -n "${BULKHEAD_AGENT_EXPAND:-}" ]; then
+	curl -s -o /dev/null --noproxy '*' --max-time 8 "$pub"; before=$?
+	echo "bulkhead-agent[$id]: pre-expand public rc=${before}"
+	echo "bulkhead-agent[$id]: requesting expand -> ${BULKHEAD_AGENT_EXPAND}"
+	bulkhead-collector expand ${BULKHEAD_AGENT_EXPAND}; erc=$?
+	echo "bulkhead-agent[$id]: expand rc=${erc}"
+	curl -s -o /dev/null --noproxy '*' --max-time 8 "$pub"; after=$?
+	echo "bulkhead-agent[$id]: post-expand public rc=${after}"
+	exit 0
+fi
+
 curl -s -o /dev/null --noproxy '*' --max-time 8 "$pub"
 rcp=$?
 curl -s -o /dev/null --noproxy '*' --max-time 4 http://127.0.0.1:5353/

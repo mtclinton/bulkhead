@@ -97,3 +97,45 @@ func TestFloodCaps(t *testing.T) {
 		t.Fatal("a different parent under caps should succeed")
 	}
 }
+
+// TestExpandComputesMask: the widen arithmetic — add requested classes within the
+// ceiling, never beyond it, never remove a held class.
+func TestExpandComputesMask(t *testing.T) {
+	all := dstLoopback | dstLinklocal | dstPrivate | dstPublic | dstOther
+	for _, c := range []struct {
+		cur, req, ceiling, want uint32
+	}{
+		{dstLoopback | dstOther, dstPublic, all, dstLoopback | dstOther | dstPublic}, // add public
+		{dstLoopback | dstOther, dstLoopback, all, dstLoopback | dstOther},           // already held -> no change
+		{dstLoopback, dstPublic, dstLoopback | dstOther, dstLoopback},                // public above ceiling -> clamped
+		{dstLoopback, dstPublic | dstPrivate, dstPublic, dstLoopback | dstPublic},    // only the in-ceiling bit added
+		{0, dstPublic, all, dstPublic},                                               // from empty (note: handler refuses no-manifest separately)
+	} {
+		if got := expandMask(c.cur, c.req, c.ceiling); got != c.want {
+			t.Errorf("expandMask(0x%x,0x%x,0x%x)=0x%x want 0x%x", c.cur, c.req, c.ceiling, got, c.want)
+		}
+		// widening never removes a held class:
+		if got := expandMask(c.cur, c.req, c.ceiling); got&c.cur != c.cur {
+			t.Errorf("expandMask dropped a held class: cur=0x%x got=0x%x", c.cur, got)
+		}
+	}
+}
+
+// TestGateActionAgnostic: the register/resolve gate delivers a verdict exactly once for a
+// NON-delegate action kind too (the gate is the reusable substrate).
+func TestGateActionAgnostic(t *testing.T) {
+	resetPend()
+	p := &pending{kind: actExpandEgress, parentCgID: 9}
+	if !register(p) {
+		t.Fatal("register expand pending failed")
+	}
+	if !resolve(p.id, true, "approve", "op") {
+		t.Fatal("first resolve should win")
+	}
+	if v := <-p.decision; v != true || p.verdict != "approve" {
+		t.Fatalf("decision=%v verdict=%q", v, p.verdict)
+	}
+	if resolve(p.id, false, "deny", "op2") {
+		t.Fatal("second resolve must be a no-op (exactly-once)")
+	}
+}
