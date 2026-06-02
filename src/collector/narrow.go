@@ -78,7 +78,14 @@ func resolveAgentTarget(target string) (uint64, string, error) {
 		if !validInstance(inst) {
 			return 0, "", errNarrowBadInst
 		}
-		rel = "/bulkhead-agent.slice/bulkhead-agent@" + inst + ".service"
+		// Don't hardcode the slice hierarchy: systemd nests bulkhead-agent.slice under its
+		// dash-derived parent (bulkhead.slice), so the live path is
+		// /bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@<inst>.service. Glob for the
+		// real cgroup dir of a RUNNING instance; no match (not running) => target-gone.
+		rel = findAgentCgroupPath(inst)
+		if rel == "" {
+			return 0, "", errNarrowGone
+		}
 	}
 	full := filepath.Clean(filepath.Join("/sys/fs/cgroup", rel))
 	if !strings.Contains(full, "/bulkhead-agent.slice/bulkhead-agent@") {
@@ -89,6 +96,24 @@ func resolveAgentTarget(target string) (uint64, string, error) {
 		return 0, "", errNarrowGone
 	}
 	return cgID, strings.TrimPrefix(full, "/sys/fs/cgroup"), nil
+}
+
+// findAgentCgroupPath locates a RUNNING agent instance's cgroup directory (path relative to
+// /sys/fs/cgroup) without hardcoding the slice nesting, returning "" if not found/ambiguous.
+// systemd derives bulkhead-agent.slice's parent from its name, so the dir lives one level
+// under bulkhead.slice; the `*` pattern also tolerates a different single-level parent.
+func findAgentCgroupPath(inst string) string {
+	leaf := "bulkhead-agent@" + inst + ".service"
+	for _, pat := range []string{
+		"/sys/fs/cgroup/bulkhead.slice/bulkhead-agent.slice/" + leaf,
+		"/sys/fs/cgroup/*/bulkhead-agent.slice/" + leaf,
+		"/sys/fs/cgroup/bulkhead-agent.slice/" + leaf,
+	} {
+		if ms, _ := filepath.Glob(pat); len(ms) == 1 {
+			return strings.TrimPrefix(ms[0], "/sys/fs/cgroup")
+		}
+	}
+	return ""
 }
 
 // handleNarrow runs the operator-direct clamp. Called from handleApprove ONLY (the uid==0
