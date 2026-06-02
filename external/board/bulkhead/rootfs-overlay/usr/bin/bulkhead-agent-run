@@ -54,6 +54,9 @@ if [ -n "${BULKHEAD_AGENT_GRANT:-}" ]; then
 	echo "bulkhead-agent[$id]: requesting grant-once ${op}"
 	bulkhead-collector grant-once "$op"; g=$?
 	echo "bulkhead-agent[$id]: grant-once rc=${g}"
+	# Optional delay before consuming, to exercise the grant TTL backstop (ADR-0011): if the
+	# delay exceeds BULKHEAD_GRANT_TTL the grant self-expires and the post-grant op is denied.
+	[ -n "${BULKHEAD_AGENT_GRANT_DELAY:-}" ] && sleep "${BULKHEAD_AGENT_GRANT_DELAY}"
 	bulkhead-collector probe "$op" >/dev/null 2>&1; a1=$?
 	echo "bulkhead-agent[$id]: post-grant ${op} rc=${a1}"
 	bulkhead-collector probe "$op" >/dev/null 2>&1; a2=$?

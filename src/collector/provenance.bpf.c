@@ -139,8 +139,13 @@ static __always_inline int try_consume_grant(__u64 cg, __u32 hook)
 	if (v->expire_ns != 0 && bpf_ktime_get_ns() > v->expire_ns)
 		return 0; // TTL lapse (v1 writes 0 => never taken)
 	if (__sync_val_compare_and_swap(&v->count, 1, 0) == 1) {
-		bpf_map_delete_elem(&grant_once, &k); // tidy: no count==0 zombie (best-effort)
-		return 1;                             // the single granted instance -> allow
+		// Best-effort tidy (no count==0 zombie). NB: if the broker re-grants the same
+		// {cg,hook} in the tiny window after the CAS wins, this delete may drop that fresh
+		// re-grant — which fails SAFE (the re-granted op is merely denied, never
+		// over-permitted), so it is not relied upon for correctness. A leftover count==0 is
+		// inert anyway (a later CAS sees 0!=1 and loses).
+		bpf_map_delete_elem(&grant_once, &k);
+		return 1; // the single granted instance -> allow
 	}
 	return 0; // lost the race / already spent
 }

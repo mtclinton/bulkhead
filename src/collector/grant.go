@@ -19,7 +19,43 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
+
+// grantTTL bounds how long an APPROVED-but-unconsumed grant stays live. It is the
+// E0-independent recycle backstop (ADR-0011): even if ExecStopPost `grant-once clear self`
+// is silently EPERM'd because E0/lsm-bpf is armed (the clear runs bpf() from the agent's
+// non-TCB cgroup), a stranded grant self-expires. Default 300s; BULKHEAD_GRANT_TTL (seconds)
+// overrides; <=0 would disable the TTL but the default is always on.
+var grantTTL = func() time.Duration {
+	if v := os.Getenv("BULKHEAD_GRANT_TTL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 300 * time.Second
+}()
+
+// monotonicNs reads CLOCK_MONOTONIC in nanoseconds — the SAME clock the BPF hook reads via
+// bpf_ktime_get_ns (both are boot-based CLOCK_MONOTONIC), so a broker-stamped expire_ns is
+// directly comparable to the kernel's consume-time clock. Returns 0 on error (=> no TTL).
+func monotonicNs() uint64 {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0
+	}
+	return uint64(ts.Sec)*1_000_000_000 + uint64(ts.Nsec)
+}
+
+// grantExpiry returns the absolute CLOCK_MONOTONIC expiry to stamp, or 0 (no TTL) if the
+// clock can't be read.
+func grantExpiry() uint64 {
+	now := monotonicNs()
+	if now == 0 {
+		return 0
+	}
+	return now + uint64(grantTTL.Nanoseconds())
+}
 
 // grantableHook resolves a hook name to its id ONLY for the one-shot-grantable hooks
 // (E1 ptrace, E3 setuid/capset). E0 bpf (the substrate) and E2 socket_connect are refused.
@@ -87,11 +123,11 @@ func handleGrantOnceTail(conn net.Conn, agentCgID uint64, agentPath string, f []
 		}
 		defer m.Close()
 		k := bpfGrantKey{Cgid: cgID, Hook: hook}
-		v := bpfGrantVal{Count: 1, ExpireNs: 0} // SET=1, never increment (no count inflation)
+		v := bpfGrantVal{Count: 1, ExpireNs: grantExpiry()} // SET=1 (no inflation) + a TTL backstop
 		if err := m.Update(k, v, ebpf.UpdateAny); err != nil {
 			return "", err
 		}
-		return hookNames[hook] + " count=1", nil
+		return fmt.Sprintf("%s count=1 ttl=%ds", hookNames[hook], int(grantTTL.Seconds())), nil
 	}
 	_ = conn.SetDeadline(time.Now().Add(approvalTimeout + 15*time.Second))
 	finishGated(conn, p)

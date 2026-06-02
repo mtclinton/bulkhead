@@ -66,14 +66,16 @@ op that would have been allowed anyway. The consume only ever turns this hook's 
 `-EPERM` into `0` for one call; it never reverts a prior LSM deny (`if(ret!=0) return ret;` is still
 the first statement) and never adds a deny.
 
-**TTL field present, default-OFF (`expire_ns==0` = no expiry).** A stale GRANT over-permits
+**TTL backstop ON (`expire_ns = now + grantTTL`, default 300s).** A stale GRANT over-permits
 (fail-DANGEROUS), unlike a stale egress manifest which over-restricts (fail-safe), so the value
 carries an `expire_ns` slot checked at consume (`if (v->expire_ns != 0 && now > v->expire_ns)
-return 0;`). v1 writes `expire_ns=0` (no TTL): the broker cannot trivially read the kernel's
-`bpf_ktime` monotonic baseline to stamp a correct expiry, and `ExecStopPost` clear-self is the
-authoritative cleanup. Baking the field in now means a future TTL is a value-WRITE change, not an
-ABI/layout break to the verified object. Primary recycle hygiene is the agent's `ExecStopPost`
-clearing its grants + `reverifyCgroup` at write.
+return 0;`). The broker stamps a real expiry: `bpf_ktime_get_ns` IS `CLOCK_MONOTONIC`, the same
+boot-based clock the broker reads via `clock_gettime(CLOCK_MONOTONIC)` on the same host, so a
+broker-stamped `expire_ns` is directly comparable to the kernel's consume-time clock (the original
+"can't baseline the clock" concern does not hold). An approved-but-unconsumed grant therefore
+self-expires in `BULKHEAD_GRANT_TTL` seconds regardless of E0 state — the **E0-independent** recycle
+backstop. (On a `clock_gettime` error the broker writes `expire_ns=0` = no TTL, falling back to the
+other defenses.)
 
 **Broker gated action `actGrantOnce`**, mirroring `actExpandEgress`. New verb `GRANT-ONCE <hook>`
 on the agent-facing broker socket; `cmdGrantOnce` client; `handleGrantOnceTail` peer-attests the
@@ -81,22 +83,36 @@ SELF cgroup (SO_PEERPIDFD — the request body carries no identity, so an agent 
 ITSELF), validates the hook in `{ptrace,setuid,capset}` (rejects `bpf`/unknown -> `ERR bad-hook`),
 optionally short-circuits if the hook is not armed (`OK ... (not-armed, no-op)`), builds
 `pending{kind:actGrantOnce, grantHook:<id>}`, and calls `finishGated`. `execute()` takes a new
-`grantMu`, `reverifyCgroup`s the attested path, and writes `count=1, expire_ns=0` via
+`grantMu`, `reverifyCgroup`s the attested path, and writes `count=1, expire_ns=now+TTL` via
 `ebpf.UpdateAny`. **Count semantics: SET=1, never increment, hard cap 1** — two approvals before a
 consume do NOT stack to 2 (no count inflation); a re-grant is idempotent; the kernel CAS only ever
 recognizes the value 1, so a corrupted `count!=1` is treated as no-grant (fail-closed). `UpdateAny`
 (not `UpdateExist`) because a grant legitimately CREATES the key; the recycle defense is
 `reverifyCgroup`, not `UpdateExist`.
 
-**Recycle hygiene / lifecycle.** (1) `ExecStopPost=-+/usr/bin/bulkhead-collector grant-once clear
-self` on `bulkhead-agent@.service` deletes all three `{selfcg,*}` keys on exit (sibling of `egress
-clear self`; leading `-` so a missing entry/down collector never fails the stop, `+` for CAP_BPF).
-(2) `reverifyCgroup` in `execute()` so a grant is only ever WRITTEN against a live-attested cgroup.
-(3) Collector restart `os.RemoveAll(pinDir)` recreates `grant_once` EMPTY and resets `enforce_flags`
-to observe — the only safe state (no grants AND nothing armed). Residual window: only if a grant is
-unconsumed AND `ExecStopPost` is skipped (collector down at stop) AND the EXACT cgroup inode id is
-recycled onto a new armed agent that itself performs the same op — then it spends ONE op (a single,
-audited leak, not an escalation). The TTL field is the deferred backstop for this.
+**Recycle hygiene / lifecycle (layered, no single point of trust).** (1) The **TTL** (above):
+every grant self-expires in `BULKHEAD_GRANT_TTL`s, E0-independent. (2) `reverifyCgroup` in
+`execute()` so a grant is only ever WRITTEN against a live-attested cgroup. (3) `ExecStopPost=-+/usr
+/bin/bulkhead-collector grant-once clear self` on `bulkhead-agent@.service` deletes all three
+`{selfcg,*}` keys on exit (sibling of `egress clear self`; leading `-` so a missing entry never
+fails the stop, `+` for CAP_BPF). (4) Collector restart `os.RemoveAll(pinDir)` recreates
+`grant_once` EMPTY and resets `enforce_flags` to observe — the only safe state (no grants AND
+nothing armed).
+
+**Honest residual-window analysis (found by the ADR-0011 adversarial review).** `grant-once clear
+self` (defense 3) runs `bpf()` from the agent's own NON-TCB cgroup, so when **E0/`lsm-bpf` is
+armed** the clear is itself EPERM'd and the leading `-` swallows the failure — an unconsumed grant
+is NOT cleared on stop. This is the same E0+jail limitation as ADR-0006's `+ExecStartPre egress set
+self`, but here the leftover is fail-DANGEROUS (over-permits) rather than fail-safe. It is **not
+exploitable** in the current jail launch path, by composition: for a stranded grant to be consumed,
+a NEW agent must start at the recycled cgroup id, but under E0-armed that new agent's own
+`+ExecStartPre egress set self` `bpf()` is *also* EPERM'd, so it never starts; and the only way to
+disarm E0 is a collector restart, which wipes `grant_once`. So `E0 armed ⟹ no recycle consumer`, and
+`disarm ⟹ wipe`. Defense (1), the **TTL, closes it regardless**: a stranded grant expires in
+≤`grantTTL` even if E0 is armed and the composition argument is ever weakened (e.g. a future agent
+type that starts without a `bpf()`-ing `ExecStartPre`). So `ExecStopPost` clear-self is a prompt
+best-effort reclaim, NOT the authoritative backstop — the TTL is. The cleaner future fix (a
+TCB-context clear: the broker deletes `{cg,*}` on observed agent exit) is named in the seam.
 
 **Invariants preserved (unchanged):** no self-approval (uid-0 0600 `approve.sock` + SO_PEERCRED
 uid==0; agents are non-root DynamicUser); execute() reached only after `<-decision == true`; ONE
@@ -125,12 +141,25 @@ qemu (probe-based, NO setpriv/su; E1+E3 armed FIRST so the before-probe is genui
    `grant_once[{cg,HOOK_BPF}]=1` leaves `enforce_bpf` denying (no consume path on E0).
 6. **concurrency** — `probe setuid --race N` spawns N threads racing the regain after ONE grant;
    assert exactly one exits 0.
-7. **recycle** — `grant-once setuid`+approve (unconsumed), `systemctl stop` the agent ->
-   `ExecStopPost` clears it -> `status` shows no grant; restart (new cgid) -> `probe setuid` exits 1.
+7. **recycle** — `grant-once`+approve (unconsumed), `systemctl stop` the agent -> `ExecStopPost`
+   clears it (with E0 OFF) -> `status` shows no grant. NB: with E0 ARMED the clear is EPERM'd (see
+   the residual analysis); the TTL is the backstop there.
 8. **restart wipe** — grant+approve, `systemctl restart bulkhead-collector` -> `status` shows zero
    grants + observe; grant gone.
+9. **TTL backstop** — with a low `BULKHEAD_GRANT_TTL`, `grant-once`+approve then DELAY past the TTL
+   before consuming -> the post-grant probe is DENIED (the grant self-expired), E0-independent.
 Plus: the broker signed chain has a `grant-once` decision record (verify-audit passes) and the
 collector provenance chain shows the consume as decision=allowed mode=enforce.
+
+**As verified (`/tmp/granttest.py`, ALL PASS):** the LOAD gate (object loads => verifier accepts
+`BPF_CMPXCHG` on 6.6.127), E1 ptrace armed, baseline-deny, grant+consume-exactly-once (arms 1/2),
+deny-no-grant (arm 4), agent-gating (a console `grant-once` is refused — non-agent cgroup), the
+signed record + verify-audit, the empty-after-consume map, and the TTL backstop (arm 9). The live
+demo op is **ptrace** because it needs no caps and keeps the agent non-root (so it provably cannot
+self-approve); E3's consume is the IDENTICAL `try_consume_grant` call spliced into `enforce_gain`,
+covered by the host CAS test + the bytecode disassembly (the adversarial review confirmed
+`enforce_setuid`/`enforce_capset` each carry exactly one `BPF_CMPXCHG` + `grant_once` lookup/delete,
+and `enforce_bpf` carries none).
 
 A new `bulkhead-collector probe ptrace` is added (self-contained: parent PTRACE_ATTACHes a child it
 spawned in the same cgroup; exit 1 on EPERM, 0 on attach). The E1 probe must ensure the BPF hook —
@@ -147,8 +176,12 @@ regression. Bump the bulkhead-collector recipe SRCREV to the commit carrying the
 
 ## Seam left clean
 
-The TTL is value-WRITE-ready (the `expire_ns` field exists; v1 writes 0). Future increments: a
-broker-stamped `bpf_ktime`-baselined TTL, a per-agent grant ceiling map, a dedicated broker record
-type (deferred since ADR-0007 instead of overloading `provEvent`), persistent grants across restart
-(deliberately NOT done — restart-wipe is the fail-safe). No new systemd unit; the agent template
-gains one `ExecStopPost` line.
+The TTL is ACTIVE (the broker stamps `expire_ns = CLOCK_MONOTONIC now + grantTTL`). The cleanest
+remaining hardening — flagged by the adversarial review — is a **TCB-context clear**: have the
+broker (already TCB-registered, so its `bpf()` survives E0) delete an agent's `{cg,*}` grant keys
+when it observes the cgroup exit, so cleanup no longer depends on the agent's own (E0-blockable)
+`bpf()`. Until then the TTL is the E0-independent backstop. Other deferred: a per-agent grant
+ceiling map, a dedicated broker record type (deferred since ADR-0007 instead of overloading
+`provEvent`), persistent grants across restart (deliberately NOT done — restart-wipe is the
+fail-safe). No new systemd unit; the agent template gains two `ExecStopPost` lines (egress + grant
+clear).

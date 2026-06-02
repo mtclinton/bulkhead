@@ -443,12 +443,21 @@ func cmdStatus() {
 		var v bpfGrantVal
 		it := gm.Iterate()
 		any := false
+		now := monotonicNs()
 		for it.Next(&k, &v) {
 			name := hookNames[k.Hook]
 			if name == "" {
 				name = fmt.Sprintf("hook%d", k.Hook)
 			}
-			fmt.Printf("  cg=%-18d %-8s count=%d\n", k.Cgid, name, v.Count)
+			ttl := "none"
+			if v.ExpireNs != 0 {
+				if now != 0 && v.ExpireNs > now {
+					ttl = fmt.Sprintf("%ds", (v.ExpireNs-now)/1_000_000_000)
+				} else {
+					ttl = "expired"
+				}
+			}
+			fmt.Printf("  cg=%-18d %-8s count=%d ttl=%s\n", k.Cgid, name, v.Count, ttl)
 			any = true
 		}
 		if !any {
