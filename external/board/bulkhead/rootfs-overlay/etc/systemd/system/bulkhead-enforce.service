@@ -4,8 +4,11 @@
 # up. NOT auto-enabled: the shipped image is default-OBSERVE; opt into enforcement with
 #   systemctl enable --now bulkhead-enforce.service
 # Disarm (soft, no reboot) with `systemctl stop bulkhead-enforce` (clears the toggle)
-# or `bulkhead-collector enforce off bpf`. Fail-open: if the collector isn't up, this
-# unit just fails and the system stays in observe mode.
+# or `bulkhead-collector enforce off bpf`. ADR-0016: that disarm now ROUTES through the
+# collector control socket so the enforce_flags write is done from the collector's TCB
+# context — without that, a disarm from this unit's own non-TCB cgroup would be EPERM'd
+# the instant E0 is armed (the soft kill-switch would silently fail). Fail-open: if the
+# collector isn't up, this unit just fails and the system stays in observe mode.
 #
 # ADR-0016: E0 (lsm/bpf deny) is now armable WITH delegation working. This unit pulls in + orders
 # after the broker and BLOCKS (ExecStartPre) until the collector confirms the broker cgroup is in
@@ -19,6 +22,11 @@ Documentation=https://github.com/mtclinton/bulkhead
 After=bulkhead-collector.service bulkhead-broker.service
 Requires=bulkhead-collector.service
 Wants=bulkhead-broker.service
+# ADR-0016 review fix: a collector restart RemoveAll-re-pins a FRESH enforce_flags (= observe), so
+# without this an E0-armed posture would silently drop to observe while this oneshot/RemainAfterExit
+# unit still reported "active" (armed). PartOf= makes a collector restart also restart this unit, so
+# it re-runs ExecStartPre=ctl wait-broker-tcb + ExecStart=enforce on bpf against the fresh map.
+PartOf=bulkhead-collector.service
 
 [Service]
 Type=oneshot

@@ -244,8 +244,10 @@ func handleBrokerConn(conn net.Conn) {
 		reply("ERR peer-auth")
 		return
 	}
-	// Only a real jailed agent may use the broker (a TCB process must not).
-	if !strings.Contains(cgPath, "/bulkhead-agent.slice/bulkhead-agent@") {
+	// Only a real jailed agent may use the broker (a TCB process must not). Structural match
+	// (ADR-0016 review): an anchored agent-instance leaf, so a crafted uid-0 cgroup path that
+	// merely embeds the marker (a nested sub-scope, or a marker-named slice elsewhere) is rejected.
+	if !isAgentCgroup(cgPath) {
 		log.Printf("broker: reject non-agent cgroup %q", cgPath)
 		reply("ERR not-an-agent")
 		return

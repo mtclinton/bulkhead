@@ -93,6 +93,20 @@ RMW/read code unchanged.
    `RemoveAll` resets E0 to observe AND re-seeds the broker before re-pin, so a crash can never
    strand E0-armed against a non-TCB broker.
 
+6. **Review hardening** (an adversarial pass confirmed C2 no-arbitrary-TCB-register, C3 self-cgid +
+   happens-before, and the broker-register auth all HOLD — no escalation — and surfaced three
+   operability/precision items, all fixed here): (a) the soft-disarm was broken — `enforce off bpf`
+   issued a `bpf()` from a non-TCB cgroup that E0 EPERMs, so the documented kill-switch silently
+   failed while systemd reported the unit stopped. `cmdEnforce` now ROUTES through the collector
+   (a uid-0, non-agent-gated `ENFORCE-SET` control verb), so arm AND disarm work under E0. (b)
+   `bulkhead-enforce.service` / `-egress.service` gain `PartOf=bulkhead-collector.service` so a
+   collector restart (which `RemoveAll`-resets `enforce_flags` to observe) re-runs the arm against
+   the fresh map instead of silently dropping to observe while reporting armed. (c) the agent-cgroup
+   gate (the self-verb gate AND the broker delegation gate) moves from `strings.Contains` to an
+   anchored structural match (`isAgentCgroup`), so a crafted uid-0 cgroup path that merely embeds
+   the marker (a nested sub-scope, a marker-named slice elsewhere) no longer passes — bounded
+   defense-in-depth, since self-verbs only ever narrow the attested-self cgid.
+
 No new BPF program or map: the verified E0–E3 object is byte-for-byte unchanged; the only state
 E0-arming sets is `enforce_flags[HOOK_BPF]=1`. All changes are pure-Go (`control.go`, `main.go`
 wiring, the `broker.go` deletion, `gc.go`) + systemd units + the Yocto SRCREV bump.
@@ -100,26 +114,34 @@ wiring, the `broker.go` deletion, `gc.go`) + systemd units + the Yocto SRCREV bu
 ## Verification
 
 Host `go test` (src/collector) covers the kernel-free AUTHORIZATION guards — the security-critical
-logic: `TestIsAgentSelfCaller` (a self-verb is honored only for a real `/bulkhead-agent.slice/
-bulkhead-agent@` caller — the collector, the broker, an operator login, and the bare slice are all
-rejected) and `TestIsBrokerCaller` (the anti-arbitrary-register guard — only the string-equal
-broker cgroup passes; sibling / nested / substring-prefix / `..`-traversal / missing-leading-slash
-all rejected, so no caller can drive a TCB registration of another cgroup). The map-write +
-live `SO_PEERPIDFD` attestation paths require a kernel + the pinned BPF maps and are exercised by
-the qemu arm below. All ADR-0012/0013 suites stay green unchanged (the EXPAND/NARROW/GRANT RMW +
+logic: `TestIsAgentCgroup` (a self-verb / broker-delegation caller is honored only for an anchored
+agent-INSTANCE leaf — the collector, the broker, an operator login, the bare slice, AND crafted
+embedded-marker paths like a nested sub-scope or a marker-named slice under the wrong parent are all
+rejected) and `TestIsBrokerCaller` (the anti-arbitrary-register guard — only the string-equal broker
+cgroup passes; sibling / nested / substring-prefix / `..`-traversal / missing-leading-slash all
+rejected, so no caller can drive a TCB registration of another cgroup). The map-write + live
+`SO_PEERPIDFD` attestation paths require a kernel + the pinned BPF maps and are exercised by the
+qemu arm below. All ADR-0012/0013 suites stay green unchanged (the EXPAND/NARROW/GRANT RMW +
 `reverifyCgroup` + lock code is untouched).
 
-The E0-ARMED qemu arm (`scripts/qemu-e0-check.py`) — the artifact that converts the thesis from
-aspirational to demonstrated. BEFORE (current tree): arm E0, trigger delegation, assert it FAILS
-(broker self-register EPERM/log.Fatal; child +ExecStartPre EPERM). AFTER (patched tree, E0
-ACTUALLY ARMED): `status` shows bpf=ENFORCE and tcb_cgroups == {root,collector,broker}; (1) a
-jailed agent's direct `bpf()` is EPERM'd; (2) DELEGATE narrow-never-widen works under E0 (parentP→
-child public-cleared DENY, parentQ→child keeps public ALLOW); (3) EXPAND works (broker Update from
-TCB context not EPERM'd); (4) GRANT-ONCE works (one-shot ptrace allow-then-deny); (5) agent-jail
-launch works (manifest written via the control RPC before first connect) + a fail-closed sub-case
-(collector stopped ⇒ +ExecStartPre fails fast ⇒ payload never forks); (6) broker socket
-re-activation + collector restart both keep delegation working under E0; both signed chains
-verify-audit OK. The harness asserts before=FAIL / after=PASS on the SAME proofs.
+The E0-ARMED qemu arm (`scripts/qemu-e0-check.py`, `make verify-e0`) — the artifact that converts
+the thesis from aspirational to demonstrated, with E0 armed the whole time:
+- **broker TCB-by-grant**: `ctl wait-broker-tcb` confirms the broker is in tcb_cgroups via the
+  collector control socket (not a self-`bpf()`).
+- **E0-DENY (before/after on the SAME command)**: a direct `bpf()` map write from the console's
+  non-TCB cgroup (`egress set self`) SUCCEEDS in observe, then is EPERM'd once E0 is armed —
+  agents are physically unable to `bpf()`.
+- **DELEGATE-UNDER-E0**: a mock-driven parent (loopback,other; NO public) delegates a child
+  requesting public,…; the child's manifest is written `loopback,other` (public AND-cleared) via
+  the collector control RPC under E0, its public fetch is E2-DENIED under its own cgid, it FINALs,
+  and the broker signs the delegate record (gen + task_sha) from its TCB context — proving the
+  broker's TCB-context writes AND the child's control-socket manifest write both work with the bpf
+  substrate sealed.
+- **SOFT-DISARM**: `systemctl stop bulkhead-enforce` (routed `enforce off bpf`) actually disarms E0
+  under E0 — the same console direct `bpf()` succeeds again afterward (the review-fixed kill-switch).
+- **AUDIT**: both signed chains verify after the run.
+The BEFORE baseline (the current-tree FAIL: broker self-register EPERM/log.Fatal; child
++ExecStartPre EPERM) is code-verified and documented; the harness asserts the AFTER state.
 
 ## Seam
 

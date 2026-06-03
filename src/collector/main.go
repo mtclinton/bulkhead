@@ -256,27 +256,27 @@ func cmdEnforce(args []string) {
 	if len(args) > 1 {
 		hook = args[1]
 	}
-	hid, ok := hookID(hook)
-	if !ok {
-		log.Fatalf("unknown hook %q (known: bpf, socket_connect)", hook)
+	if _, ok := hookID(hook); !ok {
+		log.Fatalf("unknown hook %q (known: bpf, ptrace, socket_connect, setuid, capset)", hook)
 	}
-	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
-	if err != nil {
-		log.Fatalf("open pinned enforce_flags (is the collector running?): %v", err)
-	}
-	defer m.Close()
-	var v uint32
+	v := "0"
 	if args[0] == "on" {
-		v = 1
+		v = "1"
 	}
-	if err := m.Update(hid, v, ebpf.UpdateAny); err != nil {
-		log.Fatalf("update enforce_flags: %v", err)
+	// ADR-0016: route the enforce_flags write through the collector control socket so the bpf()
+	// is issued from the collector's TCB context. A DIRECT Update here runs in THIS process's
+	// cgroup, so once E0 is armed a DISARM from a non-TCB cgroup (the documented `systemctl stop
+	// bulkhead-enforce` kill-switch) would be EPERM'd and silently fail. The collector confirms
+	// the write; a non-OK reply (collector down / denied) exits non-zero so the unit fails loudly.
+	ok, resp := controlRPC("ENFORCE-SET " + hook + " " + v)
+	if !ok {
+		log.Fatalf("enforce %s %s (is the collector running?): %s", args[0], hook, resp)
 	}
 	state := "observe (fail-open)"
-	if v == 1 {
+	if v == "1" {
 		state = "DENY non-TCB"
 	}
-	log.Printf("enforce %s for hook %q (id %d) — %s", args[0], hook, hid, state)
+	log.Printf("enforce %s for hook %q — %s [%s]", args[0], hook, state, resp)
 }
 
 // cmdEgress sets or clears a cgroup's per-agent egress manifest (E2). The manifest

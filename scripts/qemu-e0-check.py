@@ -144,6 +144,15 @@ try:
     check("gen=1" in rec and "task_sha=" in rec,
           "DELEGATE-UNDER-E0: the broker signed the delegate record (gen + task_sha) from its TCB context under E0")
 
+    # SOFT-DISARM (ADR-0016 review fix): `enforce off bpf` routes through the collector (TCB), so it
+    # works under E0 — without the fix it would EPERM from the enforce unit's non-TCB cgroup and the
+    # kill-switch would silently fail. After disarm, the same console direct bpf() succeeds again.
+    run("systemctl stop bulkhead-enforce.service 2>&1"); run("sleep 1 2>/dev/null; true")
+    dis = run("bulkhead-collector egress set self loopback 2>&1; echo RC=$?")
+    out("\n[post-disarm direct bpf]\n" + dis)
+    check("RC=0" in dis,
+          "SOFT-DISARM: `systemctl stop bulkhead-enforce` (routed enforce off) actually disarmed E0 — the console can bpf() again")
+
     # AUDIT (file reads, not bpf): both signed chains verify with E0 armed.
     v1 = run("bulkhead-collector verify-audit /data/bulkhead/audit-broker/provenance.jsonl 2>&1; echo RC=$?")
     v2 = run("bulkhead-collector verify-audit /data/bulkhead/audit/provenance.jsonl 2>&1; echo RC=$?")

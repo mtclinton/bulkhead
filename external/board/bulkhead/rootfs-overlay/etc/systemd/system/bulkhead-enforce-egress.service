@@ -12,6 +12,10 @@ Description=bulkhead BPF-LSM enforce arming (opt-in: socket_connect / E2 per-age
 Documentation=https://github.com/mtclinton/bulkhead
 After=bulkhead-collector.service
 Requires=bulkhead-collector.service
+# ADR-0016 review fix: re-arm against the fresh map after a collector restart (else E2 silently
+# drops to observe while this unit still reports armed). The `enforce` writes route through the
+# collector control socket, so disarm works even when E0 (bpf hook) is also armed.
+PartOf=bulkhead-collector.service
 
 [Service]
 Type=oneshot

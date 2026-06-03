@@ -10,14 +10,15 @@ package main
 
 import "testing"
 
-func TestIsAgentSelfCaller(t *testing.T) {
+func TestIsAgentCgroup(t *testing.T) {
 	good := []string{
 		"/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@worker.service",
 		"/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@d1-deadbeef-childprobe.service",
+		"/bulkhead-agent.slice/bulkhead-agent@worker.service", // un-nested form (defensive)
 	}
 	for _, p := range good {
-		if !isAgentSelfCaller(p) {
-			t.Fatalf("agent cgroup %q must be accepted as a self-caller", p)
+		if !isAgentCgroup(p) {
+			t.Fatalf("agent jail cgroup %q must be accepted", p)
 		}
 	}
 	bad := []string{
@@ -27,10 +28,17 @@ func TestIsAgentSelfCaller(t *testing.T) {
 		"/user.slice/user-0.slice/session-1.scope", // an operator root login
 		"/", "",
 		"/bulkhead.slice/bulkhead-agent.slice", // the slice itself, not an instance
+		// ADR-0016-review C1: anchored match rejects crafted uid-0 paths that merely EMBED the
+		// marker (strings.Contains used to admit all of these — bounded, but a precision gap):
+		"/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@worker.service/payload.scope", // nested sub-cgroup leaf
+		"/user.slice/bulkhead-agent.slice/bulkhead-agent@x.service",                        // marker slice under the wrong parent
+		"/system.slice/bulkhead-agent.slice/bulkhead-agent@evil.service",                   // systemd-run --slice=bulkhead-agent.slice helper
+		"/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@worker.service.evil",          // suffix past .service
+		"bulkhead-agent.slice/bulkhead-agent@x.service",                                    // missing leading slash
 	}
 	for _, p := range bad {
-		if isAgentSelfCaller(p) {
-			t.Fatalf("non-agent cgroup %q must NOT be accepted as a self-caller", p)
+		if isAgentCgroup(p) {
+			t.Fatalf("non-agent / crafted cgroup %q must NOT be accepted", p)
 		}
 	}
 }

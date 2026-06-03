@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,15 +36,18 @@ import (
 
 const controlSockPath = "/run/bulkhead/control.sock"
 
-// agentSliceMarker: a self-verb is honored ONLY for a caller whose kernel-attested cgroup is a
-// real agent jail (so an arbitrary system process cannot set/clear an egress manifest).
-const agentSliceMarker = "/bulkhead-agent.slice/bulkhead-agent@"
+// agentCgroupRe matches the kernel-attested cgroup PATH of a real bulkhead agent jail: a single
+// agent-INSTANCE leaf (the @-marker as a real path component, no trailing sub-cgroup), optionally
+// nested under /bulkhead.slice. Anchored (^…$) so a substring/embedded marker cannot pass —
+// closing the ADR-0016-review C1 gap where strings.Contains admitted a crafted path like
+// /…/bulkhead-agent@worker.service/payload.scope or /user.slice/bulkhead-agent.slice/…@x.service.
+var agentCgroupRe = regexp.MustCompile(`^(/bulkhead\.slice)?/bulkhead-agent\.slice/bulkhead-agent@[^/]+\.service$`)
 
-// isAgentSelfCaller reports whether a kernel-attested cgroup PATH belongs to a bulkhead agent
-// jail — the gate on every self-verb (the body never names a cgroup; the cgid is the attested
-// caller's). PURE so the guard is unit-testable without a kernel.
-func isAgentSelfCaller(cgPath string) bool {
-	return strings.Contains(cgPath, agentSliceMarker)
+// isAgentCgroup reports whether a kernel-attested cgroup PATH is a real bulkhead agent jail. Used
+// both for the control self-verb gate (the body never names a cgroup; the cgid is the attested
+// caller's) and the broker's delegation gate. PURE so it is unit-testable without a kernel.
+func isAgentCgroup(cgPath string) bool {
+	return agentCgroupRe.MatchString(cgPath)
 }
 
 // isBrokerCaller reports whether a kernel-attested cgroup PATH is EXACTLY the broker unit's
@@ -114,6 +118,8 @@ func handleControlConn(conn net.Conn) {
 		ctlTcbRegisterBroker(reply, cgPath)
 	case "WAIT-BROKER-TCB":
 		ctlWaitBrokerTCB(reply)
+	case "ENFORCE-SET":
+		ctlEnforceSet(reply, cgPath, f)
 	default:
 		reply("ERR protocol")
 	}
@@ -142,7 +148,7 @@ func peerUID(conn net.Conn) (uint32, bool) {
 // ---- self-verbs: write egress_policy/grant_once for the KERNEL-ATTESTED self cgid only -------
 
 func ctlEgressSetSelf(reply func(string), cgID uint64, cgPath string, f []string) {
-	if !isAgentSelfCaller(cgPath) {
+	if !isAgentCgroup(cgPath) {
 		reply("ERR not-an-agent")
 		return
 	}
@@ -171,7 +177,7 @@ func ctlEgressSetSelf(reply func(string), cgID uint64, cgPath string, f []string
 }
 
 func ctlEgressClearSelf(reply func(string), cgID uint64, cgPath string) {
-	if !isAgentSelfCaller(cgPath) {
+	if !isAgentCgroup(cgPath) {
 		reply("ERR not-an-agent")
 		return
 	}
@@ -191,7 +197,7 @@ func ctlEgressClearSelf(reply func(string), cgID uint64, cgPath string) {
 }
 
 func ctlGrantClearSelf(reply func(string), cgID uint64, cgPath string) {
-	if !isAgentSelfCaller(cgPath) {
+	if !isAgentCgroup(cgPath) {
 		reply("ERR not-an-agent")
 		return
 	}
@@ -260,6 +266,49 @@ func ctlWaitBrokerTCB(reply func(string)) {
 		return
 	}
 	reply("OK registered")
+}
+
+// ctlEnforceSet arms/disarms a per-hook enforce toggle FROM THE COLLECTOR'S TCB CONTEXT (ADR-0016
+// review fix). The enforce_flags Update is itself a bpf() — done directly by `enforce on|off` it
+// runs in the caller's cgroup, so once E0 is armed a DISARM from a non-TCB cgroup (the documented
+// `systemctl stop bulkhead-enforce` kill-switch, run in the enforce unit's own non-TCB cgroup) is
+// EPERM'd: the soft-disarm silently fails while systemd reports the unit stopped. Routing it here
+// lets the collector (TCB, E0-exempt) do the write, so arm AND disarm work under E0. Operator-only:
+// uid==0 is already required by handleControlConn, and we additionally reject AGENT cgroups so a
+// jailed lineage can never flip the master switch (an agent's +ExecStartPre runs as uid-0 but in an
+// agent cgroup). The authority is no broader than today's root (root can already disarm via a
+// collector restart, which RemoveAll-resets enforce to observe).
+func ctlEnforceSet(reply func(string), cgPath string, f []string) {
+	if isAgentCgroup(cgPath) {
+		reply("ERR not-operator") // an agent may never toggle the enforce master switch
+		return
+	}
+	if len(f) != 3 || (f[2] != "0" && f[2] != "1") {
+		reply("ERR protocol")
+		return
+	}
+	hid, ok := hookID(f[1])
+	if !ok {
+		reply("ERR bad-hook")
+		return
+	}
+	var val uint32
+	if f[2] == "1" {
+		val = 1
+	}
+	controlMu.Lock()
+	defer controlMu.Unlock()
+	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
+	if err != nil {
+		reply("ERR map")
+		return
+	}
+	defer m.Close()
+	if err := m.Update(hid, val, ebpf.UpdateAny); err != nil {
+		reply("ERR update")
+		return
+	}
+	reply("OK " + f[1] + "=" + f[2])
 }
 
 // ---- ctl client (run by the agent +ExecStartPre / the broker / the enforce-arm gate) ----------
