@@ -30,6 +30,12 @@ Slice=bulkhead-agent.slice
 # local IPC + loopback only, no outbound network).
 Environment=BULKHEAD_AGENT_EGRESS=loopback,other
 
+# --- RECYCLE FIX (ADR-0012 composed-review F3): clear any one-shot grant INHERITED from a
+#     predecessor that died at this cgroup inode before its ExecStopPost could clear it (a
+#     crash skips ExecStopPost; the GC keeps a grant whose inode is live-again). Clearing at
+#     STARTUP, before the payload forks, guarantees a fresh agent never inherits a stranded
+#     E1/E3 grant. `+` for CAP_BPF; leading `-` so a missing entry never blocks the start. ---
+ExecStartPre=-+/usr/bin/bulkhead-collector grant-once clear self
 # --- RACE FIX: privileged manifest write in THIS cgroup, before the payload forks. ---
 ExecStartPre=+/usr/bin/bulkhead-collector egress set self ${BULKHEAD_AGENT_EGRESS}
 

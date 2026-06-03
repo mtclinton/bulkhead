@@ -8,6 +8,13 @@ Description=bulkhead inter-agent delegation broker
 Documentation=https://github.com/mtclinton/bulkhead
 After=bulkhead-collector.service
 Requires=bulkhead-collector.service
+# Composed-review fix (broker de-TCB on collector restart): the broker self-registers its
+# cgroup into tcb_cgroups ONCE at startup, but the collector os.RemoveAll(pinDir) + re-pins a
+# fresh tcb_cgroups (root+collector only) on every run. PartOf= makes a collector restart
+# also restart the broker, so it re-runs brokerSelfRegisterTCB against the new map (E0 is
+# reset to observe by the same restart, so the self-register bpf() succeeds). The collector
+# GC additionally prunes any STALE broker cgid left by an independent broker re-activation.
+PartOf=bulkhead-collector.service
 
 [Service]
 Type=exec
