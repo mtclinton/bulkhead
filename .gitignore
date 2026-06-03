@@ -20,6 +20,10 @@ bitbake.lock
 /yocto/meta-security/
 /yocto/build/
 
+# Python (qemu verification harness byte-compile cache)
+__pycache__/
+*.pyc
+
 # Go
 /bin/
 *.test

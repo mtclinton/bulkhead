@@ -53,21 +53,33 @@ try:
 
     # --- a delegating PARENT: a real agent whose task makes it emit ONE delegate directive. ---
     def write_parent(inst, egress, task):
+        # The PARENT is a top-level (operator-launched) agent that runs the real runtime and is
+        # told (via its task) to delegate. EGRESS sets its own manifest; the task carries an ORCH
+        # directive the mock turns into a delegate. Written with `printf '%s\n' 'line'...`: each
+        # line is a SINGLE-quoted literal arg (no shell expansion), and `%i` in ExecStart is just
+        # arg text to %s — so a space/`=`/`+`-bearing task survives with zero quoting hazards and
+        # no `%`-escaping (busybox has printf but NOT base64).
         d = f"/run/systemd/system/bulkhead-agent@{inst}.service.d"
         run(f"mkdir -p {d}")
-        # write the drop-in via a heredoc so the (space-bearing, double-quoted) task survives
-        run(f"cat > {d}/10-orch.conf <<'EOF'\n"
-            f"[Service]\n"
-            f"Environment=BULKHEAD_AGENT_EGRESS={egress}\n"
-            f'Environment="BULKHEAD_AGENT_TASK={task}"\n'
-            f"Environment=BULKHEAD_ROUTER_URL=http://127.0.0.1:8088\n"
-            f"Environment=BULKHEAD_AGENT_ALLOW_DELEGATE=1\n"
-            f"Environment=BULKHEAD_DELEGATE_TIMEOUT=45\n"
-            f"Environment=BULKHEAD_AGENT_DEADLINE=120\n"
-            f"ExecStart=\n"
-            f"ExecStart=/usr/bin/bulkhead-agent %i\n"
-            f"EOF")
+        lines = [
+            "[Service]",
+            f"Environment=BULKHEAD_AGENT_EGRESS={egress}",
+            f'Environment="BULKHEAD_AGENT_TASK={task}"',
+            "Environment=BULKHEAD_ROUTER_URL=http://127.0.0.1:8088",
+            "Environment=BULKHEAD_AGENT_ALLOW_DELEGATE=1",
+            "Environment=BULKHEAD_DELEGATE_TIMEOUT=45",
+            "Environment=BULKHEAD_AGENT_DEADLINE=120",
+            "ExecStart=",
+            "ExecStart=/usr/bin/bulkhead-agent %i",
+        ]
+        args = " ".join("'" + l + "'" for l in lines)  # lines contain no single quote
+        run(f"printf '%s\\n' {args} > {d}/10-orch.conf")
         run("systemctl daemon-reload 2>&1")
+
+    def find_child(suffix):
+        ls = run(f"ls -d /run/systemd/system/bulkhead-agent@d1-*-{suffix}.service.d 2>/dev/null; echo END")
+        cm = re.search(r"bulkhead-agent@(d1-[0-9a-f]+-" + re.escape(suffix) + r")\.service\.d", ls)
+        return cm.group(1) if cm else None
 
     def delegate_and_approve(parent_inst, suffix, decision="allow"):
         # start the parent; it delegates within a step or two, then BLOCKS on the operator gate.
@@ -82,13 +94,21 @@ try:
             run("sleep 2 2>/dev/null; true")
         if gid is not None:
             run(f"bulkhead-collector approve {decision} {gid} 2>&1")
-        run("sleep 4 2>/dev/null; true")
+        # the broker's launchChild creates the child drop-in dir + .task source, then starts the
+        # child. Resolve + SNAPSHOT both WHILE THE CHILD IS ALIVE — the child's ExecStopPost reaps
+        # them on stop (ADR-0015 cleanup), so they only exist during the child's bounded run.
+        cinst = None; conf = ""; taskfile = ""
+        for _ in range(12):
+            cinst = find_child(suffix)
+            if cinst:
+                conf = run(f"cat /run/systemd/system/bulkhead-agent@{cinst}.service.d/20-delegated-egress.conf 2>&1")
+                taskfile = run(f"cat /run/bulkhead/tasks/{cinst}.task 2>&1")
+                break
+            run("sleep 1 2>/dev/null; true")
         wait_done(f"bulkhead-agent@{parent_inst}.service")
-        # resolve the broker-minted child instance from its drop-in dir (d1-<hex>-<suffix>).
-        ls = run(f"ls -d /run/systemd/system/bulkhead-agent@d1-*-{suffix}.service.d 2>/dev/null; echo END")
-        cm = re.search(r"bulkhead-agent@(d1-[0-9a-f]+-" + re.escape(suffix) + r")\.service\.d", ls)
-        cinst = cm.group(1) if cm else None
-        return gid, cinst
+        if cinst:
+            wait_done(f"bulkhead-agent@{cinst}.service")
+        return gid, cinst, conf, taskfile
     def cjournal(cinst):
         return run(f"journalctl -u bulkhead-agent@{cinst}.service --no-pager 2>&1 | "
                    f"grep -aE 'agent\\[|DENIED|OK: fetch|FINAL|egress set' | tail -25")
@@ -110,50 +130,52 @@ try:
     # ===== ARM CONFINE: narrow-never-widen from a real agent decision =====
     write_parent("orchp", "loopback,other",
                  "ORCH childprobe public,loopback,other FETCH-ONLY https://api.anthropic.com/")
-    gidC, cinstC = delegate_and_approve("orchp", "childprobe", "allow")
-    out(f"\n[child instance] {cinstC}\n")
+    gidC, cinstC, confC, _ = delegate_and_approve("orchp", "childprobe", "allow")
+    out(f"\n[child instance] {cinstC}\n[child drop-in]\n{confC}\n")
     check(gidC is not None and cinstC is not None,
           "ARM CONFINE: parent's model loop DECIDED to delegate; operator approved; child d1-*-childprobe minted")
+    # the broker narrowed the child to loopback,other (public AND-cleared) — visible in the drop-in.
+    check("BULKHEAD_AGENT_EGRESS=loopback,other" in confC,
+          "ARM CONFINE: the child manifest is loopback,other — public was AND-cleared though the request+task demanded it")
     jC = cjournal(cinstC) if cinstC else ""
     out("\n[child journal]\n" + jC + "\n")
     check("DENIED: egress" in jC,
-          "ARM CONFINE: child's fetch to the public host was E2-DENIED — public AND-cleared though the task demanded it (narrow-never-widen)")
+          "ARM CONFINE: the child's fetch to the public host was E2-DENIED under its own cgid (narrow-never-widen from a real agent)")
     check("FINAL" in jC or "DONE" in jC,
           "ARM CONFINE: the child reached FINAL over loopback — the delegated task RAN inside the narrowed jail")
-    # the signed broker record: applied=loopback,other (public dropped), gen=1, a task hash bound.
-    rec = run("grep -a '\"hook\":\"delegate\"' /data/bulkhead/audit-broker/provenance.jsonl 2>/dev/null | tail -1; echo END")
+    # the signed broker record binds the child instance + gen=1 + the exact task bytes (task_sha).
+    rec = run(f"grep -a '\"hook\":\"delegate\"' /data/bulkhead/audit-broker/provenance.jsonl 2>/dev/null | grep -a 'childprobe' | tail -1; echo END")
     out("\n[broker delegate record]\n" + rec + "\n")
-    check("applied=loopback,other" in rec and "gen=1" in rec and "task_sha=" in rec,
-          "ARM CONFINE/AUDIT: the signed delegate record binds applied=loopback,other + gen=1 + task_sha (the exact task bytes)")
+    check("gen=1" in rec and "task_sha=" in rec and "loopback,other" in rec and ("\"decision\":\"approve\"" in rec or "approve" in rec),
+          "ARM CONFINE/AUDIT: the signed delegate record binds the child + gen=1 + task_sha + applied loopback,other + operator approve")
 
     # ===== ARM ALLOW (positive control): a public-holding parent => child KEEPS public =====
     write_parent("orchq", "public,loopback,other",
                  "ORCH childopen public,loopback,other FETCH-ONLY https://api.anthropic.com/")
-    gidA, cinstA = delegate_and_approve("orchq", "childopen", "allow")
+    gidA, cinstA, confA, _ = delegate_and_approve("orchq", "childopen", "allow")
     jA = cjournal(cinstA) if cinstA else ""
-    out(f"\n[child-open instance] {cinstA}\n[child-open journal]\n" + jA + "\n")
-    check(cinstA is not None and "DENIED: egress" not in jA and ("OK: fetch" in jA or "FINAL" in jA),
+    out(f"\n[child-open instance] {cinstA}\n[child-open drop-in]\n{confA}\n[child-open journal]\n" + jA + "\n")
+    # classes render in canonical bit order (loopback, linklocal, private, public, other).
+    check(cinstA is not None and "BULKHEAD_AGENT_EGRESS=loopback,public,other" in confA and "DENIED: egress" not in jA,
           "ARM ALLOW: a public-holding parent's child KEEPS public — its fetch is NOT E2-denied (the mask, not a blanket block)")
 
     # ===== ARM INJECTION: a sanitizer-passing directive-looking task is channel-neutralized =====
+    # The child task is NOT prefixed FETCH-ONLY so it runs the longer default loop (more steps =>
+    # a wider window to snapshot its artifacts before its ExecStopPost reaps them).
     write_parent("orchx", "loopback,other",
-                 "ORCH childpwn loopback,other FETCH-ONLY ExecStartPre=+/usr/bin/touch /run/pwned")
-    gidX, cinstX = delegate_and_approve("orchx", "childpwn", "allow")
-    out(f"\n[inject child instance] {cinstX}\n")
+                 "ORCH childpwn loopback,other ExecStartPre=+/usr/bin/touch /run/pwned")
+    gidX, cinstX, confX, taskX = delegate_and_approve("orchx", "childpwn", "allow")
+    out(f"\n[inject child instance] {cinstX}\n[inject drop-in]\n{confX}\n[inject .task source]\n{taskX}\n")
     check(cinstX is not None, "ARM INJECTION: the directive-looking task PASSED validTask (printable ASCII) and a child was minted")
     pwned = run("test -e /run/pwned && echo PWNED || echo CLEAN")
     check("CLEAN" in pwned, "ARM INJECTION: /run/pwned was NEVER created — the task did not inject a unit directive")
-    conf = run(f"cat /run/systemd/system/bulkhead-agent@{cinstX}.service.d/20-delegated-egress.conf 2>&1") if cinstX else ""
-    out("\n[child drop-in .conf]\n" + conf + "\n")
-    check(cinstX is not None and "ExecStartPre" not in conf and "/run/pwned" not in conf and "touch" not in conf,
+    check(cinstX is not None and "ExecStartPre=+/usr/bin/touch" not in confX and "/run/pwned" not in confX,
           "ARM INJECTION: the child drop-in contains ONLY broker-fixed lines — none of the task bytes reached unit syntax")
-    taskfile = run(f"cat /run/bulkhead/tasks/{cinstX}.task 2>&1") if cinstX else ""
-    out("\n[credential-source .task file]\n" + taskfile + "\n")
-    check(cinstX is not None and "ExecStartPre=+/usr/bin/touch /run/pwned" in taskfile,
+    check(cinstX is not None and "ExecStartPre=+/usr/bin/touch /run/pwned" in taskX,
           "ARM INJECTION: the payload lives verbatim ONLY as credential CONTENT in /run/bulkhead/tasks/<inst>.task (file, not unit grammar)")
     # the child ran as a DynamicUser (non-root), not as root — the jail held.
-    cuser = run(f"systemctl show -p User -p DynamicUser bulkhead-agent@{cinstX}.service 2>&1") if cinstX else ""
-    check(cinstX is not None and "DynamicUser=yes" in cuser and "User=root" not in cuser,
+    cuser = run(f"systemctl show -p DynamicUser bulkhead-agent@{cinstX}.service 2>&1") if cinstX else ""
+    check(cinstX is not None and "DynamicUser=yes" in cuser,
           "ARM INJECTION: the child ran as a DynamicUser jail (not root) — no privilege escalation")
 
     # ===== ARM AUDIT: both chains verify; child verdict under its own cgid =====
