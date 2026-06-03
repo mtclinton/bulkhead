@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# OPT-IN BPF-LSM enforce arming for the socket_connect hook (E2 per-agent egress).
-# Sibling of bulkhead-enforce.service (which arms the bpf hook). NOT auto-enabled: the
-# shipped image is default-OBSERVE, so an agent's egress manifest is recorded and
-# would-deny is logged, but nothing is blocked until you opt in with:
-#   systemctl enable --now bulkhead-enforce-egress.service
+# BPF-LSM enforce arming for the socket_connect hook (E2 per-agent egress). Sibling of
+# bulkhead-enforce.service (the bpf hook). ADR-0018: AUTO-ENABLED — the shipped image enforces
+# per-agent egress manifests BY DEFAULT (E0 alone seals the bpf substrate but leaves egress in
+# observe, a half-guarantee). No broker-TCB dependency (per-agent egress_policy is keyed by agent
+# cgid; a non-agent cgroup with no entry is ALLOW), so it arms gate-free, in parallel with E0.
+# Soft-disarm with `systemctl stop bulkhead-enforce-egress` (routed through the collector).
 # Disarm (soft, no reboot): `systemctl stop bulkhead-enforce-egress` (clears the toggle)
 # or `bulkhead-collector enforce off socket_connect`. Fail-open: if the collector isn't
 # up, this unit just fails and egress stays in observe mode.

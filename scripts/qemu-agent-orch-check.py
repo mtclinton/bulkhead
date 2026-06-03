@@ -114,14 +114,19 @@ try:
                    f"grep -aE 'agent\\[|DENIED|OK: fetch|FINAL|egress set' | tail -25")
 
     check("active" in run("systemctl is-active bulkhead-collector 2>&1"), "collector active")
-    # the broker is socket-activated; start it explicitly so it self-registers TCB up front, and
-    # point delegated CHILDREN at the bundled mock (broker env, never parent — no SSRF-via-infer).
+    # ADR-0018: the shipped image now boots E0+E2 ARMED. This (ADR-0015/0017) test exercises E2-based
+    # orchestration + reads `bulkhead-collector status` (a bpf read that EPERMs under armed-E0), so
+    # DISARM E0 here (keep E2 armed from boot). The routed `systemctl stop` works under armed-E0.
+    run("systemctl stop bulkhead-enforce.service 2>&1"); run("sleep 1 2>/dev/null; true")
+    # broker: BOOT-STARTED (ADR-0018) + already running with the socket fd. Apply the demo's
+    # child-router drop-in + RESTART (systemd re-passes the socket fd via LISTEN_FDS; a bare start
+    # would hit the fail-closed brokerListener). The restart re-registers TCB.
     run("mkdir -p /run/systemd/system/bulkhead-broker.service.d 2>&1")
     run("printf '[Service]\\nEnvironment=BULKHEAD_CHILD_ROUTER_URL=http://127.0.0.1:8088\\n"
         "Environment=BULKHEAD_APPROVAL_TIMEOUT=35\\n' > /run/systemd/system/bulkhead-broker.service.d/90-orch.conf")
     run("systemctl daemon-reload 2>&1")
-    run("systemctl start bulkhead-broker.service 2>&1"); run("sleep 1 2>/dev/null; true")
-    check("active" in run("systemctl is-active bulkhead-broker.service 2>&1"), "broker active (TCB self-registered)")
+    run("systemctl restart bulkhead-broker.service 2>&1"); run("sleep 2 2>/dev/null; true")
+    check("active" in run("systemctl is-active bulkhead-broker.service 2>&1"), "broker active (boot-started; restarted with the demo drop-in)")
     run("systemctl start bulkhead-mockchat.service 2>&1"); run("sleep 2 2>/dev/null; true")
     check("active" in run("systemctl is-active bulkhead-mockchat.service 2>&1"), "mockchat endpoint active (127.0.0.1:8088)")
     arm = run("systemctl start bulkhead-enforce-egress.service 2>&1; echo RC=$?")

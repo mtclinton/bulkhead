@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# Inter-agent egress delegation broker (ADR-0006). Socket-activated by
-# bulkhead-broker.socket. Computes child = parent ∩ requested (narrow-never-widen) and
-# launches the child as a normal bulkhead-agent@ instance, so ADR-0005's verified
-# +ExecStartPre ordering closes the connect-vs-manifest race. TCB but caged.
+# Inter-agent egress delegation broker (ADR-0006). ADR-0018: BOOT-STARTED (not lazily
+# socket-activated) and handed bulkhead-broker.socket's listening fd via LISTEN_FDS, so the broker
+# is RUNNING and collector-TCB-registered before E0 arms at boot (its cgroup must EXIST for the
+# enforce unit's `ctl wait-broker-tcb` gate to resolve it). Computes child = parent ∩ requested
+# (narrow-never-widen) and launches the child as a normal bulkhead-agent@ instance, so ADR-0005's
+# verified +ExecStartPre ordering closes the connect-vs-manifest race. TCB but caged.
 [Unit]
 Description=bulkhead inter-agent delegation broker
 Documentation=https://github.com/mtclinton/bulkhead
 After=bulkhead-collector.service
 Requires=bulkhead-collector.service
+# ADR-0018: the .socket stays the SOLE owner of /run/bulkhead/broker.sock (and the sole creator of
+# /run/bulkhead via RuntimeDirectory). Wants=/After= it so PID-1 has the socket listening and hands
+# this boot-started service the activation fd (LISTEN_FDS) — brokerListener takes the FileListener
+# branch and NEVER rebinds the path (the fallback is fail-closed unless BULKHEAD_BROKER_PATH_BIND=1).
+Wants=bulkhead-broker.socket
+After=bulkhead-broker.socket
 # ADR-0016: ordered BEFORE the E0-arming unit so PID-1 has materialized the broker cgroup and the
 # broker has self-requested TCB registration (via the collector control socket) before E0 arms.
 Before=bulkhead-enforce.service
@@ -49,4 +57,8 @@ ProtectKernelModules=yes
 # it NEVER makes outbound network connections.
 RestrictAddressFamilies=AF_UNIX
 MemoryDenyWriteExecute=no
-# No [Install]: started on demand by bulkhead-broker.socket.
+
+# ADR-0018: boot-started so the broker is up + TCB before E0 arms (hardened-by-default). PID-1
+# still passes the bulkhead-broker.socket fd (Wants=/After= above), so this is not a second owner.
+[Install]
+WantedBy=multi-user.target

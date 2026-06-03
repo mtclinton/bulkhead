@@ -45,7 +45,15 @@ SYSTEMD_SERVICE:${PN} = "\
     bulkhead-broker.socket \
     bulkhead-seal-audit-key.service \
     bulkhead-verify-audit.service \
+    bulkhead-broker.service \
+    bulkhead-enforce.service \
+    bulkhead-enforce-egress.service \
 "
+# ADR-0018 HARDEN-BY-DEFAULT: the shipped image boots ENFORCED. bulkhead-broker.service is
+# boot-started (so its cgroup exists for the enforce gate; it still inherits the .socket fd via
+# LISTEN_FDS), and bulkhead-enforce.service (E0 = lsm/bpf deny) + bulkhead-enforce-egress.service
+# (E2 = per-agent egress) auto-arm. A failed arm degrades to safe observe (enforce_flags-empty =>
+# observe by construction), never a brick. Soft-disarm: `systemctl stop bulkhead-enforce[-egress]`.
 SYSTEMD_AUTO_ENABLE = "enable"
 
 do_install() {

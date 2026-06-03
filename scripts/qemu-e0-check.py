@@ -87,14 +87,19 @@ try:
                    f"grep -aE 'agent\\[|DENIED|FINAL|egress set' | tail -25")
 
     check("active" in run("systemctl is-active bulkhead-collector 2>&1"), "collector active")
-    # broker: start it + point delegated children at the mock (broker env, never parent). On start
-    # the broker self-requests TCB registration via the collector control socket (ADR-0016).
+    # ADR-0018: the shipped image now boots E0+E2 ARMED. This harness proves the OBSERVE->arm path
+    # (its companion qemu-hbd-check.py proves boots-armed), so DISARM first to reach observe — the
+    # routed `systemctl stop` works even under armed-E0 (enforce-off goes through the collector).
+    run("systemctl stop bulkhead-enforce.service bulkhead-enforce-egress.service 2>&1"); run("sleep 1 2>/dev/null; true")
+    # broker: it is BOOT-STARTED (ADR-0018) and already running with the bulkhead-broker.socket fd.
+    # Apply the demo's child-router drop-in + RESTART it (systemd re-passes the socket fd via
+    # LISTEN_FDS — a bare start would hit the fail-closed brokerListener). Restart re-registers TCB.
     run("mkdir -p /run/systemd/system/bulkhead-broker.service.d 2>&1")
     run("printf '[Service]\\nEnvironment=BULKHEAD_CHILD_ROUTER_URL=http://127.0.0.1:8088\\n"
         "Environment=BULKHEAD_APPROVAL_TIMEOUT=35\\n' > /run/systemd/system/bulkhead-broker.service.d/90-e0.conf")
     run("systemctl daemon-reload 2>&1")
-    run("systemctl start bulkhead-broker.service 2>&1"); run("sleep 1 2>/dev/null; true")
-    check("active" in run("systemctl is-active bulkhead-broker.service 2>&1"), "broker active")
+    run("systemctl restart bulkhead-broker.service 2>&1"); run("sleep 2 2>/dev/null; true")
+    check("active" in run("systemctl is-active bulkhead-broker.service 2>&1"), "broker active (boot-started, restarted with the demo drop-in)")
     run("systemctl start bulkhead-mockchat.service 2>&1"); run("sleep 2 2>/dev/null; true")
     check("active" in run("systemctl is-active bulkhead-mockchat.service 2>&1"), "mockchat endpoint active (127.0.0.1:8088)")
 

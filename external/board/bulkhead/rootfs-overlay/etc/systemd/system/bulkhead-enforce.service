@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# OPT-IN BPF-LSM enforce arming (ADR-0004). Arms enforce for the bpf() hook AFTER the
-# fail-closed self-test, the collector (which pins the policy maps), and the floor are
-# up. NOT auto-enabled: the shipped image is default-OBSERVE; opt into enforcement with
-#   systemctl enable --now bulkhead-enforce.service
+# BPF-LSM enforce arming for the bpf() hook (E0). ADR-0018: AUTO-ENABLED — the shipped image is
+# ENFORCED BY DEFAULT (boots E0-armed) now that the full stack is armable end-to-end with
+# delegation (ADR-0016). Arms AFTER the fail-closed self-test + the collector (pins the maps) +
+# the broker is TCB-registered (the wait-broker-tcb gate below). Soft-disarm at runtime with
+#   systemctl stop bulkhead-enforce   (routes enforce-off through the collector, so it works under
+# armed E0). A failed arm leaves enforce_flags empty => the box degrades to safe observe (never a
+# brick); enforce_flags-empty => observe by construction (ADR-0004).
 # Disarm (soft, no reboot) with `systemctl stop bulkhead-enforce` (clears the toggle)
 # or `bulkhead-collector enforce off bpf`. ADR-0016: that disarm now ROUTES through the
 # collector control socket so the enforce_flags write is done from the collector's TCB

@@ -203,18 +203,27 @@ func approveListener() (net.Listener, error) {
 	return ln, nil
 }
 
-// brokerListener prefers systemd socket activation (LISTEN_FDS fd 3); else binds the path.
+// brokerListener takes the listening socket from systemd socket activation (LISTEN_FDS fd 3).
+// ADR-0018: the broker is boot-started AND handed the fd by bulkhead-broker.socket (which is the
+// SOLE owner of /run/bulkhead/broker.sock, RemoveOnStop=yes). The legacy direct path-bind is now
+// FAIL-CLOSED: a broker without LISTEN_FDS must NOT os.Remove + re-bind the path the .socket unit
+// owns — that is the split-brain double-listener primitive (a stray `systemctl start
+// bulkhead-broker.service` could otherwise steal the socket). A dev/Buildroot build with no socket
+// unit sets BULKHEAD_BROKER_PATH_BIND=1 to restore the legacy bind.
 func brokerListener() (net.Listener, error) {
 	if os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) && os.Getenv("LISTEN_FDS") != "" {
 		f := os.NewFile(3, "bulkhead-broker.sock") // SD_LISTEN_FDS_START
 		defer f.Close()
 		return net.FileListener(f)
 	}
-	_ = os.Remove(brokerSockPath)
-	if err := os.MkdirAll(filepath.Dir(brokerSockPath), 0o755); err != nil {
-		return nil, err
+	if os.Getenv("BULKHEAD_BROKER_PATH_BIND") == "1" {
+		_ = os.Remove(brokerSockPath)
+		if err := os.MkdirAll(filepath.Dir(brokerSockPath), 0o755); err != nil {
+			return nil, err
+		}
+		return net.Listen("unix", brokerSockPath)
 	}
-	return net.Listen("unix", brokerSockPath)
+	return nil, fmt.Errorf("broker: no LISTEN_FDS (not socket-activated); refusing to bind %s owned by bulkhead-broker.socket (set BULKHEAD_BROKER_PATH_BIND=1 for a no-socket dev build)", brokerSockPath)
 }
 
 // brokerRegisterTCB asks the collector (over the control socket) to add THIS broker's cgroup to
