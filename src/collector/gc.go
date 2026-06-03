@@ -149,10 +149,12 @@ var brokerCgroupPath = "/sys/fs/cgroup/system.slice/bulkhead-broker.service"
 // recycled onto a bulkhead-agent@ jail — granting that agent full E0-E3 TCB exemption (the one
 // per-cgroup map with no other recycle defense). The collector (always-on, TCB, E0-exempt)
 // reconciles it here. FAIL-SAFE: if root+collector cannot be resolved it prunes NOTHING (never
-// blindly empties the map); the live broker is in the keep-set (resolved by the same path the
-// broker self-registers), so the working broker is never pruned. DELETE-ONLY (never adds — the
-// broker self-registers itself, always under E0-off since agents/the broker can't start under
-// E0-armed).
+// blindly empties the map); the live broker is in the keep-set (resolved by the broker's fixed
+// unit cgroup path), so the working broker is never pruned. ADR-0016: now DELETE-STRANGERS *AND*
+// ENSURE-BROKER-PRESENT, both fixed-path-attested — it ADDS the live broker cgid if absent (the
+// broker no longer self-registers; under E0 it cannot bpf()) and prunes every other stranger.
+// The add targets ONLY the collector-resolved brokerCgroupPath inode, never a cgid iterated from
+// the map, so it cannot elevate an arbitrary cgroup.
 func reconcileTCB(tcb *ebpf.Map) (pruned []uint64) {
 	keep := map[uint64]struct{}{}
 	for _, id := range tcbCgroupIDs() { // root + the collector's own cgroup
@@ -163,6 +165,17 @@ func reconcileTCB(tcb *ebpf.Map) (pruned []uint64) {
 	}
 	if bid, err := cgroupIDFromInode(brokerCgroupPath); err == nil {
 		keep[bid] = struct{}{} // the live broker
+		// ADR-0016: ENSURE-PRESENT, not just keep. The broker no longer self-registers (it can't
+		// bpf() from its non-TCB cgroup under E0); the collector establishes its membership at
+		// pin time + via the control socket, and this is the ≤GC-interval backstop that re-adds
+		// it after a broker socket re-activation. Keyed ONLY on the collector-resolved fixed path
+		// (never on anything iterated from the map), so it is not a TCB-escalation primitive.
+		var v uint32
+		if err := tcb.Lookup(bid, &v); err != nil {
+			if err := tcb.Update(bid, uint32(1), ebpf.UpdateAny); err != nil {
+				log.Printf("gc: tcb ensure-broker cg=%d: %v", bid, err)
+			}
+		}
 	}
 	var key uint64
 	var val uint32

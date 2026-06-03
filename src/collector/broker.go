@@ -141,11 +141,14 @@ var (
 // ---- broker (TCB listener) -------------------------------------------------
 
 func cmdBroker() {
-	// Self-register our own cgroup in the TCB allowlist so our bpf() map ops survive
-	// E0 (lsm/bpf deny) and our own connects are E2-exempt. Requires E0 to be OFF at
-	// this first call (the MVP default); see ADR-0006.
-	if err := brokerSelfRegisterTCB(); err != nil {
-		log.Fatalf("broker: self-register TCB (is the collector running?): %v", err)
+	// ADR-0016: the broker no longer self-bpf()s into tcb_cgroups — that Update from its own
+	// not-yet-TCB cgroup is EPERM'd the moment E0 (lsm/bpf deny) is armed, which is exactly why
+	// the full E0-E3 stack was previously un-armable alongside delegation. Instead the broker
+	// ASKS the already-TCB, E0-exempt collector to register it, over the control socket, where
+	// the collector kernel-attests the caller IS the broker cgroup and registers the cgid it
+	// stats itself. BLOCK until OK before listening — never serve a gated action while non-TCB.
+	if !brokerRegisterTCB() {
+		log.Fatalf("broker: TCB registration via collector control socket failed (is the collector running?)")
 	}
 	// The broker owns its OWN signed decision chain (separate dir/key, via
 	// BULKHEAD_AUDIT_DIR) — never the collector's single-writer provenance chain.
@@ -214,17 +217,15 @@ func brokerListener() (net.Listener, error) {
 	return net.Listen("unix", brokerSockPath)
 }
 
-func brokerSelfRegisterTCB() error {
-	m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "tcb_cgroups"), nil)
-	if err != nil {
-		return err
+// brokerRegisterTCB asks the collector (over the control socket) to add THIS broker's cgroup to
+// tcb_cgroups. The broker issues no bpf() itself; the collector attests the caller is the broker
+// cgroup and registers the cgid it stats from the fixed path. Returns true only on OK.
+func brokerRegisterTCB() bool {
+	ok, resp := controlRPC("TCB-REGISTER-BROKER")
+	if !ok {
+		log.Printf("broker: TCB-REGISTER-BROKER: %s", resp)
 	}
-	defer m.Close()
-	cg, err := resolveCgroupID("self")
-	if err != nil {
-		return err
-	}
-	return m.Update(cg, uint32(1), ebpf.UpdateAny)
+	return ok
 }
 
 // handleBrokerConn serves one agent request on the delegation socket. It peer-attests the

@@ -8,21 +8,25 @@ Description=bulkhead inter-agent delegation broker
 Documentation=https://github.com/mtclinton/bulkhead
 After=bulkhead-collector.service
 Requires=bulkhead-collector.service
-# Composed-review fix (broker de-TCB on collector restart): the broker self-registers its
-# cgroup into tcb_cgroups ONCE at startup, but the collector os.RemoveAll(pinDir) + re-pins a
-# fresh tcb_cgroups (root+collector only) on every run. PartOf= makes a collector restart
-# also restart the broker, so it re-runs brokerSelfRegisterTCB against the new map (E0 is
-# reset to observe by the same restart, so the self-register bpf() succeeds). The collector
-# GC additionally prunes any STALE broker cgid left by an independent broker re-activation.
+# ADR-0016: ordered BEFORE the E0-arming unit so PID-1 has materialized the broker cgroup and the
+# broker has self-requested TCB registration (via the collector control socket) before E0 arms.
+Before=bulkhead-enforce.service
+# Composed-review fix (broker de-TCB on collector restart): the collector os.RemoveAll(pinDir) +
+# re-pins a fresh tcb_cgroups (root+collector, plus a pin-time broker pre-register) on every run.
+# PartOf= makes a collector restart also restart the broker, so it re-runs its (ADR-0016) control-
+# socket TCB registration against the new map (E0 is reset to observe by the same restart). The
+# collector GC reconcileTCB additionally ENSURES the live broker is present and prunes any STALE
+# broker cgid left by an independent broker re-activation.
 PartOf=bulkhead-collector.service
 
 [Service]
 Type=exec
 ExecStart=/usr/bin/bulkhead-collector broker
-# TCB side: read the pinned egress_policy/tcb_cgroups maps (CAP_BPF) and self-register
-# this unit's cgroup into tcb_cgroups (so its bpf() survives E0 and its IPC is E2-exempt);
-# launch child jails by asking PID-1 (root over the private bus). NB: self-registration
-# needs E0 OFF at first run — the MVP default (see ADR-0006).
+# TCB side: read+write the pinned egress_policy/grant_once maps (CAP_BPF) for the gated EXPAND/
+# NARROW/GRANT actions, and launch child jails by asking PID-1. ADR-0016: the broker no longer
+# self-bpf()s into tcb_cgroups (that EPERMs under E0 from its non-TCB cgroup); it asks the
+# collector, over the control socket, to register it — so the broker's CAP_BPF map ops survive E0
+# because its cgroup is genuinely in tcb_cgroups (collector-granted), not self-granted.
 User=root
 AmbientCapabilities=CAP_BPF
 CapabilityBoundingSet=CAP_BPF

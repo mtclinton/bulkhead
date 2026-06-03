@@ -19,7 +19,7 @@
 [Unit]
 Description=bulkhead agent jail (%i)
 Documentation=https://github.com/mtclinton/bulkhead
-After=bulkhead-collector.service bulkhead-firewall.service
+After=bulkhead-collector.service bulkhead-firewall.service bulkhead-enforce.service
 Requires=bulkhead-collector.service
 
 [Service]
@@ -35,9 +35,14 @@ Environment=BULKHEAD_AGENT_EGRESS=loopback,other
 #     crash skips ExecStopPost; the GC keeps a grant whose inode is live-again). Clearing at
 #     STARTUP, before the payload forks, guarantees a fresh agent never inherits a stranded
 #     E1/E3 grant. `+` for CAP_BPF; leading `-` so a missing entry never blocks the start. ---
-ExecStartPre=-+/usr/bin/bulkhead-collector grant-once clear self
-# --- RACE FIX: privileged manifest write in THIS cgroup, before the payload forks. ---
-ExecStartPre=+/usr/bin/bulkhead-collector egress set self ${BULKHEAD_AGENT_EGRESS}
+ExecStartPre=-+/usr/bin/bulkhead-collector ctl grant-clear-self
+# --- RACE FIX (ADR-0005), now E0-SAFE (ADR-0016): the manifest must be in egress_policy before
+#     the payload can connect(). systemd still runs this +ExecStartPre to exit-0 completion before
+#     forking ExecStart (happens-before unchanged, fail-closed unchanged). The ONLY change: the
+#     bpf() Update is no longer done in THIS (non-TCB) cgroup — under E0 that would EPERM — it asks
+#     the collector over the control socket, and the COLLECTOR (TCB, E0-exempt) writes the manifest
+#     for the kernel-attested SELF cgid (the same cgroup the payload runs under). ---
+ExecStartPre=+/usr/bin/bulkhead-collector ctl egress-set-self ${BULKHEAD_AGENT_EGRESS}
 
 # --- the caged payload (MVP stub probe; the real agent runtime replaces it later) ---
 ExecStart=/usr/bin/bulkhead-agent-run %i
@@ -45,8 +50,8 @@ ExecStart=/usr/bin/bulkhead-agent-run %i
 # --- cgroup-inode-reuse hygiene: drop this cgroup's manifest AND any unconsumed one-shot
 #     grants (ADR-0011) on exit, so a recycled cgroup can inherit neither. (+ for caps,
 #     leading - so a missing entry / down collector never fails the stop). ---
-ExecStopPost=-+/usr/bin/bulkhead-collector egress clear self
-ExecStopPost=-+/usr/bin/bulkhead-collector grant-once clear self
+ExecStopPost=-+/usr/bin/bulkhead-collector ctl egress-clear-self
+ExecStopPost=-+/usr/bin/bulkhead-collector ctl grant-clear-self
 # --- ADR-0015: a broker-minted DELEGATED child carries a transient /run drop-in and (if the
 #     parent supplied a task) a /run/bulkhead/tasks/<inst>.task credential source the broker
 #     wrote. Reap both on stop so a long-lived deployment's /run + daemon-reload cost don't grow

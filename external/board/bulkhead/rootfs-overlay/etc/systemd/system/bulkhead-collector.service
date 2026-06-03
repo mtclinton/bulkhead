@@ -25,6 +25,12 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 # The append-only audit log lives under the writable StateDirectory; the rest of
 # the filesystem stays protected.
 StateDirectory=bulkhead
+# ADR-0016: the collector hosts the control socket (/run/bulkhead/control.sock) — the bpf()-write
+# chokepoint through which non-TCB callers (the agent +ExecStartPre manifest write, the broker's
+# TCB self-register) have the COLLECTOR do their map writes, so E0 (lsm/bpf deny) can stay armed.
+# /run/bulkhead is created early by bulkhead-broker.socket's RuntimeDirectory; this hole lets the
+# collector create the socket there under ProtectSystem=strict.
+ReadWritePaths=/run/bulkhead
 Environment=BULKHEAD_AUDIT_DIR=/var/lib/bulkhead/audit
 # BPF JIT needs W+X, so MemoryDenyWriteExecute must stay off here.
 MemoryDenyWriteExecute=no

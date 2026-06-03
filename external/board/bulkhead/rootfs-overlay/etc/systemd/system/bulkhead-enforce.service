@@ -6,15 +6,25 @@
 # Disarm (soft, no reboot) with `systemctl stop bulkhead-enforce` (clears the toggle)
 # or `bulkhead-collector enforce off bpf`. Fail-open: if the collector isn't up, this
 # unit just fails and the system stays in observe mode.
+#
+# ADR-0016: E0 (lsm/bpf deny) is now armable WITH delegation working. This unit pulls in + orders
+# after the broker and BLOCKS (ExecStartPre) until the collector confirms the broker cgroup is in
+# tcb_cgroups — so E0 never arms ahead of broker-TCB establishment (which would EPERM the broker's
+# map ops). Once armed, the broker's gated writes flow from its genuine TCB context and agents'
+# manifest writes flow through the collector control socket, so a jailed agent's DIRECT bpf() is
+# the only thing E0 denies.
 [Unit]
 Description=bulkhead BPF-LSM enforce arming (opt-in: bpf hook)
 Documentation=https://github.com/mtclinton/bulkhead
-After=bulkhead-collector.service
+After=bulkhead-collector.service bulkhead-broker.service
 Requires=bulkhead-collector.service
+Wants=bulkhead-broker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Gate: do not arm E0 until the broker is established as TCB (else the broker's bpf() EPERMs).
+ExecStartPre=/usr/bin/bulkhead-collector ctl wait-broker-tcb
 ExecStart=/usr/bin/bulkhead-collector enforce on bpf
 ExecStop=/usr/bin/bulkhead-collector enforce off bpf
 

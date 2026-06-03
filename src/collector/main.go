@@ -191,6 +191,8 @@ func main() {
 		cmdNarrow(os.Args[2:])
 	case "grant-once":
 		cmdGrantOnce(os.Args[2:])
+	case "ctl":
+		cmdControl(os.Args[2:])
 	case "gc":
 		cmdGC()
 	case "verify-audit":
@@ -547,6 +549,26 @@ func runCollector() {
 	if err := objs.GrantOnce.Pin(filepath.Join(pinDir, "grant_once")); err != nil {
 		log.Fatalf("pin grant_once: %v", err)
 	}
+
+	// ADR-0016: pre-register the broker's cgroup as TCB if it already exists, so a boot-time E0
+	// arm finds it. The broker ALSO self-requests via the control socket at its startup, and
+	// reconcileTCB re-establishes it each GC pass; all three resolve the broker cgid ONLY from
+	// the fixed brokerCgroupPath, never from a caller (no arbitrary-TCB-register primitive).
+	if bid, err := cgroupIDFromInode(brokerCgroupPath); err == nil {
+		if err := objs.TcbCgroups.Update(bid, uint32(1), ebpf.UpdateAny); err != nil {
+			log.Printf("broker tcb pre-register (cgid %d): %v", bid, err)
+		}
+	}
+	// ADR-0016: the control socket — the bpf()-WRITE chokepoint for non-TCB callers (the agent
+	// +ExecStartPre manifest write + clears, and the broker's TCB self-registration). Created
+	// after the maps are pinned and before the ringbuf loop; the collector (TCB, E0-exempt) does
+	// every Update on a caller's behalf, so those writes survive E0-armed. Broker/agents order
+	// After=collector, so the socket exists before they connect.
+	controlLn, err := controlListener()
+	if err != nil {
+		log.Fatalf("control listen: %v", err)
+	}
+	go acceptLoop(controlLn, handleControlConn)
 
 	al, err := openAuditLog("collector")
 	if err != nil {
