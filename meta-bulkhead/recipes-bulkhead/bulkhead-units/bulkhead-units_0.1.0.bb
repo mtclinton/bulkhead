@@ -11,7 +11,7 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-seal-audit-key \
            file://bulkhead-verify-audit.service \
            file://bulkhead-selftest-verify.conf"
-SRCREV = "7ce5fd63ae05458c099452f9abb89704990f502b"
+SRCREV = "f0556ddf5582bdf28e12ad446c346a5832388c0c"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
