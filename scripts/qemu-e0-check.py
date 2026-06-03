@@ -105,7 +105,7 @@ try:
     wb = run("bulkhead-collector ctl wait-broker-tcb 2>&1")
     check("OK" in wb, "broker is in tcb_cgroups (collector-granted via the control socket, not self-bpf())")
     # E0-DENY baseline: a DIRECT bpf() map write from the console's non-TCB cgroup SUCCEEDS in observe.
-    pre = run("bulkhead-collector egress set self loopback 2>&1; echo RC=$?")
+    pre = run("bulkhead-collector egress clear self 2>&1; echo RC=$?")
     check("RC=0" in pre, "E0-DENY baseline: a non-TCB direct bpf() (egress set self) succeeds while E0 is in OBSERVE")
 
     # ARM E2 then E0 (each arming bpf() runs while E0 is still observe, so it is allowed; once E0 is
@@ -117,7 +117,7 @@ try:
           "E0 armed (enforce on bpf) after the wait-broker-tcb gate — delegation/agent-launch must still work")
 
     # E0-DENY (headline): the SAME direct-bpf() command now FAILS — a non-TCB cgroup cannot bpf().
-    post = run("bulkhead-collector egress set self loopback 2>&1; echo RC=$?")
+    post = run("bulkhead-collector egress clear self 2>&1; echo RC=$?")
     out("\n[post-arm direct bpf]\n" + post)
     check("RC=0" not in post,
           "E0-DENY: the same non-TCB direct bpf() is now EPERM'd under E0 — agents are physically unable to bpf()")
@@ -148,7 +148,7 @@ try:
     # works under E0 — without the fix it would EPERM from the enforce unit's non-TCB cgroup and the
     # kill-switch would silently fail. After disarm, the same console direct bpf() succeeds again.
     run("systemctl stop bulkhead-enforce.service 2>&1"); run("sleep 1 2>/dev/null; true")
-    dis = run("bulkhead-collector egress set self loopback 2>&1; echo RC=$?")
+    dis = run("bulkhead-collector egress clear self 2>&1; echo RC=$?")
     out("\n[post-disarm direct bpf]\n" + dis)
     check("RC=0" in dis,
           "SOFT-DISARM: `systemctl stop bulkhead-enforce` (routed enforce off) actually disarmed E0 — the console can bpf() again")
