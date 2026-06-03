@@ -76,11 +76,23 @@ func envInt(k string, def int) int {
 	return def
 }
 
+// thresholdFloor guards the denial-of-wallet gate (composed-review nit): a zero/negative
+// BULKHEAD_THRESHOLD would make promptLen() >= threshold ALWAYS true, routing every request —
+// even an empty one — to the paid tier. Clamp to a sane minimum so the gate can't be
+// misconfigured open.
+func thresholdFloor(n int) int {
+	const min = 64
+	if n < min {
+		return min
+	}
+	return n
+}
+
 func configFromEnv() config {
 	return config{
 		Listen:              env("BULKHEAD_LISTEN", "127.0.0.1:8080"),
 		LlamaURL:            strings.TrimRight(env("BULKHEAD_LLAMA_URL", "http://127.0.0.1:8081"), "/"),
-		Threshold:           envInt("BULKHEAD_THRESHOLD", 2000),
+		Threshold:           thresholdFloor(envInt("BULKHEAD_THRESHOLD", 2000)),
 		DefaultRoute:        RouteLocal,
 		APIProvider:         env("BULKHEAD_API_PROVIDER", "anthropic"),
 		ClaudeModel:         env("BULKHEAD_CLAUDE_MODEL", "claude-sonnet-4-6"),

@@ -43,6 +43,20 @@ func anthropicOnly(cfg config, key string) *server {
 	return newServer(cfg, p, hc)
 }
 
+// TestThresholdFloor guards the composed-review nit: a 0/negative BULKHEAD_THRESHOLD would
+// make the paid-path gate always fire (every request, even empty, routes paid). The floor
+// clamps it so the denial-of-wallet gate can't be misconfigured open.
+func TestThresholdFloor(t *testing.T) {
+	for _, n := range []int{0, -1, -9999, 5, 63} {
+		if got := thresholdFloor(n); got < 64 {
+			t.Fatalf("thresholdFloor(%d) = %d, want >= 64", n, got)
+		}
+	}
+	if got := thresholdFloor(2000); got != 2000 {
+		t.Fatalf("thresholdFloor(2000) = %d, want 2000 (a sane value is untouched)", got)
+	}
+}
+
 func TestDecideDowngradeOnly(t *testing.T) {
 	short := []ChatMessage{{Role: "user", Content: "hi"}}
 	long := []ChatMessage{{Role: "user", Content: strings.Repeat("x", 2500)}}
