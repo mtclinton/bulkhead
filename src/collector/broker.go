@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -48,6 +49,25 @@ var approvalTimeout = func() time.Duration {
 	}
 	return 120 * time.Second
 }()
+
+// maxDelegateDepth caps delegation RECURSION height (a child can itself delegate — the tool
+// is in every agent). The depth is derived ONLY from the kernel-attested parent instance name
+// (delegGen), NEVER from anything the agent sends, so a child cannot reset its own counter. A
+// top-level parent is gen 0, so the default 3 permits worker -> d1 -> d2 -> d3. Fail-closed.
+var maxDelegateDepth = func() int {
+	if v := os.Getenv("BULKHEAD_MAX_DELEGATE_DEPTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 3
+}()
+
+// childRouterURL is the inference endpoint written into a delegated child's drop-in. It is
+// read from the BROKER's OWN environment (never parent-supplied — closing SSRF-via-inference)
+// and written ONLY if set; otherwise the child inherits the template default. The qemu harness
+// points it at the bundled mock; production leaves it unset.
+var childRouterURL = os.Getenv("BULKHEAD_CHILD_ROUTER_URL")
 
 // actionKind names a gated sensitive action. The approval gate (register/approve/resolve/
 // handleApprove/the signed chain) is action-agnostic; each kind supplies its own executor.
@@ -88,6 +108,8 @@ type pending struct {
 	parentPath string
 	suffix     string // delegate only
 	instance   string // delegate only: broker-minted child unit instance (bound into the audit record)
+	task       string // delegate only: the (sanitized) parent-supplied child task; "" => broker default
+	gen        int    // delegate only: child generation (parent gen + 1), from the attested parent name
 	reqMask    uint32 // requested classes (delegate/expand)
 	childMask  uint32 // delegate: resolved child mask (parent & requested)
 	curMask    uint32 // expand: requester's current manifest (for LIST/audit)
@@ -249,15 +271,18 @@ func handleBrokerConn(conn net.Conn) {
 	}
 }
 
-// handleDelegateTail: DELEGATE <child-suffix> <requested-classes> — spawn a child whose
-// manifest is parent ∩ requested (NARROW-never-widen, ADR-0006).
+// handleDelegateTail: DELEGATE <child-suffix> <requested-classes> [task...] — spawn a child
+// whose manifest is parent ∩ requested (NARROW-never-widen, ADR-0006) running the real agent
+// runtime on a parent-supplied task (ADR-0015). The task is sanitized here (fail-closed before
+// any side effect) and delivered to the child as a systemd CREDENTIAL (file content), NEVER as
+// unit syntax — so a "\nExecStartPre=…" payload cannot inject a directive.
 func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f []string) {
 	reply := func(s string) { fmt.Fprintln(conn, s) }
-	if len(f) != 3 {
+	suffix, reqStr, task, ok := parseDelegateTail(f)
+	if !ok {
 		reply("ERR protocol")
 		return
 	}
-	suffix, reqStr := f[1], f[2]
 	if !validSuffix(suffix) {
 		reply("ERR bad-suffix")
 		return
@@ -265,6 +290,25 @@ func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f [
 	reqMask, err := parseClasses(reqStr)
 	if err != nil {
 		reply("ERR bad-classes")
+		return
+	}
+	// Sanitize the parent-supplied task BEFORE registering or any side effect: a hostile task
+	// (control chars / over-length) spawns no child, no cgroup, no .task file. Empty is allowed
+	// (=> broker default task). This is defense-in-depth layered atop the non-unit channel.
+	if err := validTask(task); err != nil {
+		reply("ERR bad-task")
+		return
+	}
+	// Depth cap from the kernel-attested parent generation (never agent-supplied). A child at
+	// the max depth may not spawn a grandchild — bounds recursion height. Checked BEFORE the
+	// map read so a too-deep request never touches kernel state.
+	gen, err := delegGen(parentPath)
+	if err != nil {
+		reply("ERR bad-parent")
+		return
+	}
+	if gen+1 > maxDelegateDepth {
+		reply("ERR too-deep")
 		return
 	}
 	// Parent's CURRENT ceiling from the live pinned map. Miss => cannot delegate (you
@@ -277,7 +321,8 @@ func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f [
 	childMask := parentMask & reqMask // request-time view; ADVISORY (re-derived in execute)
 	p := &pending{
 		kind: actDelegate, parentCgID: parentCgID, parentPath: parentPath, suffix: suffix,
-		instance: "d-" + randHex8() + "-" + suffix, reqMask: reqMask, childMask: childMask,
+		instance: "d" + strconv.Itoa(gen+1) + "-" + randHex8() + "-" + suffix,
+		reqMask:  reqMask, childMask: childMask, task: task, gen: gen + 1,
 		created: time.Now(),
 	}
 	// The child's own +ExecStartPre writes its (narrowed) manifest before its payload forks.
@@ -307,7 +352,7 @@ func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f [
 		if err != nil {
 			return "", fmt.Errorf("parent re-verify/manifest: %w", err)
 		}
-		if err := launchChild(p.instance, classNames(liveChild)); err != nil {
+		if err := launchChild(p.instance, classNames(liveChild), p.task); err != nil {
 			return "", err
 		}
 		return p.instance + " " + classNames(liveChild), nil
@@ -534,6 +579,95 @@ func lookupEgressMask(cgID uint64) (uint32, error) {
 	return mask, nil
 }
 
+// parseDelegateTail extracts (suffix, classes, task) from a tokenized DELEGATE line
+// f = ["DELEGATE", suffix, classes, task-word...]. The task is f[3:] re-joined with single
+// spaces (empty if absent — the broker-default path). ok=false if there are too few fields.
+// PURE (no I/O) so the wire parsing is unit-testable without a kernel or socket.
+func parseDelegateTail(f []string) (suffix, classes, task string, ok bool) {
+	if len(f) < 3 {
+		return "", "", "", false
+	}
+	if len(f) > 3 {
+		task = strings.Join(f[3:], " ")
+	}
+	return f[1], f[2], task, true
+}
+
+// validTask gates a parent-supplied child task. The task reaches the child via a systemd
+// CREDENTIAL (file content), NEVER as unit/Environment= syntax, so this is defense-in-depth,
+// not the primary barrier: reject any byte that could matter to a parser or break out of a
+// single transcript line (NUL, newline, CR, tab, any control or non-ASCII byte) and cap the
+// length. Empty is allowed (means "broker default task"). Called fail-closed BEFORE any side
+// effect, so a hostile task creates no child, no cgroup, no .task file.
+func validTask(s string) error {
+	if s == "" {
+		return nil
+	}
+	if len(s) > 4096 {
+		return fmt.Errorf("task too long (%d > 4096)", len(s))
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e { // printable ASCII only
+			return fmt.Errorf("task has a non-printable-ASCII byte at offset %d", i)
+		}
+	}
+	return nil
+}
+
+// delegGen derives a delegation generation from the kernel-attested parent instance name in
+// its cgroup path: a top-level parent (worker/agentA/…) is gen 0; a broker-minted child
+// "d<N>-<hex>-<suffix>" is gen N. Depth is therefore rooted in attested identity, never in
+// anything the agent supplies, so a child cannot reset its own counter. A path with no agent
+// instance fails closed.
+func delegGen(parentPath string) (int, error) {
+	const marker = "bulkhead-agent@"
+	i := strings.LastIndex(parentPath, marker)
+	if i < 0 {
+		return 0, fmt.Errorf("no agent instance in %q", parentPath)
+	}
+	inst := parentPath[i+len(marker):]
+	if j := strings.Index(inst, ".service"); j >= 0 {
+		inst = inst[:j]
+	}
+	if inst == "" {
+		return 0, fmt.Errorf("empty instance in %q", parentPath)
+	}
+	// "d<digits>-…" => generation <digits>; ANYTHING else (a name, the legacy d-<hex> form)
+	// => a top-level parent at gen 0.
+	if len(inst) >= 2 && inst[0] == 'd' && inst[1] >= '0' && inst[1] <= '9' {
+		k := 1
+		for k < len(inst) && inst[k] >= '0' && inst[k] <= '9' {
+			k++
+		}
+		if k < len(inst) && inst[k] == '-' {
+			return strconv.Atoi(inst[1:k])
+		}
+	}
+	return 0, nil
+}
+
+// taskSHA8 binds the EXACT task bytes into the signed record without logging the (attacker-
+// influenced) text: the first 8 hex of its SHA-256, or "(default)" for the no-task path.
+func taskSHA8(task string) string {
+	if task == "" {
+		return "(default)"
+	}
+	sum := sha256.Sum256([]byte(task))
+	return hex.EncodeToString(sum[:])[:8]
+}
+
+// taskPreview renders a short, already-sanitized (validTask: printable ASCII) task for the
+// operator's LIST so they approve with context. Empty => "(default)".
+func taskPreview(task string) string {
+	if task == "" {
+		return "(default)"
+	}
+	if len(task) > 40 {
+		return task[:40] + "…"
+	}
+	return task
+}
+
 func validSuffix(s string) bool {
 	if len(s) < 1 || len(s) > 24 {
 		return false
@@ -552,17 +686,64 @@ func randHex8() string {
 	return hex.EncodeToString(b[:])
 }
 
-// launchChild writes a transient /run drop-in carrying the narrowed manifest, then
-// starts the jail instance. systemctl start blocks until the unit's +ExecStartPre (which
-// writes egress_policy[child]) and ExecStart have run, so the broker only replies OK once
-// the child's manifest is in the map — the child payload cannot connect() before that.
-func launchChild(instance, classes string) error {
+// delegatedDropIn builds the child's transient systemd drop-in. EVERY value here is a
+// broker-controlled token: classes is a classNames() enum join, instance is broker-minted,
+// routerURL is the broker's OWN env. The parent-supplied TASK NEVER appears — it rides a
+// LoadCredential (file content PID-1 materializes into the child's $CREDENTIALS_DIRECTORY as a
+// 0400 ramfs entry owned by the child's DynamicUser uid), so a "\nExecStartPre=…" payload in
+// the task is structurally inert. The function does not even TAKE the task — only whether one
+// is present — so by construction it cannot leak into unit syntax (a unit test asserts this).
+func delegatedDropIn(classes, instance, routerURL string, hasTask bool) string {
+	var b strings.Builder
+	b.WriteString("[Service]\n")
+	// Broker-minted children run the REAL agent runtime: reset-then-set the template's stub
+	// ExecStart (the @worker pattern) so a delegated child is a full perceive->decide->act loop.
+	b.WriteString("ExecStart=\n")
+	b.WriteString("ExecStart=/usr/bin/bulkhead-agent %i\n")
+	b.WriteString("Environment=BULKHEAD_AGENT_EGRESS=" + classes + "\n")
+	b.WriteString("Environment=BULKHEAD_AGENT_DEADLINE=120\n")
+	b.WriteString("Environment=BULKHEAD_AGENT_MAX_STEPS=6\n")
+	if hasTask {
+		// The task is delivered as a credential (file CONTENT), not Environment=/a directive.
+		b.WriteString("LoadCredential=agent-task:/run/bulkhead/tasks/" + instance + ".task\n")
+		b.WriteString("Environment=BULKHEAD_AGENT_TASK_CRED=agent-task\n")
+	} else {
+		// No parent task => a benign broker-CONSTANT default so the child still has work. The
+		// value has spaces, so the WHOLE assignment is double-quoted (systemd would otherwise
+		// split it into invalid assignments).
+		b.WriteString("Environment=\"BULKHEAD_AGENT_TASK=Report your egress manifest over loopback, then finish.\"\n")
+	}
+	if routerURL != "" {
+		b.WriteString("Environment=BULKHEAD_ROUTER_URL=" + routerURL + "\n")
+	}
+	return b.String()
+}
+
+// launchChild writes the (optional) task to a broker-owned credential-source file, then a
+// transient /run drop-in carrying the narrowed manifest + the real-agent ExecStart, then starts
+// the jail instance. systemctl start blocks until the unit's +ExecStartPre (which writes
+// egress_policy[child]) and ExecStart have run, so the broker only replies OK once the child's
+// manifest is in the map — the child payload cannot connect() before that. Fail-closed: any
+// write error means NO child launches.
+func launchChild(instance, classes, task string) error {
 	unit := "bulkhead-agent@" + instance + ".service"
+	// Write the task to a broker-owned source file BEFORE the drop-in, so the credential exists
+	// when PID-1 materializes it at start. 0640 root:root under /run/bulkhead (broker's RW hole);
+	// PID-1 reads it and copies it 0400 into the child's $CREDENTIALS_DIRECTORY (uid-scoped, torn
+	// down with the unit). The attacker-controlled bytes are only ever file CONTENT here.
+	if task != "" {
+		if err := os.MkdirAll("/run/bulkhead/tasks", 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile("/run/bulkhead/tasks/"+instance+".task", []byte(task), 0o640); err != nil {
+			return err
+		}
+	}
 	dropDir := filepath.Join("/run/systemd/system", unit+".d")
 	if err := os.MkdirAll(dropDir, 0o755); err != nil {
 		return err
 	}
-	conf := "[Service]\nEnvironment=BULKHEAD_AGENT_EGRESS=" + classes + "\n"
+	conf := delegatedDropIn(classes, instance, childRouterURL, task != "")
 	if err := os.WriteFile(filepath.Join(dropDir, "20-delegated-egress.conf"), []byte(conf), 0o644); err != nil {
 		return err
 	}
@@ -647,8 +828,8 @@ func listPending() string {
 			fmt.Fprintf(&b, "id=%d action=grant-once agent=%s hook=%s grant=count=1 age=%ds\n",
 				p.id, p.parentPath, hookNames[p.grantHook], age)
 		default: // delegate
-			fmt.Fprintf(&b, "id=%d action=delegate parent=%s suffix=%s requested=%s granted=%s age=%ds\n",
-				p.id, p.parentPath, p.suffix, classNames(p.reqMask), classNames(p.childMask), age)
+			fmt.Fprintf(&b, "id=%d action=delegate parent=%s suffix=%s requested=%s granted=%s gen=%d task=%q age=%ds\n",
+				p.id, p.parentPath, p.suffix, classNames(p.reqMask), classNames(p.childMask), p.gen, taskPreview(p.task), age)
 		}
 	}
 	return b.String()
@@ -747,9 +928,16 @@ func recordDecision(p *pending, verdict, operator, applied string) error {
 		comm = comm[:16]
 	}
 	mode := fmt.Sprintf("%s req=%s applied=%s", operator, classNames(p.reqMask), applied)
-	if p.kind == actGrantOnce {
+	switch p.kind {
+	case actGrantOnce:
 		// grant-once has no class mask; render the granted hook instead of classNames(0).
 		mode = fmt.Sprintf("%s op=%s applied=%s", operator, hookNames[p.grantHook], applied)
+	case actDelegate:
+		// Bind the child generation + the EXACT task bytes (by hash, never the text) so an
+		// operator can forensically follow a parent->child->grandchild chain and tie a record
+		// to the precise task that ran.
+		mode = fmt.Sprintf("%s req=%s applied=%s gen=%d task_sha=%s",
+			operator, classNames(p.reqMask), applied, p.gen, taskSHA8(p.task))
 	}
 	ev := provEvent{CgroupID: p.parentCgID, PID: 0, Comm: comm, Hook: hook, Decision: verdict, Mode: mode}
 	return brokerAL.append(ev)
@@ -798,7 +986,7 @@ func cmdApprove(args []string) {
 
 func cmdDelegate(args []string) {
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector delegate <child-suffix> <requested-classes>")
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector delegate <child-suffix> <requested-classes> [task...]")
 		os.Exit(2)
 	}
 	conn, err := net.DialTimeout("unix", brokerSockPath, 5*time.Second)
@@ -817,7 +1005,14 @@ func cmdDelegate(args []string) {
 		}
 	}
 	_ = conn.SetDeadline(time.Now().Add(to))
-	if _, err := fmt.Fprintf(conn, "DELEGATE %s %s\n", args[0], args[1]); err != nil {
+	// The task (args[2:], a single joined element from the agent tool) rides the wire line
+	// verbatim; the broker re-reads the whole line and validates it. Re-join defensively in
+	// case the CLI was invoked with the task as separate argv words.
+	line := "DELEGATE " + args[0] + " " + args[1]
+	if len(args) > 2 {
+		line += " " + strings.Join(args[2:], " ")
+	}
+	if _, err := fmt.Fprintf(conn, "%s\n", line); err != nil {
 		fmt.Fprintf(os.Stderr, "delegate: send: %v\n", err)
 		os.Exit(1)
 	}

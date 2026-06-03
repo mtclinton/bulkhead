@@ -29,11 +29,15 @@ CapabilityBoundingSet=CAP_BPF
 NoNewPrivileges=yes
 ProtectSystem=strict
 # Writable holes: the child's transient egress drop-in, the operator control socket
-# (/run/bulkhead/approve.sock, created by the broker at 0600), and its own signed
-# decision log under the state dir.
+# (/run/bulkhead/approve.sock, created by the broker at 0600), the delegated-child task
+# credential sources (/run/bulkhead/tasks/<inst>.task, 0640, ADR-0015 — PID-1 LoadCredentials
+# them into each child), and its own signed decision log under the state dir.
 ReadWritePaths=/run/systemd/system /run/bulkhead
 StateDirectory=bulkhead
 Environment=BULKHEAD_AUDIT_DIR=/var/lib/bulkhead/audit-broker
+# Cap delegation recursion height (ADR-0015): worker -> d1 -> d2 -> d3, then ERR too-deep. The
+# depth is derived from the kernel-attested parent instance name, never anything an agent sends.
+Environment=BULKHEAD_MAX_DELEGATE_DEPTH=3
 ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelModules=yes

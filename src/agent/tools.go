@@ -97,8 +97,8 @@ func toolRegistry() map[string]Tool {
 		"delegate": {
 			Validate: func(arg string) error {
 				f := strings.Fields(arg)
-				if len(f) != 2 {
-					return errors.New("usage: delegate <suffix> <classes>")
+				if len(f) < 2 {
+					return errors.New("usage: delegate <suffix> <classes> [task...]")
 				}
 				return validClassList(f[1])
 			},
@@ -107,7 +107,13 @@ func toolRegistry() map[string]Tool {
 					return "ERROR: delegation is disabled for this agent", nil
 				}
 				f := strings.Fields(arg)
-				return runCollector(ctx, "delegate", f[0], f[1])
+				args := []string{"delegate", f[0], f[1]}
+				if len(f) > 2 {
+					// Pass the child task as a SINGLE argv element so exec never re-splits it; the
+					// broker validates it and plumbs it through an injection-safe credential channel.
+					args = append(args, strings.Join(f[2:], " "))
+				}
+				return runCollector(ctx, args...)
 			},
 		},
 	}

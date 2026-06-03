@@ -7,8 +7,13 @@
 package main
 
 import (
+	"bufio"
 	"errors"
+	"io"
+	"net"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -92,6 +97,148 @@ func TestReverifyCgroupRebindsIdentity(t *testing.T) {
 	}
 	if err := reverifyCgroup("/bulkhead-nonexistent.slice/nope.service", live); err == nil {
 		t.Fatal("reverify of a vanished path must fail closed")
+	}
+}
+
+// TestValidTask guards ADR-0015's task sanitizer (defense-in-depth behind the non-unit
+// channel): empty + clean printable-ASCII pass; NUL / newline / CR / tab / DEL / any non-ASCII
+// byte / over-4096 all fail closed so a hostile task spawns no child.
+func TestValidTask(t *testing.T) {
+	if err := validTask(""); err != nil {
+		t.Fatalf("empty task must be allowed (broker default): %v", err)
+	}
+	if err := validTask("Fetch https://api.anthropic.com/ and report the HTTP status."); err != nil {
+		t.Fatalf("clean ASCII task must pass: %v", err)
+	}
+	for name, s := range map[string]string{
+		"NUL":        "a\x00b",
+		"newline":    "do x\nExecStartPre=+/bin/touch /pwned",
+		"CR":         "a\rb",
+		"tab":        "a\tb",
+		"DEL":        "a\x7fb",
+		"high-byte":  "café", // é => 0xc3 0xa9
+		"unicode-LS": "a b",  // line separator => e2 80 a8
+	} {
+		if err := validTask(s); err == nil {
+			t.Fatalf("%s must be rejected", name)
+		}
+	}
+	if err := validTask(strings.Repeat("a", 4097)); err == nil {
+		t.Fatal("a 4097-byte task must be rejected")
+	}
+	if err := validTask(strings.Repeat("a", 4096)); err != nil {
+		t.Fatalf("a 4096-byte task must pass: %v", err)
+	}
+}
+
+// TestDelegGen guards the depth derivation: it must come ONLY from the kernel-attested parent
+// instance name. A top-level parent (worker/agentA) is gen 0; a minted child d<N>-… is gen N;
+// the legacy d-<hex> form reads as gen 0; a path with no agent instance fails closed.
+func TestDelegGen(t *testing.T) {
+	for _, c := range []struct {
+		path string
+		want int
+		err  bool
+	}{
+		{"/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@worker.service", 0, false},
+		{"/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@agentA.service", 0, false},
+		{"/x/bulkhead-agent@d1-deadbeef-probe.service", 1, false},
+		{"/x/bulkhead-agent@d2-cafef00d-y.service", 2, false},
+		{"/x/bulkhead-agent@d10-aaaaaaaa-z.service", 10, false},
+		{"/x/bulkhead-agent@d-oldstyle-z.service", 0, false}, // legacy d-<hex>: not d<digit>- => gen 0
+		{"/x/bulkhead-agent@d2foo.service", 0, false},        // d<digit> but no '-' => a name, gen 0
+		{"/system.slice/bulkhead-collector.service", 0, true},
+	} {
+		got, err := delegGen(c.path)
+		if c.err {
+			if err == nil {
+				t.Fatalf("delegGen(%q) want error", c.path)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("delegGen(%q): %v", c.path, err)
+		}
+		if got != c.want {
+			t.Fatalf("delegGen(%q)=%d want %d", c.path, got, c.want)
+		}
+	}
+}
+
+// TestParseDelegateTail: <3 fields => not ok; exactly 3 => task ""; >3 => f[3:] joined.
+func TestParseDelegateTail(t *testing.T) {
+	if _, _, _, ok := parseDelegateTail([]string{"DELEGATE", "foo"}); ok {
+		t.Fatal("a <3-field line must not parse")
+	}
+	if s, c, task, ok := parseDelegateTail([]string{"DELEGATE", "foo", "public"}); !ok || s != "foo" || c != "public" || task != "" {
+		t.Fatalf("no-task parse = %q %q %q ok=%v", s, c, task, ok)
+	}
+	if s, c, task, ok := parseDelegateTail([]string{"DELEGATE", "foo", "public", "a", "b", "c"}); !ok || s != "foo" || c != "public" || task != "a b c" {
+		t.Fatalf("task parse = %q %q %q ok=%v", s, c, task, ok)
+	}
+}
+
+// TestDelegatedDropInNoTaskBytes is the core injection proof: the drop-in is built ONLY from
+// broker-controlled tokens, and the parent task NEVER appears in it (it rides a credential).
+func TestDelegatedDropInNoTaskBytes(t *testing.T) {
+	// A hostile task that PASSES validTask (no control chars) — proving even a sanitizer-passing
+	// payload cannot reach unit syntax, because delegatedDropIn does not consume the task at all.
+	hostile := "do X ExecStartPre=+/bin/touch /pwned [Service] User=root"
+	out := delegatedDropIn("loopback,other", "d1-deadbeef-kid", "http://127.0.0.1:8088", true)
+	for _, want := range []string{
+		"ExecStart=\nExecStart=/usr/bin/bulkhead-agent %i\n",
+		"Environment=BULKHEAD_AGENT_EGRESS=loopback,other\n",
+		"LoadCredential=agent-task:/run/bulkhead/tasks/d1-deadbeef-kid.task\n",
+		"Environment=BULKHEAD_AGENT_TASK_CRED=agent-task\n",
+		"Environment=BULKHEAD_ROUTER_URL=http://127.0.0.1:8088\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("drop-in missing fixed line %q\n---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, hostile) || strings.Contains(out, "/pwned") || strings.Contains(out, "ExecStartPre") {
+		t.Fatalf("task bytes leaked into the drop-in:\n%s", out)
+	}
+	if strings.Count(out, "[Service]") != 1 {
+		t.Fatalf("drop-in must have exactly one [Service] section:\n%s", out)
+	}
+	// No-task path: a benign default task, NO LoadCredential, and an empty routerURL omits the line.
+	out0 := delegatedDropIn("loopback", "d1-x-y", "", false)
+	if strings.Contains(out0, "LoadCredential") {
+		t.Fatalf("no-task drop-in must not LoadCredential:\n%s", out0)
+	}
+	if !strings.Contains(out0, "BULKHEAD_AGENT_TASK=") {
+		t.Fatalf("no-task drop-in needs a default task:\n%s", out0)
+	}
+	if strings.Contains(out0, "BULKHEAD_ROUTER_URL") {
+		t.Fatalf("an empty routerURL must omit the line:\n%s", out0)
+	}
+}
+
+// TestDelegateDepthCap: a parent at the max generation gets ERR too-deep and NO pending is
+// registered (no side effect). The check sits before the BPF map read, so this runs kernel-free
+// over an in-memory pipe.
+func TestDelegateDepthCap(t *testing.T) {
+	resetPend()
+	parentPath := "/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@d" +
+		strconv.Itoa(maxDelegateDepth) + "-deadbeef-x.service"
+	c1, c2 := net.Pipe()
+	got := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(c2).ReadString('\n')
+		got <- strings.TrimSpace(line)
+		_, _ = io.Copy(io.Discard, c2)
+	}()
+	handleDelegateTail(c1, 1234, parentPath, []string{"DELEGATE", "kid", "loopback"})
+	_ = c1.Close()
+	if reply := <-got; reply != "ERR too-deep" {
+		t.Fatalf("at max depth, reply=%q want ERR too-deep", reply)
+	}
+	pendMu.Lock()
+	n := len(pend)
+	pendMu.Unlock()
+	if n != 0 {
+		t.Fatalf("a too-deep delegate registered %d pending, want 0 (no side effect)", n)
 	}
 }
 

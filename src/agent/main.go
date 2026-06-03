@@ -12,7 +12,9 @@ import (
 	"context"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,7 +36,7 @@ func main() {
 	if len(os.Args) >= 2 {
 		inst = os.Args[1]
 	}
-	task := os.Getenv("BULKHEAD_AGENT_TASK")
+	task := resolveTask()
 	if task == "" {
 		log.Fatalf("agent[%s]: BULKHEAD_AGENT_TASK is empty — nothing to do", inst)
 	}
@@ -53,6 +55,25 @@ func main() {
 		os.Exit(1)
 	}
 	log.Printf("agent[%s]: DONE: %s", inst, truncate(ans, 400))
+}
+
+// resolveTask returns the agent's task. A normal agent gets it from BULKHEAD_AGENT_TASK; a
+// broker-delegated child (ADR-0015) instead receives it as a systemd CREDENTIAL — the broker
+// wrote the (sanitized) task to a file and PID-1 materialized it into $CREDENTIALS_DIRECTORY,
+// so the attacker-influenced bytes are file CONTENT, read here as one opaque blob, and NEVER
+// touched systemd unit/Environment= syntax. The env always wins if set; "" means no task.
+func resolveTask() string {
+	if t := os.Getenv("BULKHEAD_AGENT_TASK"); t != "" {
+		return t
+	}
+	if cred := os.Getenv("BULKHEAD_AGENT_TASK_CRED"); cred != "" {
+		if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
+			if b, err := os.ReadFile(filepath.Join(dir, cred)); err == nil {
+				return strings.TrimSpace(string(b))
+			}
+		}
+	}
+	return ""
 }
 
 func envOr(k, def string) string {

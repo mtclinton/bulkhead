@@ -171,6 +171,67 @@ func TestRequestEgressEscalation(t *testing.T) {
 	}
 }
 
+// TestDelegateToolCarriesTask: the delegate tool accepts a task tail, and Run hands the task
+// to the collector as ONE argv element (so exec never re-splits a multi-word task).
+func TestDelegateToolCarriesTask(t *testing.T) {
+	dt := toolRegistry()["delegate"]
+	if err := dt.Validate("child public the rest is a task"); err != nil {
+		t.Fatalf("a suffix+classes+task must validate: %v", err)
+	}
+	if err := dt.Validate("child"); err == nil {
+		t.Fatal("a missing class list must be rejected")
+	}
+	if err := dt.Validate("child bogus do x"); err == nil {
+		t.Fatal("a bad egress class must be rejected before any exec")
+	}
+
+	dir := t.TempDir()
+	old := collectorBin
+	defer func() { collectorBin = old }()
+	// dump each argv on its own line so we can assert the task arrived as a SINGLE element
+	dump := filepath.Join(dir, "argv-dump")
+	if err := os.WriteFile(dump, []byte("#!/bin/sh\nfor a in \"$@\"; do echo \"[$a]\"; done\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	collectorBin = dump
+	t.Setenv("BULKHEAD_AGENT_ALLOW_DELEGATE", "1")
+	obs, _ := dt.Run(context.Background(), "kid public,loopback do X then Y")
+	for _, want := range []string{"[delegate]", "[kid]", "[public,loopback]", "[do X then Y]"} {
+		if !strings.Contains(obs, want) {
+			t.Fatalf("argv missing %q in:\n%s", want, obs)
+		}
+	}
+	// off-by-default: no opt-in => no exec, a clear refusal
+	t.Setenv("BULKHEAD_AGENT_ALLOW_DELEGATE", "")
+	if obs, _ := dt.Run(context.Background(), "kid public do x"); !strings.Contains(obs, "disabled") {
+		t.Fatalf("delegation must be disabled without the opt-in, got %q", obs)
+	}
+}
+
+// TestTaskFromCredential: a delegated child reads its task from the systemd credential when
+// BULKHEAD_AGENT_TASK is empty; the env always wins if set; absent both yields "".
+func TestTaskFromCredential(t *testing.T) {
+	t.Setenv("BULKHEAD_AGENT_TASK", "from-env")
+	t.Setenv("BULKHEAD_AGENT_TASK_CRED", "agent-task")
+	dir := t.TempDir()
+	t.Setenv("CREDENTIALS_DIRECTORY", dir)
+	if err := os.WriteFile(filepath.Join(dir, "agent-task"), []byte("  do the thing\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveTask(); got != "from-env" {
+		t.Fatalf("env must win: got %q", got)
+	}
+	t.Setenv("BULKHEAD_AGENT_TASK", "")
+	if got := resolveTask(); got != "do the thing" {
+		t.Fatalf("credential fallback (trimmed) = %q, want \"do the thing\"", got)
+	}
+	t.Setenv("BULKHEAD_AGENT_TASK_CRED", "")
+	t.Setenv("CREDENTIALS_DIRECTORY", "")
+	if got := resolveTask(); got != "" {
+		t.Fatalf("absent env + cred => %q, want empty", got)
+	}
+}
+
 func TestMockReplyScript(t *testing.T) {
 	mk := func(obs int) []ChatMessage {
 		m := []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "Task: t"}}
@@ -190,5 +251,32 @@ func TestMockReplyScript(t *testing.T) {
 	}
 	if r := mockReply(mk(3), "https://t/"); !strings.HasPrefix(r, "FINAL") {
 		t.Fatalf("turn 3 = %q, want FINAL", r)
+	}
+}
+
+// TestMockReplyOrchestration covers the ADR-0015 parent/child mock branches: a PARENT (ORCH
+// task) emits exactly one delegate directive carrying the child task then FINALs; a CHILD
+// (FETCH-ONLY task) fetches once then FINALs reporting its observation (no escalation).
+func TestMockReplyOrchestration(t *testing.T) {
+	mk := func(task string, obs int) []ChatMessage {
+		m := []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "Task: " + task}}
+		for i := 0; i < obs; i++ {
+			m = append(m, ChatMessage{Role: "assistant", Content: "x"}, ChatMessage{Role: "user", Content: "OBSERVATION: DENIED: egress blocked"})
+		}
+		return m
+	}
+	parentTask := "ORCH childprobe public,loopback,other FETCH-ONLY https://api.anthropic.com/"
+	if r := mockReply(mk(parentTask, 0), "https://t/"); r != "TOOL delegate childprobe public,loopback,other FETCH-ONLY https://api.anthropic.com/" {
+		t.Fatalf("parent turn 0 = %q, want a delegate directive carrying the child task", r)
+	}
+	if r := mockReply(mk(parentTask, 1), "https://t/"); !strings.HasPrefix(r, "FINAL") {
+		t.Fatalf("parent turn 1 = %q, want FINAL", r)
+	}
+	if r := mockReply(mk("FETCH-ONLY https://x/", 0), "https://target/"); r != "TOOL fetch https://target/" {
+		t.Fatalf("child turn 0 = %q, want a single fetch of the target", r)
+	}
+	r := mockReply(mk("FETCH-ONLY https://x/", 1), "https://target/")
+	if !strings.HasPrefix(r, "FINAL") || !strings.Contains(r, "DENIED") {
+		t.Fatalf("child turn 1 = %q, want FINAL echoing the (denied) observation, no escalation", r)
 	}
 }

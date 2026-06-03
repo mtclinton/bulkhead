@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -16,15 +17,24 @@ import (
 const observationCap = 2 << 10 // re-appended observations are truncated so a large body can't blow the next prompt
 
 func systemPrompt() string {
-	return strings.Join([]string{
+	lines := []string{
 		"You are a bulkhead agent. Accomplish the task using EXACTLY ONE action per turn.",
 		"Reply with a SINGLE line, exactly one of:",
 		"  TOOL fetch <url>               -- HTTP GET a URL",
 		"  TOOL request_egress <classes>  -- ask the operator to widen this agent's egress (e.g. public)",
+	}
+	// Only advertise delegation to an agent a deployment has opted in — and tell it the truth:
+	// a child's egress is THIS agent's egress narrowed to <classes> (never wider), so it cannot
+	// reach a destination class this agent itself lacks.
+	if os.Getenv("BULKHEAD_AGENT_ALLOW_DELEGATE") != "" {
+		lines = append(lines,
+			"  TOOL delegate <suffix> <classes> <task>  -- spawn a sub-agent to do <task>; its egress is THIS agent's egress narrowed to <classes>")
+	}
+	lines = append(lines,
 		"  FINAL <text>                   -- you are done; give the answer",
 		"If a fetch is DENIED by the egress policy, you may request_egress to ask a human for access, then retry.",
-		"Output nothing but that one TOOL or FINAL line.",
-	}, "\n")
+		"Output nothing but that one TOOL or FINAL line.")
+	return strings.Join(lines, "\n")
 }
 
 // runLoop is the bounded perceive->decide->act loop. It terminates on a FINAL directive, on the
