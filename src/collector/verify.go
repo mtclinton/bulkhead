@@ -35,7 +35,7 @@ var zeroHash = make([]byte, sha256.Size)
 // verifyChain validates every record in an audit .jsonl against pub. Returns the count of
 // verified records and the first error (fail-closed at the first bad record). A missing or
 // empty file is OK (nothing has been written yet) — only a PRESENT, BROKEN chain fails.
-func verifyChain(path string, pub ed25519.PublicKey) (int, error) {
+func verifyChain(path string, pub ed25519.PublicKey, domain string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -48,8 +48,8 @@ func verifyChain(path string, pub ed25519.PublicKey) (int, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // tolerate long Mode strings
 
-	prev := zeroHash         // running prev-hash; resets to zero at each boot boundary
-	var expectSeq uint64 = 0 // expected seq WITHIN the current subchain
+	prev := zeroHash         // running prev-hash; chains CONTINUOUSLY across boots (F5)
+	var expectSeq uint64 = 0 // expected seq WITHIN the current per-boot subchain
 	n := 0
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
@@ -60,10 +60,11 @@ func verifyChain(path string, pub ed25519.PublicKey) (int, error) {
 		if err := json.Unmarshal(line, &r); err != nil {
 			return n, fmt.Errorf("record %d: malformed json: %w", n+1, err)
 		}
-		// Boot boundary: a fresh process re-anchors at seq=1 with a zero prev_hash. Re-anchor
-		// here; the linkage check below then enforces prev_hash==0 for this first record.
+		// seq resets to 1 at a per-boot boundary; otherwise it increments. But prev_hash
+		// chains CONTINUOUSLY across boots (F5) and is NOT reset here — so deleting a whole
+		// middle subchain breaks the link (the next subchain's prev_hash won't match the
+		// surviving prior record's hash). Genesis is the very first record (seq=1, prev=0).
 		if r.Seq == 1 {
-			prev = zeroHash
 			expectSeq = 1
 		} else {
 			expectSeq++
@@ -72,9 +73,9 @@ func verifyChain(path string, pub ed25519.PublicKey) (int, error) {
 			return n, fmt.Errorf("record %d: seq=%d, expected %d (gap, reorder, or illegal reset)", n+1, r.Seq, expectSeq)
 		}
 		if !hexEqual(r.PrevHash, prev) {
-			return n, fmt.Errorf("record %d (seq %d): prev_hash linkage broken (record removed/reordered)", n+1, r.Seq)
+			return n, fmt.Errorf("record %d (seq %d): prev_hash linkage broken (record/subchain removed or reordered)", n+1, r.Seq)
 		}
-		sum := sha256.Sum256(canonical(r, prev))
+		sum := sha256.Sum256(canonical(r, prev, domain))
 		if !hexEqual(r.Hash, sum[:]) {
 			return n, fmt.Errorf("record %d (seq %d): hash mismatch (record body tampered)", n+1, r.Seq)
 		}
@@ -118,11 +119,27 @@ func cmdVerifyAudit(args []string) {
 	if err != nil {
 		log.Fatalf("verify-audit: %v", err)
 	}
-	n, err := verifyChain(chain, pub)
+	domain := chainDomain(chain)
+	n, err := verifyChain(chain, pub, domain)
 	if err != nil {
-		log.Fatalf("verify-audit: chain INVALID (%d record(s) verified, then) %v [key: %s]", n, err, src)
+		log.Fatalf("verify-audit: chain INVALID (%d record(s) verified, then) %v [key: %s, domain: %s]", n, err, src, domain)
 	}
-	fmt.Printf("verify-audit: OK — %d record(s) verified for %s [key: %s]\n", n, chain, src)
+	fmt.Printf("verify-audit: OK — %d record(s) verified for %s [key: %s, domain: %s]\n", n, chain, src, domain)
+}
+
+// chainDomain infers the per-chain domain (F4) the verifier must use from the chain's path.
+// The two on-box chains are the collector provenance (/data/bulkhead/audit) and the broker
+// decision chain (/data/bulkhead/audit-broker); the domain is the VERIFIER's belief about
+// which chain this is, never read from the record (so a transplant fails). Overridable for
+// offline use via BULKHEAD_AUDIT_DOMAIN.
+func chainDomain(chain string) string {
+	if d := os.Getenv("BULKHEAD_AUDIT_DOMAIN"); d != "" {
+		return d
+	}
+	if strings.Contains(chain, "audit-broker") {
+		return "broker"
+	}
+	return "collector"
 }
 
 // resolveAuditPub picks the verification key. See cmdVerifyAudit for the precedence rationale.

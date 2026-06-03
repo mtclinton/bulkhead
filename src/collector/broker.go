@@ -127,7 +127,7 @@ func cmdBroker() {
 	}
 	// The broker owns its OWN signed decision chain (separate dir/key, via
 	// BULKHEAD_AUDIT_DIR) — never the collector's single-writer provenance chain.
-	al, err := openAuditLog()
+	al, err := openAuditLog("broker")
 	if err != nil {
 		log.Fatalf("broker: decision log: %v", err)
 	}
@@ -288,14 +288,25 @@ func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f [
 		// cgroup recycled, or it NARROWED its own manifest during the approval gap, the
 		// request-time childMask is stale and could over-grant. Re-stat the parent's identity
 		// and re-read its live mask; recompute child = liveParent ∩ requested. Fail closed.
-		if err := reverifyCgroup(p.parentPath, p.parentCgID); err != nil {
-			return "", err
+		//
+		// F6 (composed review): take egressMu around the parent-mask READ so an operator
+		// NARROW/EXPAND (which serialize on egressMu) cannot interleave BETWEEN this read and
+		// the slow launchChild — otherwise a `narrow P public` meant to contain an incident
+		// could land after the read and the child would be born holding the class the operator
+		// just revoked. Snapshot the child mask under egressMu; launch OUTSIDE it. Lock order
+		// is launchMu->egressMu held briefly; expand/narrow take egressMu alone, so no inversion.
+		egressMu.Lock()
+		err := reverifyCgroup(p.parentPath, p.parentCgID)
+		var liveChild uint32
+		if err == nil {
+			var liveParent uint32
+			liveParent, err = lookupEgressMask(p.parentCgID)
+			liveChild = liveParent & p.reqMask
 		}
-		liveParent, err := lookupEgressMask(p.parentCgID)
+		egressMu.Unlock()
 		if err != nil {
-			return "", fmt.Errorf("parent manifest vanished: %w", err)
+			return "", fmt.Errorf("parent re-verify/manifest: %w", err)
 		}
-		liveChild := liveParent & p.reqMask
 		if err := launchChild(p.instance, classNames(liveChild)); err != nil {
 			return "", err
 		}
@@ -382,7 +393,9 @@ func finishGated(conn net.Conn, p *pending) {
 	ok, verdict := approve(p)
 	if !ok {
 		// deny | timeout | busy — no side effect ran; record the (non-)decision.
-		recordDecision(p, verdict, p.operator, "(not applied)")
+		if err := recordDecision(p, verdict, p.operator, "(not applied)"); err != nil {
+			log.Printf("broker: AUDIT APPEND FAILED for %s %s: %v", p.kind, verdict, err)
+		}
 		reply("ERR " + verdict)
 		return
 	}
@@ -394,11 +407,20 @@ func finishGated(conn net.Conn, p *pending) {
 	detail, err := p.execute(p)
 	if err != nil {
 		log.Printf("broker: execute %s id=%d: %v", p.kind, p.id, err)
-		recordDecision(p, "error", p.operator, "(execute failed: "+err.Error()+")")
+		if rerr := recordDecision(p, "error", p.operator, "(execute failed: "+err.Error()+")"); rerr != nil {
+			log.Printf("broker: AUDIT APPEND FAILED for %s error: %v", p.kind, rerr)
+		}
 		reply("ERR exec")
 		return
 	}
-	recordDecision(p, verdict, p.operator, detail)
+	// F7 (composed review): the side effect landed; the signed record is now load-bearing,
+	// not advisory. If the append FAILS, do NOT reply OK — the action is unrecorded, so
+	// surface it (ERR audit) and log loudly rather than silently claiming success.
+	if rerr := recordDecision(p, verdict, p.operator, detail); rerr != nil {
+		log.Printf("broker: AUDIT APPEND FAILED after applied %s cg=%d -> %s: %v", p.kind, p.parentCgID, detail, rerr)
+		reply("ERR audit")
+		return
+	}
 	log.Printf("broker: %s cg=%d -> %s [operator %s]", p.kind, p.parentCgID, detail, p.operator)
 	reply("OK " + detail)
 }
@@ -712,9 +734,9 @@ func handleApprove(conn net.Conn) {
 // when no side effect landed. The record therefore reflects what the kernel/map state truly
 // became (F4), never the request-time intent, and never a widen that was refused by the
 // execute()-time re-verification (F1/F3).
-func recordDecision(p *pending, verdict, operator, applied string) {
+func recordDecision(p *pending, verdict, operator, applied string) error {
 	if brokerAL == nil {
-		return
+		return nil
 	}
 	hook := string(p.kind)
 	comm := p.instance // delegate: the minted child instance
@@ -730,9 +752,7 @@ func recordDecision(p *pending, verdict, operator, applied string) {
 		mode = fmt.Sprintf("%s op=%s applied=%s", operator, hookNames[p.grantHook], applied)
 	}
 	ev := provEvent{CgroupID: p.parentCgID, PID: 0, Comm: comm, Hook: hook, Decision: verdict, Mode: mode}
-	if err := brokerAL.append(ev); err != nil {
-		log.Printf("broker: decision audit append: %v", err)
-	}
+	return brokerAL.append(ev)
 }
 
 // ---- approve (operator CLI: list / allow / deny) ---------------------------

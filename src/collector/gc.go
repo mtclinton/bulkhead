@@ -137,6 +137,49 @@ func selectEgressPrunes(cgids []uint64, live, seen map[uint64]struct{}) []uint64
 	return del
 }
 
+// brokerCgroupPath is the broker service's cgroup dir; its inode is the broker cgid that must
+// stay in tcb_cgroups. The broker has no custom Slice=, so it lives directly under system.slice
+// — the SAME path the broker's own resolveCgroupID("self") computes when it self-registers. A
+// package var so tests can redirect it.
+var brokerCgroupPath = "/sys/fs/cgroup/system.slice/bulkhead-broker.service"
+
+// reconcileTCB prunes any tcb_cgroups entry that is not {root, the collector, the LIVE broker}.
+// Composed-review fix: the broker self-registers its cgid once and never deletes it, so an
+// independent broker re-activation leaves a STALE cgid in tcb_cgroups whose dead inode can be
+// recycled onto a bulkhead-agent@ jail — granting that agent full E0-E3 TCB exemption (the one
+// per-cgroup map with no other recycle defense). The collector (always-on, TCB, E0-exempt)
+// reconciles it here. FAIL-SAFE: if root+collector cannot be resolved it prunes NOTHING (never
+// blindly empties the map); the live broker is in the keep-set (resolved by the same path the
+// broker self-registers), so the working broker is never pruned. DELETE-ONLY (never adds — the
+// broker self-registers itself, always under E0-off since agents/the broker can't start under
+// E0-armed).
+func reconcileTCB(tcb *ebpf.Map) (pruned []uint64) {
+	keep := map[uint64]struct{}{}
+	for _, id := range tcbCgroupIDs() { // root + the collector's own cgroup
+		keep[id] = struct{}{}
+	}
+	if len(keep) < 2 {
+		return nil // could not resolve root+collector -> never prune blindly
+	}
+	if bid, err := cgroupIDFromInode(brokerCgroupPath); err == nil {
+		keep[bid] = struct{}{} // the live broker
+	}
+	var key uint64
+	var val uint32
+	it := tcb.Iterate()
+	for it.Next(&key, &val) {
+		if _, ok := keep[key]; !ok {
+			pruned = append(pruned, key)
+		}
+	}
+	for _, k := range pruned {
+		if err := tcb.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			log.Printf("gc: tcb prune cg=%d: %v", k, err)
+		}
+	}
+	return pruned
+}
+
 // gcLoop is the authoritative, E0-robust GC: a ticker in the collector process. It holds the
 // process-local `seen` set (agent-born egress cgids witnessed live) across ticks; restart is
 // safe because runCollector os.RemoveAll(pinDir) wipes egress_policy on the same start.
@@ -168,8 +211,16 @@ func gcLoop(stop <-chan struct{}) {
 			for _, cg := range ed {
 				log.Printf("gc: pruned egress_policy cg=%d", cg)
 			}
-			if len(gd) > 0 || len(ed) > 0 {
-				log.Printf("gc: pruned %d grant_once + %d egress_policy (live agents: %d)", len(gd), len(ed), len(live))
+			var tp []uint64
+			if tcb, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "tcb_cgroups"), nil); err == nil {
+				tp = reconcileTCB(tcb)
+				tcb.Close()
+				for _, cg := range tp {
+					log.Printf("gc: pruned STALE tcb_cgroup cg=%d (recycle-escape guard)", cg)
+				}
+			}
+			if len(gd) > 0 || len(ed) > 0 || len(tp) > 0 {
+				log.Printf("gc: pruned %d grant_once + %d egress_policy + %d tcb_cgroups (live agents: %d)", len(gd), len(ed), len(tp), len(live))
 			}
 		}
 	}

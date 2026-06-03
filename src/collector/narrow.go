@@ -175,16 +175,26 @@ func handleNarrow(conn net.Conn, operator string, f []string) {
 	}
 	final := narrowMask(live, reqMask)
 	if final == live { // no held class requested — don't churn the map, but still record it
-		recordNarrow(cgID, f[1], reqMask, "narrow-noop", operator, classNames(live))
+		if err := recordNarrow(cgID, f[1], reqMask, "narrow-noop", operator, classNames(live)); err != nil {
+			log.Printf("broker: AUDIT APPEND FAILED for narrow-noop cg=%d: %v", cgID, err)
+			reply("ERR audit")
+			return
+		}
 		reply("OK " + f[1] + " " + classNames(live) + " (no-op)")
 		return
 	}
 	if err := m.Update(cgID, final, ebpf.UpdateExist); err != nil {
-		recordNarrow(cgID, f[1], reqMask, "error", operator, "(update failed)")
+		_ = recordNarrow(cgID, f[1], reqMask, "error", operator, "(update failed)")
 		reply("ERR target-gone") // UpdateExist: refuse to CREATE on a recycled/cleared key
 		return
 	}
-	recordNarrow(cgID, f[1], reqMask, "narrow", operator, classNames(final))
+	// F7: the clamp landed; the signed record is load-bearing. If the append fails, surface
+	// it (ERR audit) rather than claiming OK on an unrecorded privileged change.
+	if err := recordNarrow(cgID, f[1], reqMask, "narrow", operator, classNames(final)); err != nil {
+		log.Printf("broker: AUDIT APPEND FAILED after applied narrow cg=%d -> %s: %v", cgID, classNames(final), err)
+		reply("ERR audit")
+		return
+	}
 	log.Printf("broker: narrow cg=%d %s -> %s [operator %s]", cgID, f[1], classNames(final), operator)
 	reply("OK " + f[1] + " " + classNames(final))
 }
@@ -192,9 +202,9 @@ func handleNarrow(conn net.Conn, operator string, f []string) {
 // recordNarrow appends ONE signed record to the broker's OWN decision chain, AFTER the map op
 // so `applied` reflects the actually-applied state (F4). Operator-initiated, so there is no
 // requester pidfd: CgroupID is the RE-VERIFIED target; operator is the SO_PEERCRED uid:pid.
-func recordNarrow(cgID uint64, target string, reqMask uint32, verdict, operator, applied string) {
+func recordNarrow(cgID uint64, target string, reqMask uint32, verdict, operator, applied string) error {
 	if brokerAL == nil {
-		return
+		return nil
 	}
 	comm := target
 	if len(comm) > 16 {
@@ -202,9 +212,7 @@ func recordNarrow(cgID uint64, target string, reqMask uint32, verdict, operator,
 	}
 	mode := fmt.Sprintf("%s req=%s applied=%s", operator, classNames(reqMask), applied)
 	ev := provEvent{CgroupID: cgID, PID: 0, Comm: comm, Hook: string(actNarrowEgress), Decision: verdict, Mode: mode}
-	if err := brokerAL.append(ev); err != nil {
-		log.Printf("broker: narrow audit append: %v", err)
-	}
+	return brokerAL.append(ev)
 }
 
 // cmdNarrow is the operator CLI: bulkhead-collector narrow <target> <classes>. It dials the

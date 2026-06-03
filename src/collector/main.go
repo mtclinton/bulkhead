@@ -548,7 +548,7 @@ func runCollector() {
 		log.Fatalf("pin grant_once: %v", err)
 	}
 
-	al, err := openAuditLog()
+	al, err := openAuditLog("collector")
 	if err != nil {
 		log.Fatalf("audit log: %v", err)
 	}
@@ -676,6 +676,7 @@ type auditLog struct {
 	priv     ed25519.PrivateKey
 	prevHash []byte
 	seq      uint64
+	domain   string // F4: per-chain domain ("collector"|"broker") bound into canonical()
 }
 
 type auditRecord struct {
@@ -692,7 +693,7 @@ type auditRecord struct {
 	Sig      string `json:"sig"`
 }
 
-func openAuditLog() (*auditLog, error) {
+func openAuditLog(domain string) (*auditLog, error) {
 	dir := "/var/lib/bulkhead/audit"
 	if d := os.Getenv("BULKHEAD_AUDIT_DIR"); d != "" {
 		dir = d
@@ -700,7 +701,18 @@ func openAuditLog() (*auditLog, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "provenance.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	chainPath := filepath.Join(dir, "provenance.jsonl")
+	// F5 (composed review): continue the hash chain ACROSS boots — the new boot's first
+	// record links to the prior boot's LAST hash, not a fresh zero. So deleting a whole
+	// middle per-boot subchain breaks the linkage and verify-audit catches it (re-anchoring
+	// at every seq=1/zero-prev let a complete-subchain deletion pass before). Genesis (no /
+	// empty / unreadable-tail chain) starts at zero; a corrupt tail then mislinks and is
+	// caught by the verifier's continuity check rather than silently masked.
+	prev := make([]byte, sha256.Size)
+	if h := lastChainHash(chainPath); h != nil {
+		prev = h
+	}
+	f, err := os.OpenFile(chainPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -709,7 +721,7 @@ func openAuditLog() (*auditLog, error) {
 		f.Close()
 		return nil, err
 	}
-	a := &auditLog{f: f, path: f.Name(), priv: priv, prevHash: make([]byte, sha256.Size)}
+	a := &auditLog{f: f, path: f.Name(), priv: priv, prevHash: prev, domain: domain}
 	// F5: export the public key beside the chain so it can be verified OFFLINE (ship the
 	// log + this pubkey off-box; `verify-audit <chain> @audit-pub.txt`). Best-effort — the
 	// chain itself is the critical path, and the on-box boot gate verifies against the
@@ -751,11 +763,17 @@ func (a *auditLog) pubHex() string {
 
 // canonical is a fixed-order, length-prefixed binary encoding of exactly the
 // chained fields — never json.Marshal, whose key order/whitespace is unstable.
-func canonical(r auditRecord, prev []byte) []byte {
+func canonical(r auditRecord, prev []byte, domain string) []byte {
 	var b bytes.Buffer
 	var u8 [8]byte
 	put := func(v uint64) { binary.BigEndian.PutUint64(u8[:], v); b.Write(u8[:]) }
 	putStr := func(s string) { put(uint64(len(s))); b.WriteString(s) }
+	// F4 (composed review): a per-chain DOMAIN tag bound into the signed hash. The collector
+	// and broker share one sealed seed; without this tag a record signed for one chain
+	// verifies as a valid record of the other, so a /data attacker could transplant
+	// validly-signed subchains between them. The domain is supplied by the VERIFIER (which
+	// knows which chain it is checking), NOT read from the record, so a transplant fails.
+	putStr(domain)
 	put(r.Seq)
 	put(uint64(r.TS))
 	put(r.CgroupID)
@@ -769,6 +787,32 @@ func canonical(r auditRecord, prev []byte) []byte {
 	return b.Bytes()
 }
 
+// lastChainHash returns the decoded Hash of the last well-formed record in the chain file,
+// or nil (genesis / unreadable). Used to continue the hash chain across boots (F5).
+func lastChainHash(path string) []byte {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		ln := bytes.TrimSpace(lines[i])
+		if len(ln) == 0 {
+			continue
+		}
+		var r auditRecord
+		if json.Unmarshal(ln, &r) != nil {
+			return nil
+		}
+		h, err := hex.DecodeString(r.Hash)
+		if err != nil || len(h) != sha256.Size {
+			return nil
+		}
+		return h
+	}
+	return nil
+}
+
 func (a *auditLog) append(ev provEvent) error {
 	a.seq++
 	r := auditRecord{
@@ -777,7 +821,7 @@ func (a *auditLog) append(ev provEvent) error {
 		Decision: ev.Decision, Mode: ev.Mode,
 		PrevHash: hex.EncodeToString(a.prevHash),
 	}
-	sum := sha256.Sum256(canonical(r, a.prevHash))
+	sum := sha256.Sum256(canonical(r, a.prevHash, a.domain))
 	r.Hash = hex.EncodeToString(sum[:])
 	r.Sig = hex.EncodeToString(ed25519.Sign(a.priv, sum[:]))
 
