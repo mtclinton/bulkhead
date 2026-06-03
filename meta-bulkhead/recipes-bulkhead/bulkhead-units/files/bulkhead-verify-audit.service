@@ -31,6 +31,10 @@ RemainAfterExit=yes
 LoadCredential=audit-seed:/data/bulkhead/audit-seed
 ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit/provenance.jsonl
 ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit-broker/provenance.jsonl
+# ADR-0017: the collector's CONTROL chain — the signed log of control-socket authority writes
+# (per-agent egress manifests, broker TCB registration, enforce toggles). Sibling of the
+# collector chain in the same audit dir; a missing file (no control writes yet) verifies as OK.
+ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit/control.jsonl
 User=root
 CapabilityBoundingSet=
 NoNewPrivileges=yes

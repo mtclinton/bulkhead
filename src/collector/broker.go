@@ -152,7 +152,7 @@ func cmdBroker() {
 	}
 	// The broker owns its OWN signed decision chain (separate dir/key, via
 	// BULKHEAD_AUDIT_DIR) — never the collector's single-writer provenance chain.
-	al, err := openAuditLog("broker")
+	al, err := openAuditLog("broker", "provenance.jsonl")
 	if err != nil {
 		log.Fatalf("broker: decision log: %v", err)
 	}

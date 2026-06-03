@@ -171,3 +171,38 @@ func TestVerifyChainRejectsWrongDomain(t *testing.T) {
 		t.Fatal("a broker-domain record must NOT verify under the collector domain")
 	}
 }
+
+// TestControlChainDomain (ADR-0017): a control-socket authority record verifies under the new
+// "control" domain and NOT under collector/broker (F4 transplant protection extends to the new
+// chain), and chainDomain() maps the control.jsonl filename to "control" so the boot gate and
+// verify-audit pick the right domain.
+func TestControlChainDomain(t *testing.T) {
+	priv := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	pub := priv.Public().(ed25519.PublicKey)
+	path := filepath.Join(t.TempDir(), "control.jsonl")
+	a := newTestLog(t, path, "control", priv)
+	if err := a.append(provEvent{CgroupID: 42, Comm: "broker", Hook: "control:tcb-register-broker", Decision: "ok", Mode: "registered"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.append(provEvent{CgroupID: 100, Hook: "control:egress-set", Decision: "ok", Mode: "loopback,other"}); err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	if _, err := verifyChain(path, pub, "control"); err != nil {
+		t.Fatalf("a control-domain chain must verify under the control domain: %v", err)
+	}
+	for _, d := range []string{"collector", "broker"} {
+		if _, err := verifyChain(path, pub, d); err == nil {
+			t.Fatalf("a control-domain record must NOT verify under %q (transplant)", d)
+		}
+	}
+	for path, want := range map[string]string{
+		"/data/bulkhead/audit/control.jsonl":           "control",
+		"/data/bulkhead/audit/provenance.jsonl":        "collector",
+		"/data/bulkhead/audit-broker/provenance.jsonl": "broker",
+	} {
+		if got := chainDomain(path); got != want {
+			t.Fatalf("chainDomain(%q)=%q want %q", path, got, want)
+		}
+	}
+}

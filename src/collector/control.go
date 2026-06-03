@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -61,7 +62,32 @@ func isBrokerCaller(cgPath string) bool {
 // controlMu serializes the collector-side pinned-map writes issued on behalf of control-socket
 // callers. Short, non-nested, and collector-process-local — never held across the broker's
 // egressMu/launchMu/grantMu (a different process), so there is no cross-process lock inversion.
+// It ALSO serializes the control-chain audit appends (recordControl), which auditLog does not
+// internally lock — every write verb holds it across both the map Update and the append.
 var controlMu sync.Mutex
+
+// controlAL is the collector's CONTROL audit chain (ADR-0017): a separate, domain-tagged,
+// Ed25519-signed chain for the control socket's authority-changing WRITES, so every per-agent
+// manifest write / broker TCB registration / enforce toggle is tamper-evident — not just logged.
+// Opened in runCollector BEFORE the control acceptLoop, so no write is ever served unsigned.
+var controlAL *auditLog
+
+// recordControl appends one signed record to the control chain. Called by the write verbs AFTER
+// auth, under controlMu (so appends are serialized). Overloads provEvent's 6 fields like the
+// broker's recordDecision: cgroup=the affected cgid, hook=the verb, decision=ok|err, mode=detail.
+// Auth REJECTIONS are NOT chained (no authority changed, and the 0660-root socket is not
+// agent-reachable so a rejected attempt is a misconfigured-root event, log.Printf'd not signed).
+func recordControl(hook, comm, decision, mode string, cgID uint64) {
+	if controlAL == nil {
+		return
+	}
+	if len(comm) > 16 {
+		comm = comm[:16]
+	}
+	if err := controlAL.append(provEvent{CgroupID: cgID, Comm: comm, Hook: hook, Decision: decision, Mode: mode}); err != nil {
+		log.Printf("control: AUDIT APPEND FAILED for %s %s: %v", hook, decision, err)
+	}
+}
 
 // controlListener creates the control socket (0660 root:root). /run/bulkhead is created early by
 // bulkhead-broker.socket's RuntimeDirectory and is in the collector's ReadWritePaths; the MkdirAll
@@ -170,9 +196,11 @@ func ctlEgressSetSelf(reply func(string), cgID uint64, cgPath string, f []string
 	}
 	defer m.Close()
 	if err := m.Update(cgID, mask, ebpf.UpdateAny); err != nil {
+		recordControl("control:egress-set", "", "err", "update-failed", cgID)
 		reply("ERR update")
 		return
 	}
+	recordControl("control:egress-set", "", "ok", classNames(mask), cgID)
 	reply("OK " + classNames(mask))
 }
 
@@ -190,9 +218,11 @@ func ctlEgressClearSelf(reply func(string), cgID uint64, cgPath string) {
 	}
 	defer m.Close()
 	if err := m.Delete(cgID); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		recordControl("control:egress-clear", "", "err", "delete-failed", cgID)
 		reply("ERR delete")
 		return
 	}
+	recordControl("control:egress-clear", "", "ok", "cleared", cgID)
 	reply("OK cleared")
 }
 
@@ -212,6 +242,7 @@ func ctlGrantClearSelf(reply func(string), cgID uint64, cgPath string) {
 	for _, h := range []uint32{hookPtrace, hookSetuid, hookCapset} {
 		_ = m.Delete(bpfGrantKey{Cgid: cgID, Hook: h})
 	}
+	recordControl("control:grant-clear", "", "ok", "cleared", cgID)
 	reply("OK cleared")
 }
 
@@ -240,9 +271,11 @@ func ctlTcbRegisterBroker(reply func(string), cgPath string) {
 	}
 	defer m.Close()
 	if err := m.Update(bid, uint32(1), ebpf.UpdateAny); err != nil {
+		recordControl("control:tcb-register-broker", "broker", "err", "update-failed", bid)
 		reply("ERR update")
 		return
 	}
+	recordControl("control:tcb-register-broker", "broker", "ok", "registered", bid)
 	reply("OK registered")
 }
 
@@ -305,9 +338,11 @@ func ctlEnforceSet(reply func(string), cgPath string, f []string) {
 	}
 	defer m.Close()
 	if err := m.Update(hid, val, ebpf.UpdateAny); err != nil {
+		recordControl("control:enforce-set", f[1], "err", "update-failed", 0)
 		reply("ERR update")
 		return
 	}
+	recordControl("control:enforce-set", f[1], "ok", f[1]+"="+f[2], 0)
 	reply("OK " + f[1] + "=" + f[2])
 }
 

@@ -178,12 +178,25 @@ try:
     check(cinstX is not None and "DynamicUser=yes" in cuser,
           "ARM INJECTION: the child ran as a DynamicUser jail (not root) — no privilege escalation")
 
-    # ===== ARM AUDIT: both chains verify; child verdict under its own cgid =====
+    # ===== ARM AUDIT: all THREE signed chains verify; control chain has the authority writes =====
     v1 = run("bulkhead-collector verify-audit /data/bulkhead/audit-broker/provenance.jsonl 2>&1; echo RC=$?")
     v2 = run("bulkhead-collector verify-audit /data/bulkhead/audit/provenance.jsonl 2>&1; echo RC=$?")
-    out("\n[verify]\n" + v1 + v2)
+    v3 = run("bulkhead-collector verify-audit /data/bulkhead/audit/control.jsonl 2>&1; echo RC=$?")
+    out("\n[verify]\n" + v1 + v2 + v3)
     check("verify-audit: OK" in v1 and "RC=0" in v1 and "verify-audit: OK" in v2 and "RC=0" in v2,
-          "ARM AUDIT: BOTH signed chains verify after the orchestration (every parent + child action is Ed25519-verifiable)")
+          "ARM AUDIT: the broker + collector signed chains verify after the orchestration")
+    # ADR-0017: the control chain is Ed25519-signed too, and carries the authority-changing control
+    # writes — the broker's TCB registration + every agent's egress manifest write (which now flow
+    # through the collector). Domain-tagged "control" (verify-audit infers it from the filename).
+    cc = run("grep -ac 'control:' /data/bulkhead/audit/control.jsonl 2>/dev/null; echo END")
+    out("\n[control chain hits]\n" + cc)
+    has_records = any(t.isdigit() and int(t) > 0 for t in cc.replace("END", " ").split())
+    reg = run("grep -ac 'control:tcb-register-broker' /data/bulkhead/audit/control.jsonl 2>/dev/null; echo END")
+    setm = run("grep -ac 'control:egress-set' /data/bulkhead/audit/control.jsonl 2>/dev/null; echo END")
+    check("verify-audit: OK" in v3 and "RC=0" in v3 and has_records
+          and any(t.isdigit() and int(t) > 0 for t in reg.replace("END", " ").split())
+          and any(t.isdigit() and int(t) > 0 for t in setm.replace("END", " ").split()),
+          "ARM AUDIT/SIGN (ADR-0017): the signed CONTROL chain verifies and records the broker TCB registration + agent egress-manifest writes")
     st = run("bulkhead-collector status 2>&1"); out("\n[status]\n" + st)
 
     run("poweroff", t=20)

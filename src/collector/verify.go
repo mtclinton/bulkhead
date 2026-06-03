@@ -136,10 +136,14 @@ func chainDomain(chain string) string {
 	if d := os.Getenv("BULKHEAD_AUDIT_DOMAIN"); d != "" {
 		return d
 	}
-	if strings.Contains(chain, "audit-broker") {
+	switch {
+	case strings.Contains(chain, "audit-broker"):
 		return "broker"
+	case strings.Contains(filepath.Base(chain), "control"): // ADR-0017: the control-write chain
+		return "control"
+	default:
+		return "collector"
 	}
-	return "collector"
 }
 
 // resolveAuditPub picks the verification key. See cmdVerifyAudit for the precedence rationale.

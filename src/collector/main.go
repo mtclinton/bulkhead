@@ -559,10 +559,26 @@ func runCollector() {
 			log.Printf("broker tcb pre-register (cgid %d): %v", bid, err)
 		}
 	}
+	// Open the signed audit chains BEFORE serving anything that appends to them. The collector
+	// writes TWO chains (both domain-tagged + Ed25519-signed with the sealed seed): the
+	// single-writer kernel-verdict chain (the ringbuf loop), and — ADR-0017 — a separate `control`
+	// chain for the control socket's authority-changing WRITES, so every per-agent manifest write /
+	// broker TCB registration / enforce toggle is tamper-evident, not merely logged.
+	al, err := openAuditLog("collector", "provenance.jsonl")
+	if err != nil {
+		log.Fatalf("audit log: %v", err)
+	}
+	defer al.Close()
+	controlAL, err = openAuditLog("control", "control.jsonl")
+	if err != nil {
+		log.Fatalf("control audit log: %v", err)
+	}
+	defer controlAL.Close()
+
 	// ADR-0016: the control socket — the bpf()-WRITE chokepoint for non-TCB callers (the agent
-	// +ExecStartPre manifest write + clears, and the broker's TCB self-registration). Created
-	// after the maps are pinned and before the ringbuf loop; the collector (TCB, E0-exempt) does
-	// every Update on a caller's behalf, so those writes survive E0-armed. Broker/agents order
+	// +ExecStartPre manifest write + clears, and the broker's TCB self-registration). Started AFTER
+	// the control chain is open (no write is ever served unsigned). The collector (TCB, E0-exempt)
+	// does every Update on a caller's behalf, so those writes survive E0-armed; broker/agents order
 	// After=collector, so the socket exists before they connect.
 	controlLn, err := controlListener()
 	if err != nil {
@@ -570,12 +586,7 @@ func runCollector() {
 	}
 	go acceptLoop(controlLn, handleControlConn)
 
-	al, err := openAuditLog("collector")
-	if err != nil {
-		log.Fatalf("audit log: %v", err)
-	}
-	defer al.Close()
-	log.Printf("collector running: observe+enforce attached (bpf,ptrace,socket_connect,setuid,capset; default observe), audit at %s, signer %s", al.path, al.pubHex())
+	log.Printf("collector running: observe+enforce attached (bpf,ptrace,socket_connect,setuid,capset; default observe), audit at %s (+ control chain), signer %s", al.path, al.pubHex())
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
@@ -715,7 +726,7 @@ type auditRecord struct {
 	Sig      string `json:"sig"`
 }
 
-func openAuditLog(domain string) (*auditLog, error) {
+func openAuditLog(domain, filename string) (*auditLog, error) {
 	dir := "/var/lib/bulkhead/audit"
 	if d := os.Getenv("BULKHEAD_AUDIT_DIR"); d != "" {
 		dir = d
@@ -723,7 +734,7 @@ func openAuditLog(domain string) (*auditLog, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	chainPath := filepath.Join(dir, "provenance.jsonl")
+	chainPath := filepath.Join(dir, filename)
 	// F5 (composed review): continue the hash chain ACROSS boots — the new boot's first
 	// record links to the prior boot's LAST hash, not a fresh zero. So deleting a whole
 	// middle per-boot subchain breaks the linkage and verify-audit catches it (re-anchoring
