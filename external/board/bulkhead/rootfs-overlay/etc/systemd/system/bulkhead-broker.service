@@ -30,6 +30,12 @@ PartOf=bulkhead-collector.service
 [Service]
 Type=exec
 ExecStart=/usr/bin/bulkhead-collector broker
+# ADR-0018 review fix: self-heal a lost boot foot-race against the collector's control socket.
+# brokerRegisterTCB now POLLS for the not-yet-listening socket (so a fatal exit is rare), and if
+# the broker dies anyway, Restart= respawns it (re-inheriting the bulkhead-broker.socket fd via
+# LISTEN_FDS) so the box converges to E0-armed rather than silently degrading to observe.
+Restart=on-failure
+RestartSec=2
 # TCB side: read+write the pinned egress_policy/grant_once maps (CAP_BPF) for the gated EXPAND/
 # NARROW/GRANT actions, and launch child jails by asking PID-1. ADR-0016: the broker no longer
 # self-bpf()s into tcb_cgroups (that EPERMs under E0 from its non-TCB cgroup); it asks the

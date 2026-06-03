@@ -229,12 +229,26 @@ func brokerListener() (net.Listener, error) {
 // brokerRegisterTCB asks the collector (over the control socket) to add THIS broker's cgroup to
 // tcb_cgroups. The broker issues no bpf() itself; the collector attests the caller is the broker
 // cgroup and registers the cgid it stats from the fixed path. Returns true only on OK.
+// brokerRegisterTCB asks the collector to add this broker's cgroup to tcb_cgroups, POLLING until
+// the collector's control socket is listening or a bounded deadline. ADR-0018 review fix: the
+// broker is now BOOT-STARTED, so it can win a foot-race against the collector — which is Type=exec
+// (active at execve) and binds /run/bulkhead/control.sock only as its LAST startup step (after the
+// BPF load/attach/pin + audit-log opens). A single dial would lose that race (immediate ENOENT)
+// and, with the unit's no-Restart fatal exit, leave the broker dead => E0 silently degrades to
+// observe — defeating harden-by-default. So re-dial (like `ctl wait-broker-tcb` does) until OK.
 func brokerRegisterTCB() bool {
-	ok, resp := controlRPC("TCB-REGISTER-BROKER")
-	if !ok {
-		log.Printf("broker: TCB-REGISTER-BROKER: %s", resp)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ok, resp := controlRPC("TCB-REGISTER-BROKER")
+		if ok {
+			return true
+		}
+		if time.Now().After(deadline) {
+			log.Printf("broker: TCB-REGISTER-BROKER failed after ret/poll: %s", resp)
+			return false
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	return ok
 }
 
 // handleBrokerConn serves one agent request on the delegation socket. It peer-attests the

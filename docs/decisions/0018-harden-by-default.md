@@ -70,6 +70,18 @@ Ship E0-ARMED (lsm/bpf deny) AND E2-ARMED (socket_connect per-agent egress) at c
    under socket_connect-enforce), so shipping E0 without E2 is a half-guarantee. E2 has no
    broker-TCB dependency, so it arms in parallel.
 
+6. Boot-race fix (adversarial review). Boot-starting the broker introduced a foot-race: the
+   collector is `Type=exec` (active at `execve`, not when it binds `control.sock` as its LAST
+   startup step), and the broker's first act is to register TCB over that socket. A single dial
+   would lose the race (immediate ENOENT) and, with the unit's fatal-no-`Restart=` exit, leave the
+   broker dead → the enforce gate times out → E0 silently degrades to observe (fail-SAFE, but
+   defeating the deterministic-armed guarantee). Fixed two ways: `brokerRegisterTCB` now POLLS
+   (re-dials up to 30s, like `ctl wait-broker-tcb`) for the not-yet-listening socket, and
+   `bulkhead-broker.service` gains `Restart=on-failure`/`RestartSec=2` so a lost race self-heals.
+   The review also confirmed the show-stopper risk is ABSENT: default-armed E2 leaves a non-agent
+   cgroup with no `egress_policy` entry at verdict ALLOW (`provenance.bpf.c`), so router/tailscaled/
+   llama/DHCP/DNS boot egress is untouched, and no non-TCB `bpf(2)` runs before the arm.
+
 The arm still flows through the UNCHANGED collector + enforce.service path; only WHEN it fires (boot
 vs operator) changes — so every ADR-0016 fail-safe is preserved bit-for-bit.
 
@@ -96,4 +108,7 @@ would be silently EPERM'd by default-armed E0 (and, if it cascaded a unit failur
 time; the durable guard — a static boot-graph lint asserting "no non-TCB `bpf()` before
 `bulkhead-enforce.service`" — is deferred. Also deferred: a RAUC posture decision on whether a
 hardened slot whose broker crash-loops should "enforce-or-roll-back" vs the current never-brick
-default (degrade to observe). The default stays degrade-to-observe.
+default (degrade to observe) — the default stays degrade-to-observe; and an OPERATOR-VISIBLE
+"booted UNARMED" signal (an `OnFailure=` target on the enforce units) so a degraded-to-observe boot
+is not silent (today the retry+`Restart=` make it rare and it fails safe, but a deployment that
+treats observe-when-it-should-enforce as an incident would want the alert).
