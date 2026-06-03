@@ -24,7 +24,10 @@ try:
         child.sendline(f"export PS1='{PS}'"); child.expect(PS, timeout=30); child.expect(PS, timeout=30)
     login()
     def run(c, t=90): child.sendline(c); child.expect(PS, timeout=t); return child.before
-    def is_active(u): return "active" in run(f"systemctl is-active {u} 2>&1")
+    # use the EXIT CODE, not "active" in the output — the command echo contains "is-active", which
+    # would make a substring check a false positive for a failed/inactive unit. `is-active` exits 0
+    # only when the unit is genuinely active.
+    def is_active(u): return "RC=0" in run(f"systemctl is-active {u} >/dev/null 2>&1; echo RC=$?")
     def armed_from_cold_boot(tag):
         # is-active reads (NOT bpf) work under E0; the broker + both enforce units auto-armed at boot.
         e0 = is_active("bulkhead-enforce.service"); e2 = is_active("bulkhead-enforce-egress.service")
@@ -37,11 +40,14 @@ try:
     # ===== ARM 1+2: armed from the FIRST cold boot, broker took the socket fd (no path-steal) =====
     check(is_active("bulkhead-collector.service"), "collector active (cold boot)")
     armed_from_cold_boot("COLD-BOOT-1")
-    bj = run("journalctl -u bulkhead-broker.service --no-pager 2>&1 | grep -aE 'armed|refusing to bind|LISTEN|no LISTEN' | tail -5")
+    bj = run("journalctl -u bulkhead-broker.service --no-pager 2>&1 | grep -a 'broker: armed' | tail -2")
     out("\n[broker journal]\n" + bj + "\n")
+    # "broker: armed" is logged ONLY after brokerListener() succeeds (took the LISTEN_FDS fd) AND
+    # brokerRegisterTCB() returned — a fail-closed/refused bind log.Fatalf's before this line.
+    nofc = run("journalctl -u bulkhead-broker.service --no-pager 2>&1 | grep -ac 'no LISTEN_FDS'; echo END")
     wb = run("bulkhead-collector ctl wait-broker-tcb 2>&1")
-    check("refusing to bind" not in bj and "armed" in bj and "OK" in wb,
-          "ARM 2: the broker boot-started, took the bulkhead-broker.socket fd (no 'refusing to bind'), and is collector-TCB-registered")
+    check("broker: armed" in bj and "OK" in wb and any(t == "0" for t in nofc.replace("END", " ").split()),
+          "ARM 2: the broker boot-started, took the bulkhead-broker.socket fd (no fail-closed refusal), and is collector-TCB-registered")
 
     # ===== ARM 4: REBOOT, re-assert armed-from-cold-boot (deterministic default, not a fluke) =====
     out("\n[rebooting]\n"); child.sendline("systemctl reboot")
@@ -85,10 +91,11 @@ try:
             cinst = cm.group(1)
             conf = run(f"cat /run/systemd/system/bulkhead-agent@{cinst}.service.d/20-delegated-egress.conf 2>&1"); break
         run("sleep 1 2>/dev/null; true")
-    for _ in range(20):
-        if "RC=0" not in run(f"systemctl is-active bulkhead-agent@{cinst}.service >/dev/null 2>&1; echo RC=$?"): break
-        run("sleep 2 2>/dev/null; true")
-    jc = run(f"journalctl -u bulkhead-agent@{cinst}.service --no-pager 2>&1 | grep -aE 'DENIED|FINAL' | tail -10") if cinst else ""
+    # the child's bounded loop (mock inference -> fetch[denied] -> FINAL) finishes in seconds; a
+    # generous fixed wait avoids an is-active race that treats "activating" as finished and greps
+    # an empty journal. Capture the FULL agent journal for the assertion + diagnosis.
+    run("sleep 18 2>/dev/null; true")
+    jc = run(f"journalctl -u bulkhead-agent@{cinst}.service --no-pager 2>&1 | grep -aE 'agent\\[|DENIED|FINAL|egress|control|Failed' | tail -25") if cinst else ""
     out(f"\n[child {cinst}]\n{conf}\n[child journal]\n{jc}\n")
     check(gid is not None and cinst is not None and "BULKHEAD_AGENT_EGRESS=loopback,other" in conf,
           "ARM 5: delegated child born loopback,other (public AND-cleared) via the collector control RPC, with E0 armed since boot")

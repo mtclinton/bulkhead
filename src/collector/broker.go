@@ -237,18 +237,11 @@ func brokerListener() (net.Listener, error) {
 // and, with the unit's no-Restart fatal exit, leave the broker dead => E0 silently degrades to
 // observe — defeating harden-by-default. So re-dial (like `ctl wait-broker-tcb` does) until OK.
 func brokerRegisterTCB() bool {
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		ok, resp := controlRPC("TCB-REGISTER-BROKER")
-		if ok {
-			return true
-		}
-		if time.Now().After(deadline) {
-			log.Printf("broker: TCB-REGISTER-BROKER failed after ret/poll: %s", resp)
-			return false
-		}
-		time.Sleep(500 * time.Millisecond)
+	ok, resp := controlRPCRetry("TCB-REGISTER-BROKER")
+	if !ok {
+		log.Printf("broker: TCB-REGISTER-BROKER failed after poll: %s", resp)
 	}
+	return ok
 }
 
 // handleBrokerConn serves one agent request on the delegation socket. It peer-attests the

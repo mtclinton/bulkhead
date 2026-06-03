@@ -268,9 +268,13 @@ func cmdEnforce(args []string) {
 	// cgroup, so once E0 is armed a DISARM from a non-TCB cgroup (the documented `systemctl stop
 	// bulkhead-enforce` kill-switch) would be EPERM'd and silently fail. The collector confirms
 	// the write; a non-OK reply (collector down / denied) exits non-zero so the unit fails loudly.
-	ok, resp := controlRPC("ENFORCE-SET " + hook + " " + v)
+	// Retry the control dial: at boot, bulkhead-enforce-egress.service arms E2 with NO
+	// wait-broker-tcb gate (E2 has no broker dependency), so its `enforce on socket_connect` can
+	// race the collector binding control.sock — a single dial would lose, Fatalf, and silently
+	// leave E2 in OBSERVE (per-agent egress unenforced). The operator/soft-disarm path dials once.
+	ok, resp := controlRPCRetry("ENFORCE-SET " + hook + " " + v)
 	if !ok {
-		log.Fatalf("enforce %s %s (is the collector running?): %s", args[0], hook, resp)
+		log.Fatalf("enforce %s %s (control socket unavailable): %s", args[0], hook, resp)
 	}
 	state := "observe (fail-open)"
 	if v == "1" {

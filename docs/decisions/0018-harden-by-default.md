@@ -78,6 +78,13 @@ Ship E0-ARMED (lsm/bpf deny) AND E2-ARMED (socket_connect per-agent egress) at c
    defeating the deterministic-armed guarantee). Fixed two ways: `brokerRegisterTCB` now POLLS
    (re-dials up to 30s, like `ctl wait-broker-tcb`) for the not-yet-listening socket, and
    `bulkhead-broker.service` gains `Restart=on-failure`/`RestartSec=2` so a lost race self-heals.
+   The LIVE cold-boot test then surfaced the SAME race on a second path: `bulkhead-enforce-egress`
+   (E2) routes `enforce on socket_connect` through the control socket but — unlike E0, gated by the
+   polling `ctl wait-broker-tcb` — has NO gate, so it lost the race, `Fatalf`'d, and silently left
+   E2 in OBSERVE (per-agent egress unenforced while E0 was armed). Fixed at the root: the routed
+   `enforce` (and `brokerRegisterTCB`) now use a shared `controlRPCRetry` that re-dials the control
+   socket until OK or a bounded deadline, so any boot-time routed control write tolerates a
+   still-starting collector. The operator/soft-disarm path dials once (the collector is long up).
    The review also confirmed the show-stopper risk is ABSENT: default-armed E2 leaves a non-agent
    cgroup with no `egress_policy` entry at verdict ALLOW (`provenance.bpf.c`), so router/tailscaled/
    llama/DHCP/DNS boot egress is untouched, and no non-TCB `bpf(2)` runs before the arm.

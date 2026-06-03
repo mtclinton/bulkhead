@@ -391,6 +391,27 @@ func cmdControl(args []string) {
 	}
 }
 
+// controlRPCRetry re-dials the control socket until OK or a bounded deadline. ADR-0018: boot-time
+// callers (the broker's TCB self-registration, and the routed `enforce on` that arms E0/E2 at boot)
+// can WIN a foot-race against the collector, which is Type=exec (active at execve) and binds
+// /run/bulkhead/control.sock only as its LAST startup step. A single dial loses that race
+// (immediate ENOENT) and would fatally fail the caller, silently leaving the box UNARMED (E2 in
+// observe / the broker non-TCB). The manual/operator path succeeds on the first dial (the collector
+// is long up), so the retry is transparent there.
+func controlRPCRetry(line string) (bool, string) {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ok, resp := controlRPC(line)
+		if ok {
+			return true, resp
+		}
+		if time.Now().After(deadline) {
+			return false, resp
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func controlRPC(line string) (bool, string) {
 	conn, err := net.DialTimeout("unix", controlSockPath, 5*time.Second)
 	if err != nil {
