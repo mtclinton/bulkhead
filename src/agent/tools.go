@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// Tool is one capability the agent may invoke. Validate gates the arg before any side effect;
+// Run performs it and returns a human/model-readable observation. A tool NEVER touches a BPF
+// map or the approve.sock — the egress tool just connect()s (and is gated by the kernel E2
+// hook), and the escalation tools exec the existing audited, identity-attested collector verbs.
+type Tool struct {
+	Validate func(arg string) error
+	Run      func(ctx context.Context, arg string) (string, error)
+}
+
+const fetchBodyCap = 8 << 10
+
+// collectorBin is the broker/enforce CLI the agent shells out to. Absolute path so it does not
+// depend on the jail's PATH. A var so tests can shadow it.
+var collectorBin = "/usr/bin/bulkhead-collector"
+
+var validClasses = map[string]bool{"loopback": true, "linklocal": true, "private": true, "public": true, "other": true}
+
+func validClassList(arg string) error {
+	if arg == "" {
+		return errors.New("empty class list")
+	}
+	for _, c := range strings.Split(arg, ",") {
+		if !validClasses[strings.TrimSpace(c)] {
+			return fmt.Errorf("unknown egress class %q", c)
+		}
+	}
+	return nil
+}
+
+func hostOf(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return raw
+}
+
+// toolRegistry is the agent's fixed, allowlisted tool set.
+func toolRegistry() map[string]Tool {
+	return map[string]Tool{
+		// fetch: the E2-GATED egress tool. A non-loopback host needs the `public` class; the
+		// default manifest is loopback,other, so once E2 is armed connect() returns EPERM and
+		// the tool surfaces a structured DENIED observation (so the model can decide to escalate).
+		"fetch": {
+			Validate: func(arg string) error {
+				u, err := url.Parse(arg)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+					return errors.New("expected an http(s) URL")
+				}
+				return nil
+			},
+			Run: func(ctx context.Context, arg string) (string, error) {
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, arg, nil)
+				if err != nil {
+					return "", err
+				}
+				hc := &http.Client{
+					Timeout:       8 * time.Second,
+					CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+				}
+				resp, err := hc.Do(req)
+				if err != nil {
+					if errors.Is(err, syscall.EPERM) {
+						return fmt.Sprintf("DENIED: egress to %s blocked by the kernel egress policy (EPERM); you may request_egress public to ask the operator", hostOf(arg)), nil
+					}
+					return fmt.Sprintf("ERROR: fetch %s failed: %v", hostOf(arg), err), nil
+				}
+				defer resp.Body.Close()
+				n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, fetchBodyCap))
+				return fmt.Sprintf("OK: fetch %s -> HTTP %d (%d bytes)", hostOf(arg), resp.StatusCode, n), nil
+			},
+		},
+		// request_egress: ask the TCB broker to WIDEN this agent's egress (ADR-0009 EXPAND).
+		// Blocks for a uid-0 operator; on DENY the agent cannot proceed to a successful fetch.
+		"request_egress": {
+			Validate: validClassList,
+			Run:      func(ctx context.Context, arg string) (string, error) { return runCollector(ctx, "expand", arg) },
+		},
+		// delegate: spawn a NARROWED child jail (child = parent ∩ requested). Off by default;
+		// a deployment opts in via BULKHEAD_AGENT_ALLOW_DELEGATE.
+		"delegate": {
+			Validate: func(arg string) error {
+				f := strings.Fields(arg)
+				if len(f) != 2 {
+					return errors.New("usage: delegate <suffix> <classes>")
+				}
+				return validClassList(f[1])
+			},
+			Run: func(ctx context.Context, arg string) (string, error) {
+				if os.Getenv("BULKHEAD_AGENT_ALLOW_DELEGATE") == "" {
+					return "ERROR: delegation is disabled for this agent", nil
+				}
+				f := strings.Fields(arg)
+				return runCollector(ctx, "delegate", f[0], f[1])
+			},
+		},
+	}
+}
+
+// runCollector execs an EXISTING audited broker verb. The agent is non-root + outside the TCB;
+// the broker kernel-attests the agent's cgroup (SO_PEERPIDFD), so the agent supplies only a
+// forgeable-free class/op string. A non-zero exit means the gate DENIED the request.
+func runCollector(ctx context.Context, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, collectorBin, args...).CombinedOutput()
+	s := strings.TrimSpace(string(out))
+	if err != nil {
+		return "ESCALATION DENIED: " + s, nil
+	}
+	return "escalation OK: " + s, nil
+}
