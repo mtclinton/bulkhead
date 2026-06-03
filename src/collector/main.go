@@ -191,6 +191,8 @@ func main() {
 		cmdNarrow(os.Args[2:])
 	case "grant-once":
 		cmdGrantOnce(os.Args[2:])
+	case "gc":
+		cmdGC()
 	case "verify-audit":
 		cmdVerifyAudit(os.Args[2:])
 	case "status":
@@ -201,7 +203,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|ptrace|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|narrow <target> <classes>|grant-once <ptrace|setuid|capset>|clear self|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|ptrace|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|narrow <target> <classes>|grant-once <ptrace|setuid|capset>|clear self|gc|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
 	os.Exit(2)
 }
 
@@ -559,9 +561,16 @@ func runCollector() {
 	}
 	defer rd.Close()
 
+	// ADR-0012: TCB-context GC of dead-agent per-agent map entries. Runs in THIS process
+	// (cgroup already in tcb_cgroups above), so its bpf() Delete survives E0-armed — the
+	// cleanup the agent's own E0-blockable ExecStopPost cannot do, and it also reclaims
+	// agents that crashed and skipped ExecStopPost entirely.
+	gcStop := make(chan struct{})
+	go gcLoop(gcStop)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	go func() { <-stop; rd.Close() }()
+	go func() { <-stop; close(gcStop); rd.Close() }()
 
 	for {
 		rec, err := rd.Read()

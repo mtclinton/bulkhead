@@ -42,6 +42,18 @@ if [ -n "${BULKHEAD_AGENT_EXPAND:-}" ]; then
 	exit 0
 fi
 
+# Grant-HOLD demo (ADR-0012): request a one-shot grant and then just STAY ALIVE without
+# consuming it — so the grant sits live in grant_once until the agent stops. Paired with a
+# drop-in that disables the grant-clear ExecStopPost, this strands the grant exactly as an
+# E0-denied clear or a crashed agent would, so the harness can prove the TCB-context GC reclaims
+# a DEAD agent's grant. No consume => no ptrace syscall => no seccomp relaxation needed.
+if [ -n "${BULKHEAD_AGENT_GRANT_HOLD:-}" ]; then
+	echo "bulkhead-agent[$id]: requesting+holding grant-once ${BULKHEAD_AGENT_GRANT_HOLD}"
+	bulkhead-collector grant-once "${BULKHEAD_AGENT_GRANT_HOLD}"
+	echo "bulkhead-agent[$id]: grant-hold rc=$?"
+	exec sleep 600
+fi
+
 # Grant-once demo (ADR-0011): if BULKHEAD_AGENT_GRANT=<ptrace|setuid|capset> is set, this agent
 # proves the kernel-enforced one-shot privilege grant for that E1/E3 op: probe (expect DENY
 # while armed) -> request a one-shot grant (blocks for operator approval) -> probe (expect the
