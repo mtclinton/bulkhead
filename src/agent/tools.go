@@ -88,9 +88,17 @@ func toolRegistry() map[string]Tool {
 		},
 		// request_egress: ask the TCB broker to WIDEN this agent's egress (ADR-0009 EXPAND).
 		// Blocks for a uid-0 operator; on DENY the agent cannot proceed to a successful fetch.
+		// Disabled for a DELEGATED child (BULKHEAD_AGENT_NO_EXPAND, ADR-0015): a delegated subtree
+		// is hard-capped by its delegation root's mask, so it can never climb past its parent even
+		// with an operator approval — escalation is pushed up to operator-launched (root) agents.
 		"request_egress": {
 			Validate: validClassList,
-			Run:      func(ctx context.Context, arg string) (string, error) { return runCollector(ctx, "expand", arg) },
+			Run: func(ctx context.Context, arg string) (string, error) {
+				if os.Getenv("BULKHEAD_AGENT_NO_EXPAND") != "" {
+					return "ERROR: a delegated child cannot widen its own egress; its ceiling is fixed at delegation (ask via a parent-launched agent)", nil
+				}
+				return runCollector(ctx, "expand", arg)
+			},
 		},
 		// delegate: spawn a NARROWED child jail (child = parent ∩ requested). Off by default;
 		// a deployment opts in via BULKHEAD_AGENT_ALLOW_DELEGATE.

@@ -47,6 +47,14 @@ ExecStart=/usr/bin/bulkhead-agent-run %i
 #     leading - so a missing entry / down collector never fails the stop). ---
 ExecStopPost=-+/usr/bin/bulkhead-collector egress clear self
 ExecStopPost=-+/usr/bin/bulkhead-collector grant-once clear self
+# --- ADR-0015: a broker-minted DELEGATED child carries a transient /run drop-in and (if the
+#     parent supplied a task) a /run/bulkhead/tasks/<inst>.task credential source the broker
+#     wrote. Reap both on stop so a long-lived deployment's /run + daemon-reload cost don't grow
+#     unboundedly. No-op for a non-delegated agent (its drop-in lives under /etc, not /run). `+`
+#     for privilege (the jail can't write /run/systemd/system); leading `-` so absence never fails
+#     the stop. A crash that skips ExecStopPost is backstopped by the collector GC (ADR Seam). ---
+ExecStopPost=-+/bin/rm -rf /run/systemd/system/bulkhead-agent@%i.service.d
+ExecStopPost=-+/bin/rm -f /run/bulkhead/tasks/%i.task
 
 # --- fail-closed hardening floor (the bulkhead-selftest/llama-server profile). ---
 DynamicUser=yes

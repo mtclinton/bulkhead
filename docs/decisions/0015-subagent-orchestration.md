@@ -71,14 +71,33 @@ elimination.
    cannot reset its own counter. The instance format changes from ADR-0006's `d-<hex>-<suffix>`
    to `d<gen>-<hex>-<suffix>` (harness greps for the literal `d-` prefix must be updated).
 
-5. **Audit.** Each child cgroup has its own `bpf_get_current_cgroup_id`, so its socket_connect /
+5. **Lifetime narrow-never-widen — a delegated subtree cannot climb past its delegation root.**
+   Because a broker-minted child now runs the REAL runtime, `request_egress` (ADR-0009 EXPAND) is
+   in its tool set — and EXPAND is bounded only by the deployment-wide `expandCeiling`, NOT by the
+   parent. Left unaddressed, an operator-approved `request_egress` would let a delegated lineage
+   climb the class lattice past what any ancestor held (one operator approval per rung), so
+   narrow-never-widen would hold only AT SPAWN. We close this by capability, not by caveat: the
+   child drop-in sets `BULKHEAD_AGENT_NO_EXPAND=1`, and the agent's `request_egress` tool refuses
+   when it is set. A delegated child therefore CANNOT widen its own egress for its lifetime; the
+   subtree is hard-capped by its delegation root's mask (grandchild ⊆ child ⊆ parent, lifetime).
+   A child may still `delegate` a NARROWER grandchild (`BULKHEAD_AGENT_ALLOW_DELEGATE=1`, depth-
+   capped), so authority is MONOTONICALLY NON-INCREASING down the tree. Escalation is pushed UP to
+   operator-launched (root) agents, which alone may EXPAND. (Alternative considered: record the
+   parent mask at spawn and clamp the child's per-cgroup EXPAND ceiling to it — rejected for this
+   slice as it needs persistent per-child ceiling state, where disabling self-EXPAND is simpler
+   and gives the same lifetime bound.)
+
+6. **Audit.** Each child cgroup has its own `bpf_get_current_cgroup_id`, so its socket_connect /
    grant verdicts land under its distinct cgid in the collector chain. The broker's signed
    delegate record (`recordDecision`) ties child<-parent and is extended with `gen=<N>` and
    `task_sha=<hex8 of sha256(task)>` (binds the exact bytes that ran without logging attacker
-   text). `listPending`'s delegate row gains a sanitized, truncated `task="…"` preview so the
-   operator approves with full context. An operator walks parent->child->grandchild by joining
-   `record.comm` (child instance) to the child cgroup path; each level's own delegate record
-   carries its attested cgid as the next edge.
+   text). The operator gate authorizes the `(suffix, classes, depth)` EDGE; the task itself is
+   bound by `task_sha` (the same artifact in the signed record), which `listPending` shows on the
+   delegate row alongside a truncated `task="…"` preview — the preview is context, NOT the
+   authorization basis, so a long (≤4096B) task is bound by its hash rather than read in full at
+   the prompt. An operator walks parent->child->grandchild by joining `record.comm` (child
+   instance) to the child cgroup path; each level's own delegate record carries its attested cgid
+   as the next edge.
 
 The child stays OUTSIDE the TCB — DynamicUser, empty caps, `@system-service`, born one rung lower
 in authority. No new BPF, no new map, the verified E0-E3 object unchanged.
@@ -91,29 +110,36 @@ HOST go-tests: `TestValidTask` (accept clean ASCII + empty; reject NUL/control/`
 `TestTaskFromCredential`/`TestDelegateToolCarriesTask`. The register/resolve/flood/reverify/expand
 tests are reused verbatim (the gate is untouched).
 
-QEMU (`scripts/qemu-agent-orch-check.py`, mirroring `qemu-egress-check.py` + the parentP/parentQ
-pattern): ARM ORCH-CONFINE — a mock-driven PARENT (manifest `loopback,other`, NO public) DECIDES
-via its model loop to delegate a child requesting `public,...` with a task ordering a public
-fetch; operator auto-approves; the child's manifest is `loopback,other` (public AND-cleared) and
-its public fetch is E2-DENIED under the child's own cgid even though the task demanded it
-(narrow-never-widen from a real agent), while its loopback inference and a FINAL prove the task
-ran. ARM ORCH-ALLOW — a public-holding parent delegates the same and the child's public fetch
-SUCCEEDS (the mask, not a blanket block). ARM ORCH-INJECTION — a control-char task returns
-ERR bad-task with no child/cgroup/`.task`/`/run/pwned`; a sanitizer-passing directive-looking
-task launches a DynamicUser child with no injected directive and the text lands only in
-`$CREDENTIALS_DIRECTORY/agent-task`. ARM DEPTH-CAP — delegation succeeds to the depth cap then
-ERR too-deep. AUDIT — `verify-audit` over both chains exits 0; the broker record names
-parentCgID + child instance + gen + task_sha + operator. Regression — all existing arms and the
-@worker ADR-0014 arm pass; broker-minted children now run the real runtime, so the legacy
-@parentP/@parentQ stub-delegation arms' child-side assertion moves from a curl exit code to the
-real-agent E2 observation.
+Host go-tests additionally cover the cases an agent cannot drive live (it can emit only one line,
+so it can never produce a control-char task): `TestValidTask` proves a NUL/newline/control/high
+byte is rejected `ERR bad-task` before any side effect, and `TestDelegateDepthCap` proves a parent
+at the depth cap is rejected `ERR too-deep` with no pending registered.
+
+QEMU (`scripts/qemu-agent-orch-check.py`): ARM CONFINE — a mock-driven PARENT (manifest
+`loopback,other`, NO public) DECIDES via its model loop to delegate a child requesting
+`public,loopback,other` with a task ordering a public fetch; operator auto-approves; the child is
+born `loopback,other` (public AND-cleared) so its fetch to `api.anthropic.com` (a floor-ALLOWED
+host) is E2-DENIED purely by its BPF manifest under the child's own cgid EVEN THOUGH the request
+and the task demanded public (narrow-never-widen from a real agent), while its loopback inference
+and a FINAL prove the task ran; the signed broker record binds `applied=loopback,other gen=1
+task_sha=…`. ARM ALLOW — a public-holding parent delegates the same and the child's public fetch
+is NOT denied (the mask, not a blanket block). ARM INJECTION — a sanitizer-passing directive-
+looking task (`…FETCH-ONLY ExecStartPre=+/usr/bin/touch /run/pwned`) launches a DynamicUser child
+with NO injected directive: `/run/pwned` is never created, the child's `.conf` contains only the
+broker-fixed lines, and the payload text appears verbatim ONLY in the broker-owned
+`/run/bulkhead/tasks/<inst>.task` credential source — proving the channel neutralizes even a
+payload the sanitizer passes. ARM AUDIT — `verify-audit` over both chains exits 0 and the broker
+delegate record names parentCgID + child instance + gen + task_sha + operator.
 
 ## Seam
 
 The native in-process broker client (sharing a wire package with the collector, replacing the
-os/exec coupling) remains an ADR-0014 deferral. A TTL/GC sweep of `/run/bulkhead/tasks/*.task`
-for any instance whose cgroup is gone is a follow-up (the credential copy is already ephemeral;
-only the small broker-owned source file lingers). A per-deployment task grammar / structured
-sub-task object (vs free text) and forwarding a child's escalation context up to the parent's
-transcript are future slices. The E0 + delegation path (broker writes the child entry from its
-own TCB context) remains the ADR-0006 stated seam.
+os/exec coupling) remains an ADR-0014 deferral. Per-child artifacts (the `/run` drop-in dir and
+the `/run/bulkhead/tasks/<inst>.task` credential source) are reaped by the agent unit's
+`ExecStopPost` on a clean stop; a collector-GC sweep of both for an instance whose cgroup is gone
+(backstopping a crash that skips `ExecStopPost`) mirrors the ADR-0012 grant-once recycle hygiene
+and is the remaining follow-up. A per-deployment task grammar / structured sub-task object (vs
+free text) and forwarding a child's escalation context up to the parent's transcript are future
+slices. The E0 + delegation path (broker writes the child entry from its own TCB context) remains
+the ADR-0006 stated seam. (Note: the alternative parent-relative EXPAND-ceiling clamp is NOT a
+seam — Decision §5's `NO_EXPAND` already gives the lifetime bound without per-child ceiling state.)

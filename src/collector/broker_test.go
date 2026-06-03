@@ -188,6 +188,8 @@ func TestDelegatedDropInNoTaskBytes(t *testing.T) {
 	for _, want := range []string{
 		"ExecStart=\nExecStart=/usr/bin/bulkhead-agent %i\n",
 		"Environment=BULKHEAD_AGENT_EGRESS=loopback,other\n",
+		"Environment=BULKHEAD_AGENT_ALLOW_DELEGATE=1\n", // delegation flows down a lineage (depth-capped)
+		"Environment=BULKHEAD_AGENT_NO_EXPAND=1\n",       // a delegated child cannot self-widen (lifetime narrow-never-widen)
 		"LoadCredential=agent-task:/run/bulkhead/tasks/d1-deadbeef-kid.task\n",
 		"Environment=BULKHEAD_AGENT_TASK_CRED=agent-task\n",
 		"Environment=BULKHEAD_ROUTER_URL=http://127.0.0.1:8088\n",

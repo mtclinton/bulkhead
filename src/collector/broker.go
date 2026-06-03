@@ -703,6 +703,19 @@ func delegatedDropIn(classes, instance, routerURL string, hasTask bool) string {
 	b.WriteString("Environment=BULKHEAD_AGENT_EGRESS=" + classes + "\n")
 	b.WriteString("Environment=BULKHEAD_AGENT_DEADLINE=120\n")
 	b.WriteString("Environment=BULKHEAD_AGENT_MAX_STEPS=6\n")
+	// Authority is MONOTONICALLY NON-INCREASING down a delegated lineage. Two env flags make
+	// that a LIFETIME guarantee (not just spawn-time):
+	//   - ALLOW_DELEGATE=1: the child may itself delegate, but only ever a NARROWER grandchild
+	//     (grandchild = child & requested), bounded by the kernel-attested depth cap
+	//     (delegGen/maxDelegateDepth) and the per-level uid-0 gate.
+	//   - NO_EXPAND=1: the child may NOT widen its OWN egress via request_egress/EXPAND. Without
+	//     this a delegated child — which runs the real runtime, so request_egress is in its tool
+	//     set — could, with a fresh operator approval, climb past its parent up to the deployment
+	//     expandCeiling (ADR-0009 makes EXPAND parent-unbounded). Disabling self-EXPAND keeps the
+	//     subtree hard-capped by its delegation root's mask, so grandchild ⊆ child ⊆ parent holds
+	//     for their lifetimes. Escalation is pushed UP to operator-launched (root) agents.
+	b.WriteString("Environment=BULKHEAD_AGENT_ALLOW_DELEGATE=1\n")
+	b.WriteString("Environment=BULKHEAD_AGENT_NO_EXPAND=1\n")
 	if hasTask {
 		// The task is delivered as a credential (file CONTENT), not Environment=/a directive.
 		b.WriteString("LoadCredential=agent-task:/run/bulkhead/tasks/" + instance + ".task\n")
@@ -732,7 +745,10 @@ func launchChild(instance, classes, task string) error {
 	// PID-1 reads it and copies it 0400 into the child's $CREDENTIALS_DIRECTORY (uid-scoped, torn
 	// down with the unit). The attacker-controlled bytes are only ever file CONTENT here.
 	if task != "" {
-		if err := os.MkdirAll("/run/bulkhead/tasks", 0o755); err != nil {
+		// 0700: the broker is the only userspace reader/writer (PID-1 reads the source as root
+		// for LoadCredential). A non-root child must not be able to readdir this and enumerate
+		// sibling instance names (delegation topology — suffixes, generations, sibling counts).
+		if err := os.MkdirAll("/run/bulkhead/tasks", 0o700); err != nil {
 			return err
 		}
 		if err := os.WriteFile("/run/bulkhead/tasks/"+instance+".task", []byte(task), 0o640); err != nil {
@@ -828,8 +844,11 @@ func listPending() string {
 			fmt.Fprintf(&b, "id=%d action=grant-once agent=%s hook=%s grant=count=1 age=%ds\n",
 				p.id, p.parentPath, hookNames[p.grantHook], age)
 		default: // delegate
-			fmt.Fprintf(&b, "id=%d action=delegate parent=%s suffix=%s requested=%s granted=%s gen=%d task=%q age=%ds\n",
-				p.id, p.parentPath, p.suffix, classNames(p.reqMask), classNames(p.childMask), p.gen, taskPreview(p.task), age)
+			// The operator authorizes the (suffix, classes, depth) EDGE; the task is bound by
+			// task_sha (the same artifact in the signed record). task= is a truncated preview for
+			// context, NOT the full authorization basis — a long task is bound by its hash, not read.
+			fmt.Fprintf(&b, "id=%d action=delegate parent=%s suffix=%s requested=%s granted=%s gen=%d task=%q task_sha=%s age=%ds\n",
+				p.id, p.parentPath, p.suffix, classNames(p.reqMask), classNames(p.childMask), p.gen, taskPreview(p.task), taskSHA8(p.task), age)
 		}
 	}
 	return b.String()

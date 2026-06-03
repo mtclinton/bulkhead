@@ -169,6 +169,15 @@ func TestRequestEgressEscalation(t *testing.T) {
 	if obs, _ := rt.Run(context.Background(), "public"); !strings.Contains(obs, "ESCALATION DENIED") {
 		t.Fatalf("operator DENY must yield ESCALATION DENIED (agent cannot proceed), got %q", obs)
 	}
+
+	// A delegated child (NO_EXPAND) must NOT be able to widen itself — the tool refuses BEFORE any
+	// exec (so a delegated subtree stays hard-capped by its delegation root's mask, ADR-0015).
+	t.Setenv("BULKHEAD_AGENT_NO_EXPAND", "1")
+	collectorBin = allow // even if the broker would approve, the tool must refuse locally first
+	obs, _ := rt.Run(context.Background(), "public")
+	if strings.Contains(obs, "escalation OK") || !strings.Contains(obs, "cannot widen") {
+		t.Fatalf("a NO_EXPAND (delegated) child must be refused self-expand, got %q", obs)
+	}
 }
 
 // TestDelegateToolCarriesTask: the delegate tool accepts a task tail, and Run hands the task
