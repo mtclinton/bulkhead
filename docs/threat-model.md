@@ -57,8 +57,13 @@
   unit-private tmpfs credential at runtime.
 - **Default-deny network.** Tailscale-only inbound; egress only to the Anthropic
   API + tailnet, enforced in the kernel (nftables/cgroup-eBPF).
-- **Tamper-evident provenance.** Hash-chained, Ed25519-signed, append-only log;
-  chain head anchored off-box, so on-disk tampering or truncation is detectable.
+- **Tamper-evident provenance.** Hash-chained, Ed25519-signed, append-only log, with a
+  per-chain domain tag and the hash chain continued ACROSS boots (ADR-0013) — so record
+  tampering, reordering, and deletion of any interior record OR whole per-boot subchain are
+  detectable by `verify-audit`, and a record cannot be transplanted between the collector and
+  broker chains. Detecting deletion of the chain's *tail* (the most recent records) requires
+  anchoring the chain HEAD off-box; the appliance is built to expose its head for an external
+  monitor to pin, but that off-box anchor is not yet wired (a known seam, ADR-0013).
 
 ## Assumptions
 

@@ -52,8 +52,13 @@ surface and value-layout churn for a single-word test-and-clear.
 
 **E0 ungrantable BY CONSTRUCTION.** `enforce_verdict(hook,ret)` is split into the original
 non-consuming body plus a grant-aware `enforce_verdict_g(hook, ret, grantable)`.
-`enforce_bpf` calls `enforce_verdict(HOOK_BPF, ret)` (unchanged) which forwards
-`enforce_verdict_g(HOOK_BPF, ret, 0)` — so NO grant lookup is compiled into the bpf program.
+`enforce_bpf` calls `enforce_verdict(HOOK_BPF, ret)` — semantically unchanged — which forwards
+`enforce_verdict_g(HOOK_BPF, ret, 0)`, so NO grant lookup is compiled into the bpf program (the
+`grantable && try_consume_grant(...)` short-circuits on the compile-time-constant 0). NB: the
+verified-object diff is at the SOURCE/behavioral level, not byte-for-byte — the split re-codegened
+`enforce_bpf` (instruction count shifted), but the disassembly confirms it has ZERO `grant_once`
+relocations and ZERO `cmpxchg`, i.e. E0 remains ungrantable. The earlier wording implying binary
+invariance was inaccurate.
 `enforce_ptrace` calls `enforce_verdict_g(HOOK_PTRACE, ret, 1)`. E3's `enforce_gain` gets the same
 splice but only AFTER the `if(!gain) return 0;` check. The broker CLI also rejects
 `bpf`/`socket_connect`, but the kernel is the real backstop: even a hand-written `{cg,HOOK_BPF}`
