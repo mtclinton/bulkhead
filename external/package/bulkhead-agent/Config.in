@@ -1,0 +1,11 @@
+config BR2_PACKAGE_BULKHEAD_AGENT
+	bool "bulkhead-agent"
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	help
+	  bulkhead minimal agent runtime: a bounded perceive->decide->act loop
+	  that runs inside a bulkhead jail, does inference via the bulkhead
+	  router, and acts through a small tool set — escalating to the TCB
+	  broker (human-gated) when it needs more authority than its jail
+	  grants. Pure Go (stdlib only), single static binary, outside the TCB.
+
+	  https://github.com/mtclinton/bulkhead

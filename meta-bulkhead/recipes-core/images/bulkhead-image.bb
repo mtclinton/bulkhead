@@ -10,6 +10,7 @@ IMAGE_FEATURES += "read-only-rootfs"
 
 IMAGE_INSTALL += " \
     bulkhead-router \
+    bulkhead-agent \
     bulkhead-collector \
     bulkhead-units \
     llama-cpp \

@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# TEST/DEMO-ONLY canned OpenAI-compatible endpoint for the ADR-0014 agent harness. It lets the
+# jailed agent run its real perceive->decide->act loop in qemu where no LLM fits (256MB, CPU-only,
+# no model disk). NOT for production: it has NO [Install] section, so it is never enabled — the
+# harness starts it ad-hoc (systemctl start bulkhead-mockchat). It is the SAME binary as the agent,
+# so the agent's HTTP path is byte-identical to production; only BULKHEAD_ROUTER_URL points here.
+[Unit]
+Description=bulkhead mock chat endpoint (ADR-0014 agent harness only)
+Documentation=https://github.com/mtclinton/bulkhead
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/bulkhead-agent mockchat
+Environment=BULKHEAD_MOCKCHAT_ADDR=127.0.0.1:8088
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+# No [Install]: started ad-hoc by the harness, never enabled in a production image.

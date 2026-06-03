@@ -27,7 +27,7 @@ do_configure[noexec] = "1"
 OV = "${S}/external/board/bulkhead/rootfs-overlay"
 
 # The units ExecStart these; pull them into any image that installs the topology.
-RDEPENDS:${PN} = "bulkhead-router bulkhead-collector llama-cpp tailscale nftables"
+RDEPENDS:${PN} = "bulkhead-router bulkhead-agent bulkhead-collector llama-cpp tailscale nftables"
 
 # Boot order is encoded in the units themselves (firewall -> selftest gate ->
 # collector/llama/router; tailscale-up + mounts are ConditionPathExists-guarded).
