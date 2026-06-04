@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# ADR-0019: software-measured-state remote attestation. At boot, AFTER E0+E2 are armed
+# (hardened-by-default, ADR-0018), measure the running TCB (collector binary hash + live
+# enforce_flags + tcb_cgroups membership) into an extend-only TPM PCR, so a relying party can later
+# request a fresh-nonce AK-signed quote and PROVE the box is in the expected ENFORCING state.
+#
+# `attest extend` is a thin CONTROL-SOCKET client: the bpf() reads of enforce_flags/tcb_cgroups
+# would be EPERM'd from this (non-TCB) unit's cgroup under armed-E0, so the COLLECTOR (TCB) does the
+# digest + the TPM extend in-process. ConditionPathExists=/dev/tpmrm0 cleanly SKIPS attestation on a
+# no-TPM boot (e.g. the non-TPM qemu harnesses) — exactly like the seal/verify units guard on /data.
+[Unit]
+Description=bulkhead remote-attestation TCB measurement (ADR-0019)
+Documentation=https://github.com/mtclinton/bulkhead
+ConditionPathExists=/dev/tpmrm0
+# POST-ARM: measure the ARMED state, not the pre-arm observe state.
+After=bulkhead-collector.service bulkhead-enforce.service bulkhead-enforce-egress.service
+Requires=bulkhead-collector.service
+# Re-measure against the fresh map after a collector restart (which RemoveAll-resets + re-arms).
+PartOf=bulkhead-collector.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bulkhead-collector attest extend
+
+[Install]
+WantedBy=multi-user.target

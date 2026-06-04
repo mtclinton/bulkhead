@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -26,6 +26,7 @@ help:
 	@echo "  make verify-agent-orch  boot and assert sub-agent orchestration (narrow-never-widen + injection-safe)"
 	@echo "  make verify-e0      boot, arm E0, and assert the full stack enforces with delegation working"
 	@echo "  make verify-hbd     boot the HARDENED image, reboot, assert E0+E2 armed from cold boot with delegation"
+	@echo "  make verify-attest  boot under swtpm, assert TPM-quoted proof of the enforcing TCB (+ tamper/replay rejected)"
 	@echo "  make tsauth-disk    build the Tailscale auth-key provisioning volume"
 	@echo "  make verify-tailnet boot with the key volume and assert the node joins"
 	@echo "  make menuconfig     Buildroot menuconfig"
@@ -71,6 +72,9 @@ verify-e0:
 
 verify-hbd:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-hbd-check.py
+
+verify-attest:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-attest-check.py
 
 tsauth-disk:
 	$(BULKHEAD_ROOT)/scripts/make-tsauth-disk.sh

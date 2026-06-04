@@ -16,6 +16,14 @@ github.com/cilium/ebpf/internal/unix
 github.com/cilium/ebpf/link
 github.com/cilium/ebpf/ringbuf
 github.com/cilium/ebpf/rlimit
+# github.com/google/go-tpm v0.9.8
+## explicit; go 1.22
+github.com/google/go-tpm/legacy/tpm2
+github.com/google/go-tpm/tpm2
+github.com/google/go-tpm/tpm2/transport
+github.com/google/go-tpm/tpm2/transport/linuxtpm
+github.com/google/go-tpm/tpmutil
+github.com/google/go-tpm/tpmutil/tbs
 # golang.org/x/sys v0.30.0
 ## explicit; go 1.18
 golang.org/x/sys/unix

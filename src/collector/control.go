@@ -111,7 +111,10 @@ func controlListener() (net.Listener, error) {
 // (deadline + bounded read); an unknown verb is a clean ERR.
 func handleControlConn(conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	// 20s: most verbs are sub-millisecond map ops, but the ADR-0019 attest verbs do TPM
+	// extend/quote (+ the RC_RETRY resubmit loop) which can take a beat. The socket is 0660
+	// root-only, so a slow peer holding the conn is not an agent-reachable DoS vector.
+	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
 	reply := func(s string) { fmt.Fprintln(conn, s) }
 
 	if uid, ok := peerUID(conn); !ok || uid != 0 {
@@ -146,6 +149,10 @@ func handleControlConn(conn net.Conn) {
 		ctlWaitBrokerTCB(reply)
 	case "ENFORCE-SET":
 		ctlEnforceSet(reply, cgPath, f)
+	case "ATTEST-EXTEND":
+		ctlAttestExtend(reply, cgPath)
+	case "ATTEST-QUOTE":
+		ctlAttestQuote(reply, cgPath, f)
 	default:
 		reply("ERR protocol")
 	}

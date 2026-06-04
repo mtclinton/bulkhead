@@ -193,6 +193,8 @@ func main() {
 		cmdGrantOnce(os.Args[2:])
 	case "ctl":
 		cmdControl(os.Args[2:])
+	case "attest":
+		cmdAttest(os.Args[2:])
 	case "gc":
 		cmdGC()
 	case "verify-audit":

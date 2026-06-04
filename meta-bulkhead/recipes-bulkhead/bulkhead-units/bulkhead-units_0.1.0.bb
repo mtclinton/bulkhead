@@ -48,6 +48,7 @@ SYSTEMD_SERVICE:${PN} = "\
     bulkhead-broker.service \
     bulkhead-enforce.service \
     bulkhead-enforce-egress.service \
+    bulkhead-attest.service \
 "
 # ADR-0018 HARDEN-BY-DEFAULT: the shipped image boots ENFORCED. bulkhead-broker.service is
 # boot-started (so its cgroup exists for the enforce gate; it still inherits the .socket fd via
