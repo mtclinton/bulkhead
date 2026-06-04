@@ -250,6 +250,54 @@ try:
     check(is_active("bulkhead-attest-gate.service"),
           "mask probe left the gate active again (clean armed box for poweroff)")
 
+    # ===== ADR-0023: on-box CRYPTOGRAPHIC self-check GATE (augment the map-read gate with a TPM proof) =====
+    # The box produces a FRESH-NONCE quote under its AK and runs the five `attest verify` checks against
+    # the expected DEFAULT-ARMED D it derives from its OWN /proc/self/exe — all in the collector (TCB).
+    # On this swtpm harness no /data pin is provisioned, so it runs the STRUCTURAL FALLBACK (self-akpub:
+    # genuine-TPM + fresh + PCR-match, NO identity assertion). The box must be ARMED here (re-armed above).
+    #
+    # POSITIVE: the second gate unit RAN on cold boot (its /dev/tpmrm0 Condition is satisfied — a TPM is
+    # attached) AND the live selfcheck passes against the boot-extended PCR.
+    check(is_active("bulkhead-attest-selfcheck-gate.service"),
+          "ADR-0023: crypto self-check gate active from cold boot (TPM present -> Condition satisfied; fresh-nonce quote verified the boot-extended PCR == expected default-armed D)")
+    sc = run("bulkhead-collector attest selfcheck 2>&1; echo RC=$?")
+    out("\n[selfcheck+ structural-fallback]\n" + sc + "\n")
+    check("RC=0" in sc and "OK" in sc and "structural-fallback" in sc and ("PCR 14" in sc or "PCR %d" % 14 in sc),
+          "ADR-0023 POSITIVE: attest selfcheck OK on the armed box (genuine-TPM fresh-nonce quote, PCR 14 == expected default-armed D, self-akpub structural fallback — no pre-provisioned pin on this harness)")
+
+    # NEGATIVE (induce a crypto-gate FAIL WITHOUT a non-enforcing boot): drop a WRONG pre-provisioned
+    # EK-rooted pin so the box switches off the structural fallback into the IDENTITY path, where the
+    # quote's genuine AK must bytewise-match the (wrong) pin -> FAIL. /data is the persistent pin home;
+    # if it is not writable on this harness we fall back to skipping (the pin path is still unit-tested).
+    PIN = "/data/bulkhead/attest-ak.pin"
+    wr = run(f"mkdir -p /data/bulkhead 2>/dev/null && printf '%s\\n' {WRONG_AK} > {PIN} 2>/dev/null && test -s {PIN}; echo RC=$?")
+    if "RC=0" in wr:
+        scn = run(f"bulkhead-collector attest selfcheck 2>&1; echo RC=$?")
+        out("\n[selfcheck- wrong pre-provisioned pin]\n" + scn + "\n")
+        run(f"rm -f {PIN} 2>/dev/null; true")  # restore the structural-fallback (clean) state
+        check("RC=0" not in scn and "FAIL" in scn and "pin" in scn.lower(),
+              "ADR-0023 NEGATIVE: a WRONG pre-provisioned EK-rooted pin makes selfcheck FAIL CLOSED on the AK identity mismatch (the box won't self-pass with a forged identity) — induced without a non-enforcing boot")
+        # and it is back to passing once the bad pin is removed (no permanent brick)
+        scr = run("bulkhead-collector attest selfcheck 2>&1; echo RC=$?")
+        check("RC=0" in scr and "OK" in scr,
+              "ADR-0023: removing the bad pin restores the structural-fallback PASS (the wrong-pin FAIL was not a brick)")
+    else:
+        out(f"\n[selfcheck- pin negative SKIPPED: {PIN} not writable on this harness]\n")
+
+    # LOAD-BEARING WIRING (static, AUGMENT not REPLACE): tailscale-up Requires=+After= BOTH gates — the
+    # unconditional ADR-0021 map-read gate AND this /dev/tpmrm0-conditioned crypto gate.
+    req2 = run("systemctl show tailscale-up.service -p Requires -p After 2>&1")
+    out("\n[tailscale-up deps (both gates)]\n" + req2 + "\n")
+    check("bulkhead-attest-gate.service" in req2 and "bulkhead-attest-selfcheck-gate.service" in req2,
+          "ADR-0023 WIRING: tailscale-up Requires= BOTH the map-read gate (unconditional) AND the crypto self-check gate (augment, never replace) -> the join is coupled to a TPM-signed proof, layered on the live map read")
+    # the crypto gate conditions on the TPM (so a no-TPM box skips it, gated only by the map read); the
+    # map-read gate does NOT (so a no-TPM enforcing box is still gated, never bricked).
+    cond_sc = run("systemctl show bulkhead-attest-selfcheck-gate.service -p ConditionResult -p Conditions 2>&1")
+    cond_mr = run("systemctl show bulkhead-attest-gate.service -p Conditions 2>&1")
+    out("\n[selfcheck-gate conditions]\n" + cond_sc + "\n[map-read-gate conditions]\n" + cond_mr + "\n")
+    check("/dev/tpmrm0" in cond_sc and "/dev/tpmrm0" not in cond_mr,
+          "ADR-0023 NO-TPM DEGRADE (never-brick): the crypto gate ConditionPathExists=/dev/tpmrm0 (skips on a TPM-less box) while the map-read gate does NOT -> a no-TPM enforcing box is still gated by the map read, not fail-open and not bricked")
+
     run("poweroff", t=20)
 except Exception as e:
     out(f"\n[harness] EXC {type(e).__name__}: {e}\n")

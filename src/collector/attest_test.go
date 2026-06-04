@@ -53,3 +53,27 @@ func TestComposeDigestFieldsBind(t *testing.T) {
 		}
 	}
 }
+
+// ADR-0023 self-check derives the SAME default-armed D the off-box `attest expected-d` does — both go
+// through expectedDefaultArmedD, so the on-box gate verifies against the identical expected digest a
+// relying party would. If these diverge the self-check would never match a healthy box's boot extend.
+func TestExpectedDefaultArmedDMatchesComposeDigest(t *testing.T) {
+	got := expectedDefaultArmedD(emptyExeHex())
+	want := composeDigest(emptyExeHex(), map[uint32]uint32{hookBPF: 1, hookConnect: 1}, expectedTCBCount, true)
+	if got != want {
+		t.Fatalf("expectedDefaultArmedD != composeDigest(default-armed): on-box self-check D would diverge from off-box expected-d")
+	}
+	if hex.EncodeToString(got[:]) != composeDigestGoldenV1 {
+		t.Fatalf("expectedDefaultArmedD drifted from the pinned v1 golden")
+	}
+}
+
+// verifyEnvelopeChecks must RETURN an error (never fatalf/exit) so the in-process self-check can
+// fail-closed gracefully — and it must reject a garbage quote rather than panic. (The full positive
+// path needs a real TPM quote and is covered live by scripts/qemu-attest-check.py.)
+func TestVerifyEnvelopeChecksReturnsErrorOnGarbage(t *testing.T) {
+	env := &attestEnvelope{Quoted: "deadbeef", PCR: attestPCR}
+	if err := verifyEnvelopeChecks(env, make([]byte, 32), make([]byte, 32), nil); err == nil {
+		t.Fatal("verifyEnvelopeChecks accepted a garbage envelope — it must fail closed with an error")
+	}
+}

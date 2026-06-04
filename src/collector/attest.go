@@ -684,7 +684,6 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
 	if err != nil || len(nonce) < 16 {
 		fatalf("attest verify: nonce must be >= 16 bytes hex (the verifier's fresh challenge)")
 	}
-	quoted, _ := hex.DecodeString(env.Quoted)
 	akDER, _ := hex.DecodeString(env.AKPubDER)
 
 	// (0) PIN THE AK out-of-band. The envelope's AK is attacker-controllable, so it is trusted ONLY
@@ -699,31 +698,49 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
 		fatalf("attest verify: FAIL — envelope AK does not match the pinned AK (forged/untrusted box, or wrong box)")
 	}
 
+	// (a)-(e) the cryptographic checks, factored into verifyEnvelopeChecks so the SAME five checks
+	// drive the OFF-BOX verifier AND the on-box `attest selfcheck` (ADR-0023) — one source of truth.
+	if err := verifyEnvelopeChecks(&env, expectedD, nonce, akDER); err != nil {
+		fatalf("attest verify: %v", err)
+	}
+	fmt.Printf("attest verify: OK — genuine TPM quote under the PINNED AK, fresh nonce, PCR %d (SHA-256) == expected enforcing-TCB state\n", env.PCR)
+}
+
+// verifyEnvelopeChecks runs verify checks (a)-(e) against an already-PINNED AK (akDER), returning an
+// error on the first failure instead of fatalf — so it is reusable by BOTH the OFF-BOX cmdAttestVerify
+// (after its (0) out-of-band pin gate) AND the on-box ADR-0023 self-check. It does NOT itself pin: the
+// caller supplies the AK pub it has decided to trust (the off-box pin, or — in the self-check structural
+// fallback — the quote's own AK, which gives genuine-TPM + freshness + PCR-match but NOT identity). The
+// five checks: (a) magic == TPM_GENERATED, (b) QualifyingData == the supplied fresh nonce (no replay),
+// (c) ECDSA sig over SHA-256(Quoted) under akDER, (d) the quote covers EXACTLY attestPCR (SHA-256), so
+// a digest can't be laundered through a resettable PCR, and (e) that PCR's digest == H(0^32||expected-D).
+func verifyEnvelopeChecks(env *attestEnvelope, expectedD, nonce, akDER []byte) error {
+	quoted, _ := hex.DecodeString(env.Quoted)
 	// (a)+(b) parse the TPMS_ATTEST and check magic + nonce.
 	att, err := tpm2.Unmarshal[tpm2.TPMSAttest](quoted)
 	if err != nil {
-		fatalf("attest verify: parse TPMS_ATTEST: %v", err)
+		return fmt.Errorf("parse TPMS_ATTEST: %v", err)
 	}
 	if att.Magic != tpm2.TPMGeneratedValue {
-		fatalf("attest verify: FAIL — magic != TPM_GENERATED (not a genuine TPM quote)")
+		return fmt.Errorf("FAIL — magic != TPM_GENERATED (not a genuine TPM quote)")
 	}
 	if !bytes.Equal(att.ExtraData.Buffer, nonce) {
-		fatalf("attest verify: FAIL — qualifyingData != the verifier's fresh nonce (stale/replayed quote)")
+		return fmt.Errorf("FAIL — qualifyingData != the fresh nonce (stale/replayed quote)")
 	}
-	// (c) ECDSA signature over SHA-256(quoted) under the pinned AK pub.
+	// (c) ECDSA signature over SHA-256(quoted) under the supplied AK pub.
 	pub, err := ecdsaPubFromDER(akDER)
 	if err != nil {
-		fatalf("attest verify: AK pub: %v", err)
+		return fmt.Errorf("AK pub: %v", err)
 	}
 	h := sha256.Sum256(quoted)
 	r := new(big.Int).SetBytes(mustHex(env.SigR))
 	s := new(big.Int).SetBytes(mustHex(env.SigS))
 	if !ecdsa.Verify(pub, h[:], r, s) {
-		fatalf("attest verify: FAIL — AK signature invalid")
+		return fmt.Errorf("FAIL — AK signature invalid")
 	}
 	qi, err := att.Attested.Quote()
 	if err != nil {
-		fatalf("attest verify: not a quote attestation: %v", err)
+		return fmt.Errorf("not a quote attestation: %v", err)
 	}
 	// (d) the quote must cover EXACTLY attestPCR in the SHA-256 bank. The quote's pcrDigest is
 	// H(selected PCR VALUES) — the PCR INDEX is NOT in the digested bytes; it lives in pcrSelect. So
@@ -734,19 +751,19 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
 	sels := qi.PCRSelect.PCRSelections
 	if len(sels) != 1 || sels[0].Hash != tpm2.TPMAlgSHA256 ||
 		!bytes.Equal(sels[0].PCRSelect, pcrSelectBitmap(attestPCR)) {
-		fatalf("attest verify: FAIL — quote does not cover exactly PCR %d (SHA-256); refusing a digest laundered through another/resettable PCR", attestPCR)
+		return fmt.Errorf("FAIL — quote does not cover exactly PCR %d (SHA-256); refusing a digest laundered through another/resettable PCR", attestPCR)
 	}
 	if env.PCR != attestPCR {
-		fatalf("attest verify: FAIL — envelope PCR %d != expected PCR %d", env.PCR, attestPCR)
+		return fmt.Errorf("FAIL — envelope PCR %d != expected PCR %d", env.PCR, attestPCR)
 	}
 	// (e) that PCR's digest == H(0^32 || expected-D) (single extend from a zero bank). With one PCR
 	// selected the quote's pcrDigest is H(PCR-value) where PCR-value == H(0^32 || D); compute the same.
 	want := pcrExtendFromZero(expectedD)
 	wantQuoteDigest := sha256.Sum256(want)
 	if !bytes.Equal(qi.PCRDigest.Buffer, wantQuoteDigest[:]) {
-		fatalf("attest verify: FAIL — PCR digest mismatch: the box is NOT in the expected enforcing TCB state")
+		return fmt.Errorf("FAIL — PCR digest mismatch: the box is NOT in the expected enforcing TCB state")
 	}
-	fmt.Printf("attest verify: OK — genuine TPM quote under the PINNED AK, fresh nonce, PCR %d (SHA-256) == expected enforcing-TCB state\n", env.PCR)
+	return nil
 }
 
 // cmdAttestMakeCredential is the OFF-BOX verifier step (no TPM): parse the box's enrollment request,
@@ -1003,9 +1020,116 @@ func cmdAttestExpectedD(binPath string) {
 		fatalf("attest expected-d: read collector binary: %v", err)
 	}
 	exeSum := sha256.Sum256(exe)
-	flagVals := map[uint32]uint32{hookBPF: 1, hookConnect: 1} // ptrace/setuid/capset default 0 (observe)
-	d := composeDigest(hex.EncodeToString(exeSum[:]), flagVals, expectedTCBCount, true)
+	d := expectedDefaultArmedD(hex.EncodeToString(exeSum[:]))
 	fmt.Println(hex.EncodeToString(d[:]))
+}
+
+// expectedDefaultArmedD is the PURE ADR-0022 default-armed digest from a collector-binary hash: the
+// SAME composeDigest the live box extends on a healthy hardened boot — E0(bpf)+E2(socket_connect)
+// ENFORCE, E1/E3 observe, tcb clean with exactly {root, collector, broker}. Shared by the OFF-BOX
+// `attest expected-d` AND the on-box self-check (ADR-0023), so both derive the identical expected D.
+func expectedDefaultArmedD(exeHashHex string) [32]byte {
+	flagVals := map[uint32]uint32{hookBPF: 1, hookConnect: 1} // ptrace/setuid/capset default 0 (observe)
+	return composeDigest(exeHashHex, flagVals, expectedTCBCount, true)
+}
+
+// ---- on-box CRYPTOGRAPHIC self-check (ADR-0023): the GATE upgraded from a live map-READ to a TPM-
+// SIGNED self-verify -------------------------------------------------------------------------------
+//
+// The ADR-0021 gate reads the LIVE enforce_flags/tcb_cgroups maps — a SELF-ASSERTED predicate a
+// tampered collector defeats (it just lies about the maps). This self-check makes the box produce a
+// FRESH-NONCE quote under its EK-rooted AK and run the SAME five cryptographic verify checks against
+// the expected default-armed D, so the gate now depends on a genuine-TPM signed proof of the BOOT-
+// extended PCR, not a map read the TCB controls.
+//
+// WHAT IT PROVES (and not): PCR 14 holds the BOOT `attest extend` of D (one-way, extend-only). A pass
+// proves the genuine TPM signed a FRESH quote whose PCR == H(0^32 || expected-default-armed-D) — i.e.
+// the box BOOTED in the expected default-armed posture, the quote is genuine (magic) + fresh (nonce) +
+// covers exactly PCR 14, NOT replayed. It CATCHES a never-armed box whose tampered collector fakes the
+// live map (the boot-extended PCR would differ), and software-forged / replayed quotes. It does NOT
+// catch a runtime in-TCB compromise AFTER the boot extend (the PCR is a boot snapshot), and does NOT
+// catch a BINARY SWAP — expectedDefaultArmedD hashes the box's OWN /proc/self/exe, so a swapped
+// collector derives D from the swapped binary and self-passes. This is a SAME-BOX self-check, strictly
+// WEAKER than the OFF-BOX relying-party verify (qemu-attest-check.py): it proves the box's quote is
+// genuine + fresh + matches its own boot-extended, self-derived D — NOT that the box is unmodified.
+
+// ekRootedPinPath is the pre-provisioned EK-rooted AK pin a ONE-TIME OFF-BOX enroll (ADR-0020 ek/
+// make-credential/activate/enroll-verify) writes to the persistent /data partition. When present it
+// gives the self-check REAL this-TPM identity teeth (the AK is provably loaded in the genuine TPM that
+// owns the EK). When ABSENT the self-check falls back to the quote's OWN AK (structural fallback) —
+// see doAttestSelfCheck. /data survives RAUC A/B updates (it is outside the rootfs slots).
+const ekRootedPinPath = "/data/bulkhead/attest-ak.pin"
+
+// doAttestSelfCheck is the on-box cryptographic gate condition (ADR-0023). It runs ENTIRELY in the
+// collector (TCB): generate a FRESH nonce, derive the expected default-armed D from the box's OWN
+// binary, produce a quote of PCR 14 under that nonce, then run the SAME five verify checks against D.
+//
+// PIN SOURCING — avoid the circularity trap. The box must NOT pin its OWN freshly-derived AK as a
+// trusted IDENTITY (a tampered collector would pin its forged AK and self-pass on identity). So:
+//   - PRE-PROVISIONED PIN (ekRootedPinPath present): use the EK-rooted pin from the off-box enroll as
+//     the trusted AK, AND require the quote's AK to bytewise-match it — real this-TPM identity teeth.
+//   - STRUCTURAL FALLBACK (no pin file): verify against the quote's OWN AK. This still proves genuine-
+//     TPM (magic) + freshness (our own nonce) + sig-consistency + boot-PCR == expected-D, but makes NO
+//     identity assertion — it does NOT treat the self-captured AK as "the trusted box". A genuine,
+//     same-TPM, fresh, boot-PCR-matching proof over the map read; not identity. Honest by construction.
+//
+// Returns (detail, error): error => the gate FAILS CLOSED (the CLI exits non-zero). The nonce is FRESH
+// per call (crypto/rand), so the proof can never be a replay of a stored quote.
+func doAttestSelfCheck() (string, error) {
+	// FRESH nonce — the same-box freshness defense: a stored/replayed quote echoes an old nonce and
+	// fails check (b). 32 bytes from crypto/rand (>= the 16-byte verify floor).
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("self-check nonce: %w", err)
+	}
+	nonceHex := hex.EncodeToString(nonce[:])
+
+	// Produce the quote via the EXACT same in-process path the off-box flow uses (doAttestQuote), so
+	// there is one quote code path. It returns the envelope JSON (one line).
+	envJSON, err := doAttestQuote(nonceHex)
+	if err != nil {
+		return "", fmt.Errorf("self-check quote: %w", err)
+	}
+	var env attestEnvelope
+	if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+		return "", fmt.Errorf("self-check parse envelope: %w", err)
+	}
+	akDER, err := hex.DecodeString(env.AKPubDER)
+	if err != nil || len(akDER) == 0 {
+		return "", fmt.Errorf("self-check: envelope has no/garbled AK pub")
+	}
+
+	// Expected default-armed D from the box's OWN /proc/self/exe (ADR-0022 posture). This is what makes
+	// the check catch a NEVER-ARMED box: the boot extend on a healthy box extends exactly this D, so a
+	// box that booted in observe (or a tampered collector that never extended the armed D) yields a PCR
+	// that does NOT match — and the genuine TPM cannot be made to sign a matching pcrDigest.
+	exe, err := os.ReadFile("/proc/self/exe")
+	if err != nil {
+		return "", fmt.Errorf("self-check read self exe: %w", err)
+	}
+	exeSum := sha256.Sum256(exe)
+	expD := expectedDefaultArmedD(hex.EncodeToString(exeSum[:]))
+
+	// PIN SOURCING.
+	identity := "structural-fallback(self-akpub, no-identity)"
+	trustedAK := akDER // fallback default: verify under the quote's own AK
+	if pin, perr := os.ReadFile(ekRootedPinPath); perr == nil {
+		pinDER, rerr := resolveAKPin(strings.TrimSpace(string(pin)))
+		if rerr != nil {
+			return "", fmt.Errorf("self-check: EK-rooted pin %s is present but invalid: %w", ekRootedPinPath, rerr)
+		}
+		// real identity teeth: the quote's AK must bytewise-match the pre-provisioned EK-rooted pin.
+		if !bytes.Equal(akDER, pinDER) {
+			return "", fmt.Errorf("FAIL — quote AK does not match the pre-provisioned EK-rooted pin (%s)", ekRootedPinPath)
+		}
+		trustedAK = pinDER
+		identity = "ek-rooted-pin(" + ekRootedPinPath + ")"
+	}
+
+	if err := verifyEnvelopeChecks(&env, expD[:], nonce[:], trustedAK); err != nil {
+		return "", fmt.Errorf("self-check %v", err)
+	}
+	return fmt.Sprintf("genuine-TPM quote, fresh nonce, PCR %d == expected default-armed D, identity=%s", attestPCR, identity), nil
 }
 
 func cmdAttest(args []string) {
@@ -1013,6 +1137,7 @@ func cmdAttest(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <env.json> | verify <env.json> <D-hex> <nonce-hex> <pin-hex|@file>")
 		fmt.Fprintln(os.Stderr, "       EK-rooting (ADR-0020): ek | activate <challenge.json> | make-credential <request.json> <round-out> [ek-ca-pem|@file] | enroll-verify <response.json> <round-state> <out-pin>")
 		fmt.Fprintln(os.Stderr, "       posture gate (ADR-0021): gate  (exit 0 = E0+E2 armed + tcb_clean; non-zero = fail-closed)")
+		fmt.Fprintln(os.Stderr, "       crypto self-check gate (ADR-0023): selfcheck  (exit 0 = fresh-nonce quote verifies against expected default-armed D; non-zero = fail-closed)")
 		fmt.Fprintln(os.Stderr, "       reproducible expected-D (ADR-0022): expected-d <collector-binary>  (off-box D for `verify`, no journal)")
 		os.Exit(2)
 	}
@@ -1051,6 +1176,17 @@ func cmdAttest(args []string) {
 		ok, resp := controlRPCGate("ATTEST-GATE")
 		if !ok {
 			fatalf("attest gate: %s", resp)
+		}
+		fmt.Println(resp)
+	case "selfcheck":
+		// on-box CRYPTOGRAPHIC gate (ADR-0023): ask the collector (TCB) to produce a fresh-nonce quote
+		// under its EK-rooted AK and run the five verify checks against the expected default-armed D, all
+		// in-process. The TPM extend/quote needs /dev/tpmrm0 and the bpf() map reads EPERM from this non-
+		// TCB CLI cgroup, so it runs in the collector. controlRPCGate fail-closes FAST on a server ERR
+		// (a crypto-check failure), retrying only the boot race. Exit non-zero (fatalf) => the unit fails.
+		ok, resp := controlRPCGate("ATTEST-SELFCHECK")
+		if !ok {
+			fatalf("attest selfcheck: %s", resp)
 		}
 		fmt.Println(resp)
 	case "expected-d":
@@ -1157,6 +1293,23 @@ func ctlAttestGate(reply func(string), cgPath string) {
 	}
 	if !armed {
 		reply("ERR not-armed " + detail)
+		return
+	}
+	reply("OK " + detail)
+}
+
+// ctlAttestSelfCheck runs the on-box cryptographic self-check IN THE COLLECTOR (TCB) — it needs both
+// /dev/tpmrm0 (TPM extend/quote) AND the privileged bpf() map reads, which a non-TCB caller would
+// EPERM. Operator-only, like ctlAttestGate. A crypto-check failure replies ERR (=> the CLI exits non-
+// zero => the second gate fails closed); a success replies OK with the proof detail.
+func ctlAttestSelfCheck(reply func(string), cgPath string) {
+	if isAgentCgroup(cgPath) {
+		reply("ERR not-operator")
+		return
+	}
+	detail, err := doAttestSelfCheck()
+	if err != nil {
+		reply("ERR " + err.Error())
 		return
 	}
 	reply("OK " + detail)

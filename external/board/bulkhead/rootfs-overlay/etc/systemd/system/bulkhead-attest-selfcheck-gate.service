@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# ADR-0023: CRYPTOGRAPHIC self-check GATE — the on-box upgrade of the load-bearing gate from a live
+# map-READ (ADR-0021) to a TPM-SIGNED self-verify. The box produces a FRESH-NONCE quote under its
+# EK-rooted AK and runs the five `attest verify` checks against the expected DEFAULT-ARMED D, all in
+# the COLLECTOR (TCB). A pass proves the GENUINE TPM signed a FRESH quote whose PCR 14 == H(0^32||D),
+# i.e. the box BOOTED in the expected default-armed posture — catching a NEVER-ARMED box whose tampered
+# collector merely LIES about the live maps (which the ADR-0021 map read cannot, if the TCB lies), plus
+# software-forged / replayed quotes. HONEST LIMITS: a SAME-BOX self-check, strictly WEAKER than the
+# off-box relying-party verify (scripts/qemu-attest-check.py). It does NOT catch a runtime in-TCB
+# compromise AFTER the boot extend (PCR is a boot snapshot), nor a BINARY SWAP (the expected D hashes
+# the box's OWN /proc/self/exe, so a swapped collector self-derives a matching D).
+#
+# AUGMENT, NEVER REPLACE: this is a SECOND gate LAYERED on top of the UNCONDITIONAL ADR-0021 map-read
+# gate (bulkhead-attest-gate.service), NOT a replacement. A crypto gate needs a TPM, so it
+# ConditionPathExists=/dev/tpmrm0 — on a legitimately TPM-LESS but enforcing box this unit is cleanly
+# Condition-SKIPPED (systemd treats a skipped Requires= dependency as satisfied), so the box is NOT
+# bricked AND is STILL gated by the ADR-0021 map read. Replacing the map read with this crypto-only gate
+# would FAIL-OPEN the no-TPM box — the regression this layering avoids.
+#
+# `attest selfcheck` is a thin CONTROL-SOCKET client: the TPM extend/quote AND the bpf() map reads (for
+# the in-process expected-D / quote) would fail from this non-TCB unit's cgroup under armed-E0, so the
+# COLLECTOR (TCB) does the quote + verify in-process and replies OK / ERR. controlRPCGate absorbs the
+# socket-bind boot race (transport-only retry) while returning a crypto-FAIL server ERR immediately.
+[Unit]
+Description=bulkhead cryptographic self-attest GATE (TPM-signed quote self-verify, load-bearing)
+Documentation=https://github.com/mtclinton/bulkhead
+# CRYPTO GUARD: a crypto gate needs the TPM. On a TPM-less box this SKIPS (the ADR-0021 map-read gate
+# still gates — AUGMENT not REPLACE; conditioning the MAP-READ gate on /dev/tpmrm0 would be the bug).
+ConditionPathExists=/dev/tpmrm0
+# Also require the collector binary (any bulkhead image ships it; absent in a stripped/recovery image).
+ConditionPathExists=/usr/bin/bulkhead-collector
+# Order AFTER the boot extend (bulkhead-attest.service) so PCR 14 already holds the extended D, and
+# AFTER both enforce arms so the box is in its default-armed steady state before we quote it.
+After=bulkhead-collector.service bulkhead-enforce.service bulkhead-enforce-egress.service bulkhead-attest.service
+Requires=bulkhead-collector.service
+# Re-evaluate against the fresh box state after a collector restart (RemoveAll-reset + re-arm + re-
+# extend). PartOf makes a collector restart restart this oneshot, so a stale "active" gate can't outlive
+# a re-arm. (The boot PCR is sticky across a collector restart without a reboot — see ADR-0023 honest
+# limits — so this re-run is a freshness/liveness re-quote, not a fresh boot measurement.)
+PartOf=bulkhead-collector.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Exit 0 iff the collector (TCB) produced a fresh-nonce quote that VERIFIES against the expected
+# default-armed D (genuine TPM + fresh nonce + exactly-PCR-14 + PCR == H(0^32||D)).
+ExecStart=/usr/bin/bulkhead-collector attest selfcheck
+
+[Install]
+WantedBy=multi-user.target

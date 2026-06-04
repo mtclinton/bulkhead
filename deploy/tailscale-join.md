@@ -53,10 +53,24 @@ skipped and the router stays on loopback.
 expected enforcing posture**: E0 (`lsm/bpf` deny) armed **and** E2
 (`socket_connect` deny) armed **and** `tcb_cgroups` clean, read live from the
 pinned BPF maps by the collector (TCB). A disarmed, failed-to-arm, or
-TCB-strangered box **cannot bring up the tailnet**. This is a self-asserted
-posture predicate (a tampered collector defeats it), **not** a TPM-quoted
-off-box proof — that is the follow-up that consults `attest verify` against an
-EK-rooted quote.
+TCB-strangered box **cannot bring up the tailnet**. This first gate is a
+self-asserted posture predicate (a tampered collector defeats it), conditioned on
+the collector **binary** so it gates a TPM-less box too.
+
+**Second gate (ADR-0023, cryptographic):** `tailscale-up.service` ALSO
+`Requires=bulkhead-attest-selfcheck-gate.service`, which has the box produce a
+fresh-nonce **TPM-signed** quote and verify it against the expected default-armed
+D it derives from its own binary — so the join additionally depends on a genuine,
+fresh, boot-PCR-matching proof, not just a map read. This second gate
+`ConditionPathExists=/dev/tpmrm0`, so on a **TPM-less** box it is condition-skipped
+and only the map-read gate applies (augment, never replace — a crypto-only gate
+would fail-open the no-TPM box). It is a **same-box self-check**, strictly weaker
+than the off-box relying-party `attest verify`: it proves the quote is genuine +
+fresh + matches the box's own boot-extended, self-derived D, **not** that the box
+is unmodified (a binary swap self-passes; a runtime post-boot compromise is not
+caught). A pre-provisioned EK-rooted pin at `/data/bulkhead/attest-ak.pin` (from a
+one-time off-box ADR-0020 enroll) adds this-TPM identity; absent it, the
+structural fallback verifies under the quote's own AK without an identity claim.
 
 Polarity is deliberately the opposite of ADR-0018's fail-safe: the gate **blocks**
 on observe. Blocking the tailnet is **not a brick** — only the *join* is gated;
@@ -68,8 +82,9 @@ console):
 1. **Re-arm (intended in-band recovery):**
    ```sh
    systemctl start bulkhead-enforce-egress.service bulkhead-enforce.service
-   systemctl restart bulkhead-attest-gate.service   # re-passes once armed
-   systemctl start tailscale-up.service             # rejoins
+   systemctl restart bulkhead-attest-gate.service              # map-read gate re-passes once armed
+   systemctl restart bulkhead-attest-selfcheck-gate.service    # crypto gate (TPM box only; condition-skipped without a TPM)
+   systemctl start tailscale-up.service                        # rejoins
    ```
    Re-arm is the **supported recovery** — prefer it.
 2. **Persistent observe-mode downgrade (deliberate soak/debug box):** do **not**

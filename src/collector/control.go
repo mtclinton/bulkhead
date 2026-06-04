@@ -159,6 +159,8 @@ func handleControlConn(conn net.Conn) {
 		ctlAttestActivate(reply, cgPath, f)
 	case "ATTEST-GATE":
 		ctlAttestGate(reply, cgPath)
+	case "ATTEST-SELFCHECK":
+		ctlAttestSelfCheck(reply, cgPath)
 	default:
 		reply("ERR protocol")
 	}
