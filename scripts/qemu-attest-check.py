@@ -35,8 +35,10 @@ try:
     for _ in range(15):
         if not is_active("bulkhead-attest.service"): run("sleep 2 2>/dev/null; true")
         else: break
-    aj = run("journalctl -u bulkhead-attest.service --no-pager 2>&1 | grep -a 'attest:' | tail -3")
-    out("\n[attest boot journal]\n" + aj + "\n")
+    # the COLLECTOR (TCB) does the extend in-process and logs the digest to ITS journal; the attest
+    # unit's own journal just carries the CLI's "OK <digest>". Read D from the collector journal.
+    aj = run("journalctl -u bulkhead-collector.service --no-pager 2>&1 | grep -a 'attest: extended' | tail -2")
+    out("\n[attest extend (collector journal)]\n" + aj + "\n")
     m = re.search(r"TCB digest ([0-9a-f]{64})", aj)
     D = m.group(1) if m else ""
     check(is_active("bulkhead-attest.service") and D != "",

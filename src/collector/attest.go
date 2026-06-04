@@ -327,7 +327,9 @@ func doAttestQuote(nonceHex string) (string, error) {
 	var qrsp *tpm2.QuoteResponse
 	err = tpmRetry(func() error {
 		r, e := tpm2.Quote{
-			SignHandle:     tpm2.AuthHandle{Handle: ak.ObjectHandle, Auth: tpm2.PasswordAuth(nil)},
+			// the AK is a TRANSIENT handle, so go-tpm needs its Name explicitly (it can't derive it
+			// the way it does for permanent handles like a PCR).
+			SignHandle:     tpm2.AuthHandle{Handle: ak.ObjectHandle, Name: ak.Name, Auth: tpm2.PasswordAuth(nil)},
 			QualifyingData: tpm2.TPM2BData{Buffer: nonce},
 			PCRSelect:      sel,
 			InScheme: tpm2.TPMTSigScheme{
