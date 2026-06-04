@@ -153,6 +153,10 @@ func handleControlConn(conn net.Conn) {
 		ctlAttestExtend(reply, cgPath)
 	case "ATTEST-QUOTE":
 		ctlAttestQuote(reply, cgPath, f)
+	case "ATTEST-EK":
+		ctlAttestEK(reply, cgPath)
+	case "ATTEST-ACTIVATE":
+		ctlAttestActivate(reply, cgPath, f)
 	default:
 		reply("ERR protocol")
 	}

@@ -11,8 +11,13 @@
 // them apart cryptographically (bound to its fresh nonce, so an old all-green quote can't be replayed).
 //
 // HONEST LIMITS (the same split ADR-0008 documents for the sealed key): the verifier PINS the AK
-// out-of-band (TOFU — captured via `attest akpub` on first contact and supplied to verify; binding
-// that pin to the TPM's EK cert via credential-activation is the bare-metal upgrade). D attests the
+// out-of-band (captured via `attest akpub`) and now ROOTS that pin in the TPM via EK-cert credential-
+// activation (ADR-0020 — `attest ek`/`make-credential`/`activate`/`enroll-verify`): the recovered
+// secret returns ONLY from the genuine TPM owning the EK that also holds the wrapped AK Name, so the
+// pin is bound to THIS box's TPM, not merely "a TPM". What stays bare-metal is chaining the EK cert to
+// a MANUFACTURER CA root — swtpm's EK cert is self-signed dev PKI, so under qemu the EK-binding
+// MECHANISM is proven but silicon-genuineness is not (the verifier supplies the vendor EK-CA on bare
+// metal; the same code path then validates the chain + asserts cert-pub == EK-pub). D attests the
 // enforce POSTURE (which hooks are armed) + the collector binary + TCB cleanliness, NOT per-agent
 // egress-manifest / one-shot-grant CONTENTS (runtime state written per-agent AFTER this boot extend,
 // so out of this stable snapshot by design). It attests measured RUNTIME state, NOT the firmware boot
@@ -24,6 +29,7 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
@@ -99,6 +105,44 @@ type attestEnvelope struct {
 	Nonce    string            `json:"nonce_hex"`
 	PCR      int               `json:"pcr"`
 	Claims   map[string]string `json:"claims"`
+}
+
+// ---- EK-cert credential-activation (ADR-0020): ROOT the AK in the TPM EK ------------------------
+//
+// The AK pin (ADR-0019) is blind TOFU — it proves the quote came from SOME TPM holding that AK, not
+// that the AK belongs to THE expected box's genuine TPM. Credential-activation closes that: the box
+// exports its EK pub (+ EK cert) and AK pub/Name; an OFF-BOX verifier validates the EK cert (bare
+// metal: chain to a manufacturer EK-CA + cert-pub == EK-pub) and runs MakeCredential(EKpub, secret,
+// AKName) → a challenge ONLY the genuine TPM owning that EK, also holding the AK of that Name, can
+// decrypt; the box ActivateCredentials it and returns the secret. A match means the AK is provably
+// loaded in the same TPM that owns the EK — so the verifier pins a now-EK-ROOTED AK. The AK template
+// is UNCHANGED (binding is by Name, hierarchy-independent), so the enrolled pin is byte-identical to
+// the quote AK and the ADR-0019 verify/harness are regression-free.
+
+// enrollRequest is the box's enrollment request (from ATTEST-EK). EKPubTPMT is the marshaled
+// TPMT_PUBLIC (fed straight to ImportEncapsulationKey); EKCertDER is the X.509 EK cert (best-effort,
+// "" if absent); AKPubDER is the PKIX pin-to-be (== the ADR-0019 pin); AKPubTPMT is the marshaled AK
+// TPMT_PUBLIC (so the verifier independently recomputes the Name + PKIX); AKName is the box's CLAIMED
+// Name, which the verifier RECOMPUTES from AKPubTPMT and never trusts.
+type enrollRequest struct {
+	EKPubTPMT string `json:"ek_pub_tpmt"`
+	EKCertDER string `json:"ek_cert_der"`
+	EKNVIndex string `json:"ek_nv_index"`
+	AKPubDER  string `json:"ak_pub_der"`
+	AKPubTPMT string `json:"ak_pub_tpmt"`
+	AKName    string `json:"ak_name"`
+}
+
+// activationChallenge is the verifier's MakeCredential output (from make-credential): a fresh secret
+// encapsulated to the EK and bound to the AK Name.
+type activationChallenge struct {
+	CredBlob  string `json:"cred_blob"`
+	EncSecret string `json:"enc_secret"`
+}
+
+// activationResponse is the box's recovered secret (from ATTEST-ACTIVATE).
+type activationResponse struct {
+	RecoveredSecret string `json:"recovered_secret"`
 }
 
 // ---- the measured digest ----------------------------------------------------------------------
@@ -372,6 +416,180 @@ func doAttestQuote(nonceHex string) (string, error) {
 	return string(out), nil
 }
 
+// doAttestEK builds the enrollment request: the transient EK (ECC-P256 restricted-decrypt under the
+// Endorsement hierarchy, TCG template), the SAME owner AK the quote uses (so the enrolled identity IS
+// the quote identity), and a best-effort read of the X.509 EK cert. RUNS IN THE COLLECTOR (TCB).
+func doAttestEK() (string, error) {
+	tpmMu.Lock()
+	defer tpmMu.Unlock()
+	tpm, err := linuxtpm.Open(tpmDevice)
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", tpmDevice, err)
+	}
+	defer tpm.Close()
+	ekRsp, err := tpm2.CreatePrimary{
+		PrimaryHandle: tpm2.TPMRHEndorsement,
+		InPublic:      tpm2.New2B(tpm2.ECCEKTemplate),
+	}.Execute(tpm)
+	if err != nil {
+		return "", fmt.Errorf("create EK: %w", err)
+	}
+	defer tpm2.FlushContext{FlushHandle: ekRsp.ObjectHandle}.Execute(tpm)
+	ekPub, err := ekRsp.OutPublic.Contents()
+	if err != nil {
+		return "", fmt.Errorf("EK pub: %w", err)
+	}
+	ak, err := attestAK(tpm)
+	if err != nil {
+		return "", err
+	}
+	defer tpm2.FlushContext{FlushHandle: ak.ObjectHandle}.Execute(tpm)
+	akPub, err := ak.OutPublic.Contents()
+	if err != nil {
+		return "", fmt.Errorf("AK pub: %w", err)
+	}
+	akPubDER, err := akPubToDER(ak)
+	if err != nil {
+		return "", fmt.Errorf("AK PKIX: %w", err)
+	}
+	certDER, nvIdx := readEKCert(tpm) // best-effort: ("", "") on any miss
+	req := enrollRequest{
+		EKPubTPMT: hex.EncodeToString(tpm2.Marshal(*ekPub)),
+		EKCertDER: hex.EncodeToString(certDER),
+		EKNVIndex: nvIdx,
+		AKPubDER:  hex.EncodeToString(akPubDER),
+		AKPubTPMT: hex.EncodeToString(tpm2.Marshal(*akPub)),
+		AKName:    hex.EncodeToString(ak.Name.Buffer),
+	}
+	out, _ := json.Marshal(req)
+	logf("attest: EK enrollment request (ek_nv_index=%q ek_cert=%dB ak_name=%s)",
+		nvIdx, len(certDER), hex.EncodeToString(ak.Name.Buffer))
+	return string(out), nil
+}
+
+// ekCandidateIndices are the NV indices an EK cert may live at: ECC spec-canonical, an swtpm alt, and
+// RSA. Probed in order; first that reads + X.509-parses wins.
+func ekCandidateIndices() []uint32 { return []uint32{0x01c0000a, 0x01c00016, 0x01c00002} }
+
+// readEKCert best-effort reads the X.509 EK cert from NV. Returns ("", "") on any miss — the
+// enrollment still proves EK-binding from the EK pub alone (the cert is the bare-metal trust anchor).
+func readEKCert(tpm transport.TPM) ([]byte, string) {
+	for _, idx := range ekCandidateIndices() {
+		rp, err := tpm2.NVReadPublic{NVIndex: tpm2.TPMHandle(idx)}.Execute(tpm)
+		if err != nil {
+			continue
+		}
+		nvpub, err := rp.NVPublic.Contents()
+		if err != nil {
+			continue
+		}
+		size := uint32(nvpub.DataSize)
+		if size == 0 || size > 8192 {
+			continue
+		}
+		buf := make([]byte, 0, size)
+		var off uint32
+		ok := true
+		for off < size {
+			chunk := size - off
+			if chunk > 512 {
+				chunk = 512
+			}
+			rd, err := tpm2.NVRead{
+				AuthHandle: tpm2.AuthHandle{Handle: tpm2.TPMHandle(idx), Name: rp.NVName, Auth: tpm2.PasswordAuth(nil)},
+				NVIndex:    tpm2.NamedHandle{Handle: tpm2.TPMHandle(idx), Name: rp.NVName},
+				Size:       uint16(chunk),
+				Offset:     uint16(off),
+			}.Execute(tpm)
+			if err != nil {
+				ok = false
+				break
+			}
+			buf = append(buf, rd.Data.Buffer...)
+			off += chunk
+		}
+		if !ok {
+			continue
+		}
+		if _, err := x509.ParseCertificate(buf); err != nil {
+			continue // not a parseable cert at this index
+		}
+		return buf, fmt.Sprintf("0x%08x", idx)
+	}
+	return nil, ""
+}
+
+// doAttestActivate recovers the credential-activation secret: re-derive the EK + AK, satisfy the EK's
+// AuthPolicy (TPM2_PolicySecret(RH_ENDORSEMENT)) in a fresh policy session, then ActivateCredential.
+// The recovered secret returns ONLY from the genuine TPM owning this EK AND holding the wrapped AK
+// Name — so returning it (and the verifier matching it to its fresh challenge) is the EK-rooting proof.
+func doAttestActivate(credBlobHex, encSecretHex string) (string, error) {
+	credBlob, err := hex.DecodeString(credBlobHex)
+	if err != nil {
+		return "", fmt.Errorf("cred_blob hex: %w", err)
+	}
+	encSecret, err := hex.DecodeString(encSecretHex)
+	if err != nil {
+		return "", fmt.Errorf("enc_secret hex: %w", err)
+	}
+	tpmMu.Lock()
+	defer tpmMu.Unlock()
+	tpm, err := linuxtpm.Open(tpmDevice)
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", tpmDevice, err)
+	}
+	defer tpm.Close()
+	ekRsp, err := tpm2.CreatePrimary{
+		PrimaryHandle: tpm2.TPMRHEndorsement,
+		InPublic:      tpm2.New2B(tpm2.ECCEKTemplate),
+	}.Execute(tpm)
+	if err != nil {
+		return "", fmt.Errorf("create EK: %w", err)
+	}
+	defer tpm2.FlushContext{FlushHandle: ekRsp.ObjectHandle}.Execute(tpm)
+	ak, err := attestAK(tpm)
+	if err != nil {
+		return "", err
+	}
+	defer tpm2.FlushContext{FlushHandle: ak.ObjectHandle}.Execute(tpm)
+
+	var recovered []byte
+	err = tpmRetry(func() error {
+		// the EK is UserWithAuth:false + AdminWithPolicy:true with AuthPolicy == PolicySecret(endorsement);
+		// build a FRESH policy session each attempt (a consumed session can't be reused) and satisfy it
+		// before ActivateCredential uses the EK as KeyHandle.
+		sess, closeSess, e := tpm2.PolicySession(tpm, tpm2.TPMAlgSHA256, 16)
+		if e != nil {
+			return e
+		}
+		defer closeSess()
+		if _, e = (tpm2.PolicySecret{
+			AuthHandle:    tpm2.AuthHandle{Handle: tpm2.TPMRHEndorsement, Auth: tpm2.PasswordAuth(nil)},
+			PolicySession: sess.Handle(),
+			NonceTPM:      sess.NonceTPM(),
+		}).Execute(tpm); e != nil {
+			return e
+		}
+		ac, e := tpm2.ActivateCredential{
+			ActivateHandle: tpm2.AuthHandle{Handle: ak.ObjectHandle, Name: ak.Name, Auth: tpm2.PasswordAuth(nil)},
+			KeyHandle:      tpm2.AuthHandle{Handle: ekRsp.ObjectHandle, Name: ekRsp.Name, Auth: sess},
+			CredentialBlob: tpm2.TPM2BIDObject{Buffer: credBlob},
+			Secret:         tpm2.TPM2BEncryptedSecret{Buffer: encSecret},
+		}.Execute(tpm)
+		if e != nil {
+			return e
+		}
+		recovered = ac.CertInfo.Buffer
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("ActivateCredential: %w", err)
+	}
+	resp := activationResponse{RecoveredSecret: hex.EncodeToString(recovered)}
+	out, _ := json.Marshal(resp)
+	return string(out), nil
+}
+
 // cmdAttestVerify is the OFF-BOX verifier (the same binary run elsewhere, no TPM needed). It PINS the
 // AK out-of-band — pinnedAK is the expected box's AK pub (PKIX DER hex, or @file), captured on a
 // trusted first contact (TOFU) via `attest akpub` — and REJECTS any envelope whose AK differs, BEFORE
@@ -468,6 +686,199 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
 	fmt.Printf("attest verify: OK — genuine TPM quote under the PINNED AK, fresh nonce, PCR %d (SHA-256) == expected enforcing-TCB state\n", env.PCR)
 }
 
+// cmdAttestMakeCredential is the OFF-BOX verifier step (no TPM): parse the box's enrollment request,
+// BIND the wrap to the RECOMPUTED AK Name (never the box's claimed ak_name) and assert the AK pub we
+// challenge is the SAME key that will be pinned (so a tampered box can't pin key A while proving
+// possession of key B, nor claim a Name it doesn't hold), optionally validate the EK cert chain (bare
+// metal), then MakeCredential a fresh secret encapsulated to the EK + bound to that Name. Writes the
+// challenge JSON to stdout and the fresh secret (hex) to secretOutPath (held verifier-private — it is
+// the per-round replay defense and is NEVER sent to the box).
+func cmdAttestMakeCredential(reqPath, secretOutPath, ekCAArg string) {
+	raw, err := os.ReadFile(reqPath)
+	if err != nil {
+		fatalf("attest make-credential: read request: %v", err)
+	}
+	var req enrollRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		fatalf("attest make-credential: parse request: %v", err)
+	}
+	ekPubBytes, err := hex.DecodeString(req.EKPubTPMT)
+	if err != nil {
+		fatalf("attest make-credential: ek_pub_tpmt hex: %v", err)
+	}
+	ekPub, err := tpm2.Unmarshal[tpm2.TPMTPublic](ekPubBytes)
+	if err != nil {
+		fatalf("attest make-credential: parse EK pub: %v", err)
+	}
+	akPubBytes, err := hex.DecodeString(req.AKPubTPMT)
+	if err != nil {
+		fatalf("attest make-credential: ak_pub_tpmt hex: %v", err)
+	}
+	akPub, err := tpm2.Unmarshal[tpm2.TPMTPublic](akPubBytes)
+	if err != nil {
+		fatalf("attest make-credential: parse AK pub: %v", err)
+	}
+	// recompute the AK Name from the pub area; reject a request whose claimed ak_name differs.
+	name, err := tpm2.ObjectName(akPub)
+	if err != nil {
+		fatalf("attest make-credential: recompute AK Name: %v", err)
+	}
+	claimedName, _ := hex.DecodeString(req.AKName)
+	if !bytes.Equal(name.Buffer, claimedName) {
+		fatalf("attest make-credential: FAIL — request ak_name != the recomputed Name of ak_pub_tpmt (forged request)")
+	}
+	// the AK pub we challenge (TPMT_PUBLIC) must equal the PKIX pin-to-be; else the box could pin a
+	// different key than it proves possession of.
+	derFromTPMT, err := tpmtECCToPKIX(akPub)
+	if err != nil {
+		fatalf("attest make-credential: AK pub to PKIX: %v", err)
+	}
+	claimedDER, _ := hex.DecodeString(req.AKPubDER)
+	if !bytes.Equal(derFromTPMT, claimedDER) {
+		fatalf("attest make-credential: FAIL — ak_pub_der != ak_pub_tpmt (pinning a different key than challenged)")
+	}
+	// EK cert: bare metal validates the chain to a supplied EK-CA root + asserts cert-pub == EK-pub;
+	// under swtpm (self-signed dev PKI) NOTE and skip — honest seam.
+	if ekCAArg != "" {
+		validateEKCertChain(req, derFromEKPub(ekPub), ekCAArg) // fatalf on any failure
+	} else {
+		fmt.Fprintln(os.Stderr, "attest make-credential: NOTE — no EK-CA trust anchor supplied; skipping EK-cert chain validation (swtpm self-signed dev PKI). Pass <ek-ca.pem> on bare metal.")
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		fatalf("attest make-credential: rand: %v", err)
+	}
+	ekKey, err := tpm2.ImportEncapsulationKey(ekPub)
+	if err != nil {
+		fatalf("attest make-credential: import EK: %v", err)
+	}
+	idObject, encSecret, err := tpm2.CreateCredential(rand.Reader, ekKey, name.Buffer, secret)
+	if err != nil {
+		fatalf("attest make-credential: CreateCredential: %v", err)
+	}
+	if err := os.WriteFile(secretOutPath, []byte(hex.EncodeToString(secret)), 0o600); err != nil {
+		fatalf("attest make-credential: write secret: %v", err)
+	}
+	chal := activationChallenge{CredBlob: hex.EncodeToString(idObject), EncSecret: hex.EncodeToString(encSecret)}
+	out, _ := json.Marshal(chal)
+	fmt.Println(string(out))
+}
+
+// cmdAttestEnrollVerify is the OFF-BOX final step: the box's recovered secret must bytewise-equal the
+// fresh challenge secret. A match proves the AK is loaded in the genuine TPM that owns the EK — so we
+// write its PKIX pin (from the request) for `attest verify ... @<pin>`. Fail-closed on any mismatch.
+func cmdAttestEnrollVerify(respPath, secretPath, reqPath, outPinPath string) {
+	rraw, err := os.ReadFile(respPath)
+	if err != nil {
+		fatalf("attest enroll-verify: read response: %v", err)
+	}
+	var resp activationResponse
+	if err := json.Unmarshal(rraw, &resp); err != nil {
+		fatalf("attest enroll-verify: parse response: %v", err)
+	}
+	recovered, err := hex.DecodeString(resp.RecoveredSecret)
+	if err != nil {
+		fatalf("attest enroll-verify: recovered_secret hex: %v", err)
+	}
+	sraw, err := os.ReadFile(secretPath)
+	if err != nil {
+		fatalf("attest enroll-verify: read secret: %v", err)
+	}
+	secret, err := hex.DecodeString(strings.TrimSpace(string(sraw)))
+	if err != nil {
+		fatalf("attest enroll-verify: secret hex: %v", err)
+	}
+	if len(secret) < 16 || !bytes.Equal(recovered, secret) {
+		fatalf("attest enroll-verify: FAIL — recovered secret != challenge secret (AK is NOT loaded in the genuine EK's TPM)")
+	}
+	rqraw, err := os.ReadFile(reqPath)
+	if err != nil {
+		fatalf("attest enroll-verify: read request: %v", err)
+	}
+	var req enrollRequest
+	if err := json.Unmarshal(rqraw, &req); err != nil {
+		fatalf("attest enroll-verify: parse request: %v", err)
+	}
+	der, err := hex.DecodeString(req.AKPubDER)
+	if err != nil || len(req.AKPubDER) == 0 {
+		fatalf("attest enroll-verify: request has no/invalid ak_pub_der")
+	}
+	if _, err := ecdsaPubFromDER(der); err != nil {
+		fatalf("attest enroll-verify: ak_pub_der is not a valid ECDSA pub: %v", err)
+	}
+	if err := os.WriteFile(outPinPath, []byte(req.AKPubDER+"\n"), 0o600); err != nil {
+		fatalf("attest enroll-verify: write pin: %v", err)
+	}
+	fmt.Printf("attest enroll-verify: OK — AK is EK-rooted (credential-activation secret recovered); wrote EK-rooted pin to %s\n", outPinPath)
+}
+
+// validateEKCertChain is the BARE-METAL EK trust anchor (UNEXERCISED under swtpm, which has self-
+// signed dev PKI): the EK cert must chain to the operator-supplied EK-CA root(s) AND its public key
+// must equal the EK pub we are about to encapsulate to (so the cert vouches for THIS EK). Fail-closed.
+func validateEKCertChain(req enrollRequest, ekPubDER []byte, ekCAArg string) {
+	if req.EKCertDER == "" {
+		fatalf("attest make-credential: FAIL — EK-CA supplied but the request carries no ek_cert_der")
+	}
+	certDER, err := hex.DecodeString(req.EKCertDER)
+	if err != nil {
+		fatalf("attest make-credential: ek_cert_der hex: %v", err)
+	}
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		fatalf("attest make-credential: parse EK cert: %v", err)
+	}
+	caPEM := ekCAArg
+	if strings.HasPrefix(caPEM, "@") {
+		b, err := os.ReadFile(caPEM[1:])
+		if err != nil {
+			fatalf("attest make-credential: read EK-CA: %v", err)
+		}
+		caPEM = string(b)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(caPEM)) {
+		fatalf("attest make-credential: EK-CA arg has no PEM certificates")
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+		fatalf("attest make-credential: FAIL — EK cert does not chain to the supplied EK-CA: %v", err)
+	}
+	certPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		fatalf("attest make-credential: FAIL — EK cert public key is not ECDSA")
+	}
+	certPubDER, err := marshalPKIX(certPub)
+	if err != nil {
+		fatalf("attest make-credential: EK cert pub to PKIX: %v", err)
+	}
+	if !bytes.Equal(certPubDER, ekPubDER) {
+		fatalf("attest make-credential: FAIL — EK cert public key != the EK pub being challenged (cert vouches for a different EK)")
+	}
+}
+
+// tpmtECCToPKIX extracts the ECC point from a TPMT_PUBLIC and returns its PKIX (SubjectPublicKeyInfo)
+// DER — the same encoding as the ADR-0019 AK pin.
+func tpmtECCToPKIX(pub *tpm2.TPMTPublic) ([]byte, error) {
+	ecc, err := pub.Unique.ECC()
+	if err != nil {
+		return nil, err
+	}
+	pk := &ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     new(big.Int).SetBytes(ecc.X.Buffer),
+		Y:     new(big.Int).SetBytes(ecc.Y.Buffer),
+	}
+	return marshalPKIX(pk)
+}
+
+// derFromEKPub returns the EK pub's PKIX DER for the cert-pub == EK-pub binding (bare-metal path).
+func derFromEKPub(pub *tpm2.TPMTPublic) []byte {
+	der, err := tpmtECCToPKIX(pub)
+	if err != nil {
+		return nil // a non-ECC EK never matches an ECDSA cert pub -> validateEKCertChain fails closed
+	}
+	return der
+}
+
 // resolveAKPin loads the operator-supplied expected AK pub used to PIN the box identity: a PKIX DER
 // hex string, or @path to a file holding that hex (mirroring verify-audit's pubkey discipline). It
 // fails closed — an absent / garbled / non-ECDSA pin is a verify FAILURE, never a silent skip.
@@ -512,7 +923,8 @@ func cmdAttestAKPub(envPath string) {
 
 func cmdAttest(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <envelope.json> | verify <envelope.json> <expected-digest-hex> <nonce-hex> <pinned-ak-pub-hex|@file>")
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <env.json> | verify <env.json> <D-hex> <nonce-hex> <pin-hex|@file>")
+		fmt.Fprintln(os.Stderr, "       EK-rooting (ADR-0020): ek | activate <challenge.json> | make-credential <request.json> <secret-out> [ek-ca-pem|@file] | enroll-verify <response.json> <secret-file> <request.json> <out-pin>")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -542,6 +954,53 @@ func cmdAttest(args []string) {
 			os.Exit(2)
 		}
 		cmdAttestAKPub(args[1])
+	case "ek":
+		// on-box: ask the collector (TCB) for the EK enrollment request (EK pub + cert + AK pub/Name).
+		ok, resp := controlRPC("ATTEST-EK")
+		if !ok {
+			fatalf("attest ek: %s", resp)
+		}
+		fmt.Println(strings.TrimPrefix(resp, "OK "))
+	case "activate":
+		// on-box: feed the verifier's challenge to the collector (TCB) to ActivateCredential.
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest activate <challenge.json>")
+			os.Exit(2)
+		}
+		craw, err := os.ReadFile(args[1])
+		if err != nil {
+			fatalf("attest activate: read challenge: %v", err)
+		}
+		var chal activationChallenge
+		if err := json.Unmarshal(craw, &chal); err != nil {
+			fatalf("attest activate: parse challenge: %v", err)
+		}
+		if chal.CredBlob == "" || chal.EncSecret == "" {
+			fatalf("attest activate: challenge missing cred_blob/enc_secret")
+		}
+		ok, resp := controlRPC("ATTEST-ACTIVATE " + chal.CredBlob + " " + chal.EncSecret)
+		if !ok {
+			fatalf("attest activate: %s", resp)
+		}
+		fmt.Println(strings.TrimPrefix(resp, "OK "))
+	case "make-credential":
+		// OFF-BOX, no TPM: MakeCredential a fresh secret bound to the box's EK + AK Name.
+		if len(args) != 3 && len(args) != 4 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest make-credential <request.json> <secret-out-file> [ek-ca-pem|@file]")
+			os.Exit(2)
+		}
+		ekCA := ""
+		if len(args) == 4 {
+			ekCA = args[3]
+		}
+		cmdAttestMakeCredential(args[1], args[2], ekCA)
+	case "enroll-verify":
+		// OFF-BOX, no TPM: secret equality -> write the EK-rooted pin.
+		if len(args) != 5 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest enroll-verify <response.json> <secret-file> <request.json> <out-pin-file>")
+			os.Exit(2)
+		}
+		cmdAttestEnrollVerify(args[1], args[2], args[3], args[4])
 	case "verify":
 		// OFF-BOX: no TPM, no maps — runs anywhere (a relying party's machine). The PINNED AK binds
 		// the proof to THE expected box; without it any genuine TPM could forge a PASS.
@@ -592,6 +1051,39 @@ func ctlAttestQuote(reply func(string), cgPath string, f []string) {
 	reply("OK " + env)
 }
 
+// ctlAttestEK / ctlAttestActivate run the EK-cert credential-activation TPM ops IN THE COLLECTOR
+// (TCB), operator-gated like ctlAttestQuote (handleControlConn already requires uid==0; an AGENT
+// cgroup is rejected — a jailed lineage must never drive enrollment).
+func ctlAttestEK(reply func(string), cgPath string) {
+	if isAgentCgroup(cgPath) {
+		reply("ERR not-operator")
+		return
+	}
+	req, err := doAttestEK()
+	if err != nil {
+		reply("ERR " + err.Error())
+		return
+	}
+	reply("OK " + req)
+}
+
+func ctlAttestActivate(reply func(string), cgPath string, f []string) {
+	if isAgentCgroup(cgPath) {
+		reply("ERR not-operator")
+		return
+	}
+	if len(f) != 3 {
+		reply("ERR protocol")
+		return
+	}
+	resp, err := doAttestActivate(f[1], f[2])
+	if err != nil {
+		reply("ERR " + err.Error())
+		return
+	}
+	reply("OK " + resp)
+}
+
 // ---- small helpers (kept local; some shadow stdlib spellings used elsewhere) -------------------
 
 func pcrSelectBitmap(pcr int) []byte {
@@ -613,14 +1105,5 @@ func akPubToDER(ak *tpm2.CreatePrimaryResponse) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	ecc, err := pub.Unique.ECC()
-	if err != nil {
-		return nil, err
-	}
-	pk := &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
-		X:     new(big.Int).SetBytes(ecc.X.Buffer),
-		Y:     new(big.Int).SetBytes(ecc.Y.Buffer),
-	}
-	return marshalPKIX(pk)
+	return tpmtECCToPKIX(pub)
 }
