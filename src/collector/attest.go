@@ -10,11 +10,14 @@
 // all-green produces a DIFFERENT digest than a genuinely-enforcing box, so a relying party can tell
 // them apart cryptographically (bound to its fresh nonce, so an old all-green quote can't be replayed).
 //
-// HONEST LIMITS (the same split ADR-0008 documents for the sealed key): under qemu the AK is trusted
-// OUT-OF-BAND (the swtpm EK cert is self-signed dev PKI; full EK-cert credential-activation binding the
-// AK to a manufacturer cert chain is the bare-metal upgrade); it attests measured RUNTIME state, NOT
-// the firmware boot chain (PCRs 0-9 read 0 under qemu/OVMF); and a live IN-TCB compromise AFTER the
-// extend can quote stale-good values — that remains the BPF-LSM floor's job, not this layer's.
+// HONEST LIMITS (the same split ADR-0008 documents for the sealed key): the verifier PINS the AK
+// out-of-band (TOFU — captured via `attest akpub` on first contact and supplied to verify; binding
+// that pin to the TPM's EK cert via credential-activation is the bare-metal upgrade). D attests the
+// enforce POSTURE (which hooks are armed) + the collector binary + TCB cleanliness, NOT per-agent
+// egress-manifest / one-shot-grant CONTENTS (runtime state written per-agent AFTER this boot extend,
+// so out of this stable snapshot by design). It attests measured RUNTIME state, NOT the firmware boot
+// chain (PCRs 0-9 read 0 under qemu/OVMF); and a live IN-TCB compromise AFTER the extend can quote
+// stale-good values — those remain the BPF-LSM floor's continuous job, not this layer's.
 package main
 
 import (
@@ -126,6 +129,11 @@ func attestDigest() ([32]byte, map[string]string, error) {
 
 	// (2) the enforce_flags snapshot, sorted by hook id — catches E0/E1/E2/E3 flipped from
 	// ENFORCE(1) to observe(0): a box reporting all-green-while-OBSERVING produces a different digest.
+	// This measures the enforce POSTURE (which hooks deny), NOT per-agent policy CONTENTS: the E2
+	// egress_policy manifests and the one-shot grant_once grants are written per-agent at spawn (AFTER
+	// this boot extend) and are runtime/dynamic, so they are out of this stable snapshot by design —
+	// "E2 armed" here means the socket_connect hook DENIES, not that a given agent's manifest is
+	// restrictive (continuous per-agent manifest/grant enforcement is the BPF-LSM floor's job).
 	ef, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
 	if err != nil {
 		return [32]byte{}, nil, fmt.Errorf("open enforce_flags: %w", err)
@@ -364,12 +372,18 @@ func doAttestQuote(nonceHex string) (string, error) {
 	return string(out), nil
 }
 
-// cmdAttestVerify is the OFF-BOX verifier (the same binary run elsewhere, no TPM needed): it checks
-// (a) the quote's magic == TPM_GENERATED_VALUE, (b) the echoed qualifyingData == the fresh nonce
-// (no replay), (c) the ECDSA signature over SHA-256(Quoted) under the pinned AK pub, and (d) the
-// quoted PCR digest == H(0^32 || expected-D). Fail-closed on any mismatch. expectedDHex is the good
+// cmdAttestVerify is the OFF-BOX verifier (the same binary run elsewhere, no TPM needed). It PINS the
+// AK out-of-band — pinnedAK is the expected box's AK pub (PKIX DER hex, or @file), captured on a
+// trusted first contact (TOFU) via `attest akpub` — and REJECTS any envelope whose AK differs, BEFORE
+// trusting it to verify the signature. Without this pin the verifying key would be read straight from
+// the (attacker-controllable) envelope, and ANY genuine TPM (or even a hand-rolled software key over a
+// fabricated TPMS_ATTEST) could forge a PASS for the expected box. It then checks (a) the quote's
+// magic == TPM_GENERATED_VALUE, (b) the echoed qualifyingData == the fresh nonce (no replay), (c) the
+// ECDSA signature over SHA-256(Quoted) under the PINNED AK, (d) the quote covers EXACTLY attestPCR in
+// the SHA-256 bank (so a forger cannot launder the digest through a resettable PCR), and (e) that
+// PCR's digest == H(0^32 || expected-D). Fail-closed on any mismatch. expectedDHex is the good
 // composite digest the verifier computed from known-good TCB values out-of-band.
-func cmdAttestVerify(envPath, expectedDHex, nonceHex string) {
+func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
 	raw, err := os.ReadFile(envPath)
 	if err != nil {
 		fatalf("attest verify: read envelope: %v", err)
@@ -391,6 +405,18 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex string) {
 	}
 	quoted, _ := hex.DecodeString(env.Quoted)
 	akDER, _ := hex.DecodeString(env.AKPubDER)
+
+	// (0) PIN THE AK out-of-band. The envelope's AK is attacker-controllable, so it is trusted ONLY
+	// after it bytewise-matches the operator-supplied expected AK (the per-box identity, captured TOFU
+	// on first contact). A forger with a different TPM/key — or a MITM swapping the whole envelope —
+	// supplies a non-matching AK and is rejected HERE, before the signature is ever checked under it.
+	pinDER, err := resolveAKPin(pinnedAK)
+	if err != nil {
+		fatalf("attest verify: pinned AK: %v", err)
+	}
+	if !bytes.Equal(akDER, pinDER) {
+		fatalf("attest verify: FAIL — envelope AK does not match the pinned AK (forged/untrusted box, or wrong box)")
+	}
 
 	// (a)+(b) parse the TPMS_ATTEST and check magic + nonce.
 	att, err := tpm2.Unmarshal[tpm2.TPMSAttest](quoted)
@@ -414,25 +440,79 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex string) {
 	if !ecdsa.Verify(pub, h[:], r, s) {
 		fatalf("attest verify: FAIL — AK signature invalid")
 	}
-	// (d) the quoted PCR digest == H(0^32 || expected-D) (single extend from a zero PCR bank).
 	qi, err := att.Attested.Quote()
 	if err != nil {
 		fatalf("attest verify: not a quote attestation: %v", err)
 	}
+	// (d) the quote must cover EXACTLY attestPCR in the SHA-256 bank. The quote's pcrDigest is
+	// H(selected PCR VALUES) — the PCR INDEX is NOT in the digested bytes; it lives in pcrSelect. So
+	// without this check a forger (or a root attacker who tampered attestPCR's history) could
+	// TPM2_PCR_Reset a RESETTABLE PCR (16/23), extend the good D into it, and quote THAT — its
+	// pcrDigest would equal the expected one and (e) would pass. Binding the SELECTION to the
+	// extend-only PCR is what makes the non-resettability argument actually hold for the quote we check.
+	sels := qi.PCRSelect.PCRSelections
+	if len(sels) != 1 || sels[0].Hash != tpm2.TPMAlgSHA256 ||
+		!bytes.Equal(sels[0].PCRSelect, pcrSelectBitmap(attestPCR)) {
+		fatalf("attest verify: FAIL — quote does not cover exactly PCR %d (SHA-256); refusing a digest laundered through another/resettable PCR", attestPCR)
+	}
+	if env.PCR != attestPCR {
+		fatalf("attest verify: FAIL — envelope PCR %d != expected PCR %d", env.PCR, attestPCR)
+	}
+	// (e) that PCR's digest == H(0^32 || expected-D) (single extend from a zero bank). With one PCR
+	// selected the quote's pcrDigest is H(PCR-value) where PCR-value == H(0^32 || D); compute the same.
 	want := pcrExtendFromZero(expectedD)
-	gotDigest := qi.PCRDigest.Buffer
-	// the quote's pcrDigest is H(concatenation of selected PCR values); with one PCR selected it is
-	// H(PCR14value) where PCR14value == H(0^32 || D). Compute the same.
 	wantQuoteDigest := sha256.Sum256(want)
-	if !bytes.Equal(gotDigest, wantQuoteDigest[:]) {
+	if !bytes.Equal(qi.PCRDigest.Buffer, wantQuoteDigest[:]) {
 		fatalf("attest verify: FAIL — PCR digest mismatch: the box is NOT in the expected enforcing TCB state")
 	}
-	fmt.Printf("attest verify: OK — genuine TPM quote, fresh nonce, AK sig valid, PCR %d == expected enforcing-TCB state\n", env.PCR)
+	fmt.Printf("attest verify: OK — genuine TPM quote under the PINNED AK, fresh nonce, PCR %d (SHA-256) == expected enforcing-TCB state\n", env.PCR)
+}
+
+// resolveAKPin loads the operator-supplied expected AK pub used to PIN the box identity: a PKIX DER
+// hex string, or @path to a file holding that hex (mirroring verify-audit's pubkey discipline). It
+// fails closed — an absent / garbled / non-ECDSA pin is a verify FAILURE, never a silent skip.
+func resolveAKPin(arg string) ([]byte, error) {
+	s := strings.TrimSpace(arg)
+	if s == "" {
+		return nil, fmt.Errorf("empty pin (pass the expected AK pub hex, or @file)")
+	}
+	if strings.HasPrefix(s, "@") {
+		b, err := os.ReadFile(s[1:])
+		if err != nil {
+			return nil, err
+		}
+		s = strings.TrimSpace(string(b))
+	}
+	der, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("pinned AK must be PKIX DER hex (or @file): %w", err)
+	}
+	if _, err := ecdsaPubFromDER(der); err != nil {
+		return nil, fmt.Errorf("pinned AK is not a valid ECDSA public key: %w", err)
+	}
+	return der, nil
+}
+
+// cmdAttestAKPub prints an envelope's AK pub (PKIX DER hex) — used to capture the per-box pin on a
+// trusted first contact (TOFU): `attest akpub env.json > box-ak.hex`, then pass @box-ak.hex to verify.
+func cmdAttestAKPub(envPath string) {
+	raw, err := os.ReadFile(envPath)
+	if err != nil {
+		fatalf("attest akpub: read envelope: %v", err)
+	}
+	var env attestEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		fatalf("attest akpub: parse envelope: %v", err)
+	}
+	if env.AKPubDER == "" {
+		fatalf("attest akpub: envelope has no ak_pub_der")
+	}
+	fmt.Println(env.AKPubDER)
 }
 
 func cmdAttest(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend|quote <nonce-hex>|verify <envelope.json> <expected-digest-hex>")
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <envelope.json> | verify <envelope.json> <expected-digest-hex> <nonce-hex> <pinned-ak-pub-hex|@file>")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -455,13 +535,21 @@ func cmdAttest(args []string) {
 			fatalf("attest quote: %s", resp)
 		}
 		fmt.Println(strings.TrimPrefix(resp, "OK ")) // the envelope JSON
-	case "verify":
-		// OFF-BOX: no TPM, no maps — runs anywhere (a relying party's machine).
-		if len(args) != 4 {
-			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest verify <envelope.json> <expected-digest-hex> <nonce-hex>")
+	case "akpub":
+		// OFF-BOX: extract the AK pub from an envelope to PIN it (TOFU first contact).
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest akpub <envelope.json>")
 			os.Exit(2)
 		}
-		cmdAttestVerify(args[1], args[2], args[3])
+		cmdAttestAKPub(args[1])
+	case "verify":
+		// OFF-BOX: no TPM, no maps — runs anywhere (a relying party's machine). The PINNED AK binds
+		// the proof to THE expected box; without it any genuine TPM could forge a PASS.
+		if len(args) != 5 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest verify <envelope.json> <expected-digest-hex> <nonce-hex> <pinned-ak-pub-hex|@file>")
+			os.Exit(2)
+		}
+		cmdAttestVerify(args[1], args[2], args[3], args[4])
 	default:
 		fmt.Fprintln(os.Stderr, "unknown attest verb")
 		os.Exit(2)

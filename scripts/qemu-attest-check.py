@@ -8,11 +8,17 @@
 # PROOFS: (1) the hardened image boots E0+E2 armed (the precondition — attestation is meaningful only
 # on an enforcing box) and bulkhead-attest.service ran the boot `attest extend` (routed through the
 # collector, TCB, so its bpf() map reads survive armed-E0); (2) `attest quote <nonce>` returns a
-# genuine TPM quote; (3) `attest verify` PASSES against the measured digest + the fresh nonce;
-# (4) NEGATIVE — verify FAILS CLOSED against a TAMPERED expected digest (a box in a different state
-# than expected cannot pass); (5) NEGATIVE — verify FAILS against a DIFFERENT nonce (no replay).
+# genuine TPM quote; (3) the box AK pub is captured TOFU as the out-of-band PIN (`attest akpub`);
+# (4) `attest verify` against the PINNED AK PASSES (measured digest + fresh nonce + PCR-14 selection);
+# (5) NEGATIVE — verify FAILS CLOSED against a TAMPERED expected digest; (6) NEGATIVE — verify FAILS
+# against a DIFFERENT nonce (no replay); (7) NEGATIVE — verify FAILS against a WRONG/different AK pub
+# (the AK-pinning fix: a forged or other-box envelope is rejected by the pin).
 import pexpect, sys, os, re, secrets
 RUN = "/home/work/ideas/bulkhead/yocto/scripts/run-qemu-tpm.sh"
+# A DIFFERENT, VALID P-256 PKIX-DER pubkey (generated off-box) — the "wrong box" AK for the
+# cross-AK negative: resolveAKPin parses it fine, so verify must reject it on the bytewise PIN
+# mismatch (not a parse error), proving the pin actually binds box identity.
+WRONG_AK = "3059301306072a8648ce3d020106082a8648ce3d03010703420004a31ccc87687be8350847c12667dea49ebb1114a731c0fcc6aa85627cc1926f8e31d6d5a628d6ce19ee92160b87ca831a17a35a50d969ff28957e8b9bcce76841"
 def out(s): sys.stdout.write(s); sys.stdout.flush()
 PS = "BHX_PROMPT> "; results = {}; child = None
 def check(c, l): results[l] = bool(c); out(f"\n[CHECK] {'PASS' if c else 'FAIL'}: {l}\n")
@@ -52,25 +58,40 @@ try:
     check("RC=0" in q and "magic" not in err.lower(),
           "attest quote <nonce> produced a TPM quote envelope (collector did the TPM2_Quote in-process)")
 
-    # POSITIVE verify: genuine quote, fresh nonce, AK sig, PCR == H(0^32 || measured-D).
-    v = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} 2>&1; echo RC=$?")
+    # TOFU: capture the box's AK pub as the PIN (a relying party records this on first contact). The
+    # pin is what binds the proof to THIS box — without it any genuine TPM could forge a PASS.
+    ak = run("bulkhead-collector attest akpub /tmp/env.json > /tmp/box-ak.hex 2>/tmp/ak.err; echo RC=$?")
+    check("RC=0" in ak and "RC=0" in run("test -s /tmp/box-ak.hex; echo RC=$?"),
+          "attest akpub captured the box AK pub (the out-of-band TOFU pin)")
+
+    # POSITIVE verify: genuine quote, fresh nonce, PINNED-AK sig, PCR-14 selection, PCR == H(0^32||D).
+    v = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/box-ak.hex 2>&1; echo RC=$?")
     out("\n[verify+]\n" + v + "\n")
     check("attest verify: OK" in v and "RC=0" in v,
-          "attest verify OK — a relying party can PROVE the enforcing-TCB state (genuine quote + fresh nonce + AK sig + PCR match)")
+          "attest verify OK — a relying party can PROVE the enforcing-TCB state (pinned AK + fresh nonce + PCR-14 selection + PCR match)")
 
-    # NEGATIVE 1 — TAMPER: a different expected digest (one byte flipped) must FAIL CLOSED.
+    # NEGATIVE 1 — TAMPER: a different expected digest (one byte flipped), correct pin, must FAIL CLOSED.
     badD = ("0" if D[0] != "0" else "1") + D[1:]
-    v2 = run(f"bulkhead-collector attest verify /tmp/env.json {badD} {nonce} 2>&1; echo RC=$?")
+    v2 = run(f"bulkhead-collector attest verify /tmp/env.json {badD} {nonce} @/tmp/box-ak.hex 2>&1; echo RC=$?")
     out("\n[verify- tamper]\n" + v2 + "\n")
     check("RC=0" not in v2 and "FAIL" in v2,
           "tamper rejected: verify FAILS CLOSED against a different expected digest (a box not in the expected state cannot pass)")
 
-    # NEGATIVE 2 — REPLAY: a different nonce than the quote was bound to must FAIL.
+    # NEGATIVE 2 — REPLAY: a different nonce than the quote was bound to, correct pin, must FAIL.
     other = secrets.token_hex(32)
-    v3 = run(f"bulkhead-collector attest verify /tmp/env.json {D} {other} 2>&1; echo RC=$?")
+    v3 = run(f"bulkhead-collector attest verify /tmp/env.json {D} {other} @/tmp/box-ak.hex 2>&1; echo RC=$?")
     out("\n[verify- replay]\n" + v3 + "\n")
     check("RC=0" not in v3 and "FAIL" in v3,
           "replay rejected: verify FAILS against a nonce the quote was not bound to (no stale-quote replay)")
+
+    # NEGATIVE 3 — WRONG AK (the AK-pinning fix): a genuine quote but pinned to a DIFFERENT box's AK
+    # must FAIL on the pin mismatch. This is the regression test for the forge where any other real
+    # TPM (or a software key) could otherwise pass for the expected box.
+    run(f"printf '%s' {WRONG_AK} > /tmp/wrong-ak.hex")
+    v4 = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/wrong-ak.hex 2>&1; echo RC=$?")
+    out("\n[verify- wrong-ak]\n" + v4 + "\n")
+    check("RC=0" not in v4 and "FAIL" in v4 and "pinned" in v4.lower(),
+          "wrong-AK rejected: verify FAILS on the AK pin (a forged/other-box envelope cannot pass for the expected box)")
 
     run("poweroff", t=20)
 except Exception as e:
