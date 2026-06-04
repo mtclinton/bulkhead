@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# ADR-0021: POSTURE-PREDICATE self-attest GATE — the NON-cryptographic half of load-bearing
+# attestation. Makes a real action (the tailnet join) FAIL-CLOSED unless the box is in the expected
+# ENFORCING posture: E0 (lsm/bpf deny) armed + E2 (socket_connect deny) armed + tcb_cgroups clean,
+# read LIVE from the pinned BPF maps by the COLLECTOR (TCB) — a disarmed or tampered-to-observe or
+# dirty-TCB box cannot bring up the tailnet. SELF-ASSERTED predicate (the TCB collector reads its own
+# pinned maps), NOT a TPM-quoted off-box proof (that is ADR-0019/0020's `attest verify`, a later slice).
+#
+# `attest gate` is a thin CONTROL-SOCKET client: the bpf() reads of enforce_flags/tcb_cgroups would be
+# EPERM'd from this (non-TCB) unit's cgroup under armed-E0, so the COLLECTOR (TCB) evaluates the
+# predicate in-process and replies OK (armed) / ERR (not armed). Exit 0 = armed; non-zero = NOT armed.
+#
+# NEVER-BRICK / Condition: the gate reads the BPF MAPS, NOT the TPM, so it must NOT condition on
+# /dev/tpmrm0 (that would WRONGLY skip the gate on a TPM-less hardened box that IS enforcing). It also
+# must NOT condition on /run/bulkhead/control.sock: the collector is Type=exec, so it goes "active"
+# BEFORE binding the socket (its last startup step) — a socket Condition would race-SKIP the gate on a
+# cold boot and silently FAIL-OPEN. Instead it conditions on the COLLECTOR BINARY (a static rootfs
+# file: present in any bulkhead image, absent in a stripped/recovery image which is then not gated and
+# not bricked), and `attest gate`'s controlRPCGate absorbs the socket-bind boot race via transport-only
+# retry. Polarity is deliberately OPPOSITE ADR-0018 fail-safe (BLOCKS on observe); blocking the tailnet
+# is NOT a brick — only the JOIN is gated; the serial/local console always survives (the break-glass
+# surface: re-arm enforce, or `systemctl mask bulkhead-attest-gate` — see deploy/tailscale-join.md).
+[Unit]
+Description=bulkhead enforcing-posture attestation gate (load-bearing self-attest)
+Documentation=https://github.com/mtclinton/bulkhead
+# Topology guard (NOT a TPM guard, NOT the racy socket): gate any image that ships the collector.
+ConditionPathExists=/usr/bin/bulkhead-collector
+# Evaluate the ARMED posture, not the pre-arm observe state: order AFTER both enforce arms.
+After=bulkhead-collector.service bulkhead-enforce.service bulkhead-enforce-egress.service
+Requires=bulkhead-collector.service
+# Re-evaluate against the fresh maps after a collector restart (RemoveAll-reset + re-arm). PartOf
+# makes a collector restart restart this oneshot, so a stale "active" gate can't outlive a re-arm.
+PartOf=bulkhead-collector.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Exit 0 iff the collector (TCB) confirms E0+E2 armed AND tcb_cgroups clean, read live from the maps.
+ExecStart=/usr/bin/bulkhead-collector attest gate
+
+[Install]
+WantedBy=multi-user.target

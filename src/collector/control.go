@@ -157,6 +157,8 @@ func handleControlConn(conn net.Conn) {
 		ctlAttestEK(reply, cgPath)
 	case "ATTEST-ACTIVATE":
 		ctlAttestActivate(reply, cgPath, f)
+	case "ATTEST-GATE":
+		ctlAttestGate(reply, cgPath)
 	default:
 		reply("ERR protocol")
 	}
@@ -415,6 +417,28 @@ func controlRPCRetry(line string) (bool, string) {
 		ok, resp := controlRPC(line)
 		if ok {
 			return true, resp
+		}
+		if time.Now().After(deadline) {
+			return false, resp
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// controlRPCGate is for the posture GATE (ADR-0021): like controlRPCRetry it tolerates the boot race
+// (the collector binds the socket as its LAST startup step), but it retries ONLY on a TRANSPORT
+// failure (a "control dial/send/read" prefix) — a SERVER reply ("ERR not-armed ...") is returned
+// IMMEDIATELY, so a legitimately-disarmed box fail-closes FAST instead of hanging the 30s boot-race
+// window before reporting not-armed.
+func controlRPCGate(line string) (bool, string) {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ok, resp := controlRPC(line)
+		if ok {
+			return true, resp
+		}
+		if !strings.HasPrefix(resp, "control ") { // a server reply (ERR ...), not a transport failure
+			return false, resp
 		}
 		if time.Now().After(deadline) {
 			return false, resp

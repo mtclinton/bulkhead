@@ -45,3 +45,40 @@ After the node joins, detach the volume — `tailscaled` keeps its state in
 skipped and the router stays on loopback.
 
 > Rotate any key that has been exposed (e.g. pasted into a chat or log).
+
+## Posture gate (ADR-0021) — the join is load-bearing on enforcement
+
+`tailscale-up.service` `Requires=bulkhead-attest-gate.service` and re-checks in an
+`ExecStartPre`, so the node **joins the tailnet only when the box is in the
+expected enforcing posture**: E0 (`lsm/bpf` deny) armed **and** E2
+(`socket_connect` deny) armed **and** `tcb_cgroups` clean, read live from the
+pinned BPF maps by the collector (TCB). A disarmed, failed-to-arm, or
+TCB-strangered box **cannot bring up the tailnet**. This is a self-asserted
+posture predicate (a tampered collector defeats it), **not** a TPM-quoted
+off-box proof — that is the follow-up that consults `attest verify` against an
+EK-rooted quote.
+
+Polarity is deliberately the opposite of ADR-0018's fail-safe: the gate **blocks**
+on observe. Blocking the tailnet is **not a brick** — only the *join* is gated;
+the serial/local console, local login, and `tailscaled` itself always survive.
+
+**Break-glass** (recover tailnet access on a deliberately-disarmed box, from the
+console):
+
+1. **Re-arm (intended in-band recovery):**
+   ```sh
+   systemctl start bulkhead-enforce-egress.service bulkhead-enforce.service
+   systemctl restart bulkhead-attest-gate.service   # re-passes once armed
+   systemctl start tailscale-up.service             # rejoins
+   ```
+2. **Mask (deliberate, persistent observe-mode soak/debug box):** `systemctl mask
+   bulkhead-attest-gate.service` makes the `Requires=` vacuously satisfied — but
+   you must **also** neutralize the `ExecStartPre` re-check (a `tailscale-up.service`
+   drop-in that clears `ExecStartPre=`, or simply keep enforce armed). This is a
+   conscious posture **downgrade** that removes the load-bearing guarantee;
+   reversible with `systemctl unmask`, and auditable via `systemctl is-enabled`.
+3. **Console backstop:** console root already has authority equal to `systemctl
+   stop bulkhead-enforce`, so no kernel-cmdline/env bypass is added — recover via
+   (1) or (2). Sharp edge: an operator who soft-disarms a **remote** box over the
+   tailnet keeps the *current* session but will **not** rejoin after a reboot —
+   re-arm before rebooting, or pre-stage the mask.

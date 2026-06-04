@@ -21,6 +21,11 @@
 # activate fails), N2 wrong-AK-Name (loaded AK's Name != wrapped -> RC_INTEGRITY), N3 forged request
 # (verifier rejects claimed ak_name != recomputed Name). Honest seam: swtpm EK cert is self-signed dev
 # PKI, so this proves the credential-activation MECHANISM + EK-binding, not silicon-genuineness.
+#
+# ADR-0021 (posture self-attest GATE — load-bearing): the gate unit is active from cold boot + `attest
+# gate` returns OK while E0+E2 armed + tcb_clean; tailscale-up Requires= the gate; NEGATIVE: soft-disarm
+# -> gate fails closed fast -> the gate unit fails -> a Requires=-the-gate unit is refused; then re-arm
+# restores a clean box. Makes a real action (the tailnet join) fail-closed on the live enforcing posture.
 import pexpect, sys, os, re, secrets
 RUN = "/home/work/ideas/bulkhead/yocto/scripts/run-qemu-tpm.sh"
 # A DIFFERENT, VALID P-256 PKIX-DER pubkey (generated off-box) — the "wrong box" AK for the
@@ -162,6 +167,54 @@ try:
     out("\n[N3 forged-request make-credential]\n" + n3 + "\n")
     check("RC=0" not in n3 and "ak_name" in n3.lower(),
           "forged-request rejected: make-credential FAILS when claimed ak_name != recomputed Name of ak_pub_tpmt (verifier never trusts the claimed Name)")
+
+    # ===== ADR-0021: posture self-attest GATE — make attestation LOAD-BEARING =====
+    # POSITIVE: the gate unit RAN on cold boot (not Condition-skipped by the socket-bind race -> proves
+    # the binary-Condition + controlRPCGate retry choice) AND passed -> the exactly-{E0,E2} predicate
+    # does NOT self-brick a healthy hardened boot.
+    check(is_active("bulkhead-attest-gate.service"),
+          "posture gate active from cold boot (the {E0,E2}+tcb_clean predicate does not self-brick a healthy armed boot)")
+    g = run("bulkhead-collector attest gate 2>&1; echo RC=$?")
+    out("\n[gate+]\n" + g + "\n")
+    check("RC=0" in g and "OK" in g and "e0=1" in g and "e2=1" in g and "tcb_clean=true" in g,
+          "attest gate OK while armed (the collector TCB read E0=1 E2=1 tcb_clean live from the pinned maps)")
+
+    # LOAD-BEARING WIRING (static): the tailnet join HARD-depends (Requires=) on the gate. The harness
+    # has no /mnt/tsauth/authkey so tailscale-up itself is Condition-skipped, hence we assert the
+    # dependency edge + the gate's own pass/fail rather than an actual join.
+    req = run("systemctl show tailscale-up.service -p Requires -p After 2>&1")
+    out("\n[tailscale-up deps]\n" + req + "\n")
+    check("bulkhead-attest-gate.service" in req,
+          "tailscale-up Requires=+After= the gate (the tailnet join is mechanically coupled to live enforcement state)")
+
+    # NEGATIVE: soft-disarm E0 (the proven routed lever) -> the gate FAILS CLOSED FAST (no 30s hang).
+    run("systemctl stop bulkhead-enforce.service 2>&1; echo done", t=30)
+    run("sleep 1 2>/dev/null; true")
+    g2 = run("bulkhead-collector attest gate 2>&1; echo RC=$?")
+    out("\n[gate- disarmed]\n" + g2 + "\n")
+    check("RC=0" not in g2 and "not-armed" in g2 and "e0=0" in g2,
+          "disarmed: attest gate FAILS CLOSED fast (e0=0 -> not-armed, immediate server ERR, no boot-race hang)")
+    # the gate unit itself fails when re-evaluated disarmed -> any Requires= dependent is refused.
+    run("systemctl restart bulkhead-attest-gate.service 2>&1; echo done", t=30)
+    check(not is_active("bulkhead-attest-gate.service"),
+          "gate unit FAILS (inactive) when disarmed -> its Requires= dependents (tailscale-up) are refused")
+    # DIRECT dynamic proof (if systemd-run is present): a transient unit that Requires= the gate cannot
+    # start while the box is disarmed.
+    if "RC=0" in run("command -v systemd-run >/dev/null 2>&1; echo RC=$?"):
+        tr = run("systemd-run --wait --quiet --unit=bh-gate-probe --property=Requires=bulkhead-attest-gate.service --property=After=bulkhead-attest-gate.service /bin/true 2>&1; echo RC=$?")
+        out("\n[gated transient]\n" + tr + "\n")
+        run("systemctl reset-failed bh-gate-probe.service 2>/dev/null; true")
+        check("RC=0" not in tr,
+              "a unit that Requires= the gate is REFUSED to start while disarmed (the load-bearing block, demonstrated directly)")
+
+    # RE-ARM -> leave a CLEAN, gate-passing box (graceful poweroff; the break-glass re-arm path works).
+    run("systemctl start bulkhead-enforce-egress.service bulkhead-enforce.service 2>&1; echo done", t=30)
+    run("sleep 1 2>/dev/null; true")
+    g3 = run("bulkhead-collector attest gate 2>&1; echo RC=$?")
+    out("\n[gate+ re-armed]\n" + g3 + "\n")
+    run("systemctl restart bulkhead-attest-gate.service 2>&1; echo done", t=30)
+    check("RC=0" in g3 and "e0=1" in g3 and is_active("bulkhead-attest-gate.service"),
+          "re-arm (break-glass) restored: gate passes again + unit active (clean armed box for poweroff)")
 
     run("poweroff", t=20)
 except Exception as e:

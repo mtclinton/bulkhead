@@ -266,6 +266,41 @@ func tcbMembershipState() (int, bool, error) {
 	return len(live), clean, nil
 }
 
+// ---- posture gate (ADR-0021): make attestation LOAD-BEARING ------------------------------------
+
+// gatePosture reports whether the box is in the expected ENFORCING posture: E0 (bpf) armed AND E2
+// (socket_connect) armed AND tcb_cgroups clean — read LIVE from the SAME pinned maps attestDigest
+// reads (ONE source of truth, no new map-read code). Miss => 0 => observe (mirrors attestDigest), so
+// an empty / RemoveAll-reset enforce_flags reads as NOT armed and FAILS CLOSED; a map-OPEN error is
+// returned (=> the CLI exits non-zero => fail-closed), never silently "assume armed". It requires
+// EXACTLY the ADR-0018 default-armed set {E0,E2}: requiring E1/E3 (never armed by default) would fail
+// every healthy hardened boot, and requiring less would let an E2-dropped-to-observe box (egress floor
+// down) still pass. A stranger in tcb_cgroups is an E0-EXEMPT escape hatch, so "armed but dirty TCB"
+// must NOT pass. This is a SELF-ASSERTED on-box predicate (a tampered collector defeats it), NOT a
+// TPM-quoted off-box proof — the EK-rooted-quote self-verify is the explicit follow-up.
+func gatePosture() (bool, string, error) {
+	ef, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
+	if err != nil {
+		return false, "", fmt.Errorf("open enforce_flags: %w", err)
+	}
+	defer ef.Close()
+	armed := func(h uint32) bool { var v uint32; _ = ef.Lookup(h, &v); return v == 1 } // miss => 0 => observe
+	e0, e2 := armed(hookBPF), armed(hookConnect)
+	count, clean, err := tcbMembershipState()
+	if err != nil {
+		return false, "", err
+	}
+	detail := fmt.Sprintf("e0=%d e2=%d tcb_clean=%t count=%d", b2i(e0), b2i(e2), clean, count)
+	return e0 && e2 && clean, detail, nil
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // ---- TPM operations (in-process go-tpm; proven against the harness swtpm) ----------------------
 
 // attestAK creates the deterministic, TPM-restricted ECDSA-P256 Attestation Key under the Owner
@@ -940,6 +975,7 @@ func cmdAttest(args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <env.json> | verify <env.json> <D-hex> <nonce-hex> <pin-hex|@file>")
 		fmt.Fprintln(os.Stderr, "       EK-rooting (ADR-0020): ek | activate <challenge.json> | make-credential <request.json> <round-out> [ek-ca-pem|@file] | enroll-verify <response.json> <round-state> <out-pin>")
+		fmt.Fprintln(os.Stderr, "       posture gate (ADR-0021): gate  (exit 0 = E0+E2 armed + tcb_clean; non-zero = fail-closed)")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -969,6 +1005,16 @@ func cmdAttest(args []string) {
 			os.Exit(2)
 		}
 		cmdAttestAKPub(args[1])
+	case "gate":
+		// on-box: ask the collector (TCB) whether the box is in the expected enforcing posture. The
+		// enforce_flags/tcb_cgroups reads EPERM from this non-TCB CLI cgroup under armed-E0, so they run
+		// in the collector. controlRPCGate fail-closes FAST on a server ERR (not-armed), retrying only
+		// the boot race. Exit non-zero (fatalf) on not-armed => the gate oneshot fails => fail-closed.
+		ok, resp := controlRPCGate("ATTEST-GATE")
+		if !ok {
+			fatalf("attest gate: %s", resp)
+		}
+		fmt.Println(resp)
 	case "ek":
 		// on-box: ask the collector (TCB) for the EK enrollment request (EK pub + cert + AK pub/Name).
 		ok, resp := controlRPC("ATTEST-EK")
@@ -1048,6 +1094,26 @@ func ctlAttestExtend(reply func(string), cgPath string) {
 		return
 	}
 	reply("OK " + d)
+}
+
+// ctlAttestGate runs the posture predicate IN THE COLLECTOR (TCB) so its enforce_flags/tcb_cgroups
+// bpf() reads survive armed-E0 — a non-TCB caller would EPERM, which is exactly what gives the gate
+// teeth (the read itself is privileged/uncircumventable). Operator-only, like ctlAttestExtend.
+func ctlAttestGate(reply func(string), cgPath string) {
+	if isAgentCgroup(cgPath) {
+		reply("ERR not-operator")
+		return
+	}
+	armed, detail, err := gatePosture()
+	if err != nil {
+		reply("ERR " + err.Error())
+		return
+	}
+	if !armed {
+		reply("ERR not-armed " + detail)
+		return
+	}
+	reply("OK " + detail)
 }
 
 func ctlAttestQuote(reply func(string), cgPath string, f []string) {
