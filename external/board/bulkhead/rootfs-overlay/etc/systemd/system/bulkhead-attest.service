@@ -15,7 +15,10 @@ ConditionPathExists=/dev/tpmrm0
 # POST-ARM: measure the ARMED state, not the pre-arm observe state.
 After=bulkhead-collector.service bulkhead-enforce.service bulkhead-enforce-egress.service
 Requires=bulkhead-collector.service
-# Re-measure against the fresh map after a collector restart (which RemoveAll-resets + re-arms).
+# PartOf restarts this oneshot on a collector restart, but `attest extend` is IDEMPOTENT (ADR-0023
+# review fix): PCR 14 is extend-only and a re-extend would corrupt it, so the re-run reads the PCR and
+# SKIPS — the PCR is a fixed boot snapshot, it cannot be re-measured without a reboot. (The crypto
+# self-check gate re-quotes that immutable PCR on a restart; the boot extend itself is once-per-boot.)
 PartOf=bulkhead-collector.service
 
 [Service]

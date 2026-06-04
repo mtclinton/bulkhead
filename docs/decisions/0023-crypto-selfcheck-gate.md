@@ -30,10 +30,13 @@ This ADR ships that follow-up: a SECOND gate that depends on a TPM-SIGNED proof,
    trusted IDENTITY (a tampered collector would pin its forged AK and self-pass). So:
    - **Pre-provisioned EK-rooted pin** (`/data/bulkhead/attest-ak.pin`, written by a ONE-TIME OFF-BOX
      ADR-0020 enroll): when present, the quote's AK must bytewise-match it — REAL this-TPM identity.
-   - **Structural fallback** (no pin file): verify against the quote's OWN AK. This still adds
-     genuine-TPM (magic) + freshness (our own nonce) + sig-consistency + boot-PCR == expected-D over
-     the map read, but makes NO identity assertion — it does not treat the self-captured AK as "the
-     trusted box". Honest by construction; this is the shipped default under qemu (no `/data` pin).
+   - **Structural fallback** (no pin file): verify against the quote's OWN AK — which is attacker-
+     suppliable, so it does NOT authenticate the TPM and makes NO identity assertion (a tampered
+     collector forges the whole envelope in software and passes — exactly why the OFF-BOX verify
+     requires an out-of-band pin). ASSUMING an honest collector it adds freshness (our own nonce) +
+     the immutable-boot-PCR == expected-D over the map read; against a tampered collector it is
+     defeated as easily as the map read. Honest by construction (the detail string reports
+     `identity=structural-fallback`); this is the shipped default under qemu (no `/data` pin).
 
 3. **A SECOND unit, AUGMENT not REPLACE** (`bulkhead-attest-selfcheck-gate.service`). A crypto gate
    needs a TPM, so it `ConditionPathExists=/dev/tpmrm0` — on a legitimately TPM-LESS but enforcing box
@@ -45,19 +48,28 @@ This ADR ships that follow-up: a SECOND gate that depends on a TPM-SIGNED proof,
 
 ## What it proves — and explicitly does NOT
 
-PCR 14 holds the BOOT `attest extend` of D (one-way, extend-only). A pass proves the genuine TPM signed
-a FRESH quote whose PCR == H(0^32 || expected-default-armed-D) — the box BOOTED in the expected
-default-armed posture, the quote is genuine + fresh + covers exactly PCR 14, not replayed. It CATCHES a
-never-armed box whose tampered collector merely fakes the live map (the boot-extended PCR would differ,
-and the genuine TPM cannot be made to sign a matching pcrDigest), and software-forged / replayed quotes.
+PCR 14 holds the BOOT `attest extend` of D (one-way, extend-only) and is IMMUTABLE after boot. A pass
+proves a FRESH (nonce), exactly-PCR-14 quote whose PCR == H(0^32 || expected-default-armed-D) — the box
+BOOTED in the expected default-armed posture. Because the boot PCR cannot change, this CATCHES a
+NEVER-ARMED boot AND a runtime MAP-FLIP (a box that booted observe and later flips the live maps to
+fake-armed: the ADR-0021 map read passes, but the immutable boot PCR does not) — NEITHER of which the
+map read catches.
 
-It does NOT catch a runtime in-TCB compromise AFTER the boot extend (the PCR is a boot snapshot), and
-does NOT catch a BINARY SWAP — `expectedDefaultArmedD` hashes the box's OWN `/proc/self/exe`, so a
-swapped collector derives D from the swapped binary and self-passes. This is a SAME-BOX self-check,
-strictly WEAKER than the OFF-BOX relying-party verify that already ships (`scripts/qemu-attest-check.py`
-runs the full `attest verify` from a separate machine). Framed honestly: the box cryptographically
-proves its quote is genuine + fresh + matches its own boot-extended, self-derived D — NOT that it is
-unmodified. The pre-provisioned EK-rooted pin adds this-TPM identity; the structural fallback does not.
+**Strength depends on the pin.** WITH the pre-provisioned EK-rooted pin the quote's AK is matched to a
+KNOWN TPM key, so the quote is AUTHENTICATED as genuine-TPM and a SOFTWARE-FORGED quote is rejected. In
+the STRUCTURAL FALLBACK (no pin — the shipped default under qemu) the verifying AK is the quote's own,
+which is attacker-suppliable: a TAMPERED collector forges the whole envelope in software (sets magic,
+self-signs, `PCRDigest = H(H(0||expD))`) and passes — so the fallback does NOT authenticate the TPM and
+does NOT catch a tampered collector / software-forged quote. Against a tampered collector it is defeated
+as easily as the map read it augments; its value (over the map read) is freshness + the immutable boot
+PCR, ASSUMING an honest collector.
+
+In all cases it does NOT catch a runtime in-TCB compromise AFTER the boot extend (the PCR is a boot
+snapshot), and does NOT catch a BINARY SWAP — `expectedDefaultArmedD` hashes the box's OWN
+`/proc/self/exe`. This is a SAME-BOX self-check, strictly WEAKER than the OFF-BOX relying-party verify
+that already ships (`scripts/qemu-attest-check.py` runs the full `attest verify` from a separate
+machine, with an out-of-band pin). The pre-provisioned EK-rooted pin adds this-TPM identity + genuine-
+TPM authentication; the structural fallback does neither.
 
 ## Break-glass
 

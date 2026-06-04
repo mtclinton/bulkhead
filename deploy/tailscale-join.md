@@ -59,18 +59,22 @@ the collector **binary** so it gates a TPM-less box too.
 
 **Second gate (ADR-0023, cryptographic):** `tailscale-up.service` ALSO
 `Requires=bulkhead-attest-selfcheck-gate.service`, which has the box produce a
-fresh-nonce **TPM-signed** quote and verify it against the expected default-armed
-D it derives from its own binary — so the join additionally depends on a genuine,
-fresh, boot-PCR-matching proof, not just a map read. This second gate
-`ConditionPathExists=/dev/tpmrm0`, so on a **TPM-less** box it is condition-skipped
-and only the map-read gate applies (augment, never replace — a crypto-only gate
-would fail-open the no-TPM box). It is a **same-box self-check**, strictly weaker
-than the off-box relying-party `attest verify`: it proves the quote is genuine +
-fresh + matches the box's own boot-extended, self-derived D, **not** that the box
-is unmodified (a binary swap self-passes; a runtime post-boot compromise is not
-caught). A pre-provisioned EK-rooted pin at `/data/bulkhead/attest-ak.pin` (from a
-one-time off-box ADR-0020 enroll) adds this-TPM identity; absent it, the
-structural fallback verifies under the quote's own AK without an identity claim.
+fresh-nonce quote of the **immutable boot-extended PCR 14** and verify it against
+the expected default-armed D it derives from its own binary. Because the boot PCR
+cannot change, this catches a **never-armed boot** and a **runtime map-flip** (the
+map read passes but the boot PCR does not) — neither of which the map read catches.
+This second gate `ConditionPathExists=/dev/tpmrm0`, so on a **TPM-less** box it is
+condition-skipped and only the map-read gate applies (augment, never replace — a
+crypto-only gate would fail-open the no-TPM box). It is a **same-box self-check**,
+strictly weaker than the off-box relying-party `attest verify`. Its strength
+depends on the pin: a pre-provisioned EK-rooted pin at `/data/bulkhead/attest-ak.pin`
+(from a one-time off-box ADR-0020 enroll) matches the quote's AK to a known TPM key,
+**authenticating** the quote as genuine-TPM and rejecting a software-forged quote.
+Absent the pin (the shipped default), the **structural fallback** verifies under the
+quote's own (attacker-suppliable) AK: it makes **no** identity claim and does **not**
+authenticate the TPM — a tampered collector forges the envelope in software and
+passes, so against a tampered collector it is defeated as easily as the map read. It
+also does not catch a binary swap or a runtime post-boot compromise.
 
 Polarity is deliberately the opposite of ADR-0018's fail-safe: the gate **blocks**
 on observe. Blocking the tailnet is **not a brick** — only the *join* is gated;

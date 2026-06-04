@@ -263,7 +263,17 @@ try:
     sc = run("bulkhead-collector attest selfcheck 2>&1; echo RC=$?")
     out("\n[selfcheck+ structural-fallback]\n" + sc + "\n")
     check("RC=0" in sc and "OK" in sc and "structural-fallback" in sc and ("PCR 14" in sc or "PCR %d" % 14 in sc),
-          "ADR-0023 POSITIVE: attest selfcheck OK on the armed box (genuine-TPM fresh-nonce quote, PCR 14 == expected default-armed D, self-akpub structural fallback — no pre-provisioned pin on this harness)")
+          "ADR-0023 POSITIVE: attest selfcheck OK on the armed box (fresh-nonce quote verifies, PCR 14 == expected default-armed D, self-akpub structural fallback — no pre-provisioned pin on this harness, so NO identity/genuine-TPM claim)")
+
+    # S4 (review fix): a collector/attest restart must NOT double-extend the immutable PCR 14 (a re-
+    # extend would corrupt it to H(H(0||D)||D) -> selfcheck (e) fails -> the hard Requires= would
+    # permanently brick the rejoin until reboot). `attest extend` is idempotent (PCR_Read + skip), so
+    # re-running it leaves the PCR intact and the self-check still PASSES.
+    run("systemctl restart bulkhead-attest.service 2>&1; echo done", t=30)
+    sci = run("bulkhead-collector attest selfcheck 2>&1; echo RC=$?")
+    out("\n[selfcheck after attest restart (idempotent extend)]\n" + sci + "\n")
+    check("RC=0" in sci and "OK" in sci,
+          "ADR-0023 S4: re-running `attest extend` (unit restart) is IDEMPOTENT -> PCR 14 not double-extended, selfcheck still PASSES (no permanent crypto-gate brick on a collector/attest restart)")
 
     # NEGATIVE (induce a crypto-gate FAIL WITHOUT a non-enforcing boot): drop a WRONG pre-provisioned
     # EK-rooted pin so the box switches off the structural fallback into the IDENTITY path, where the

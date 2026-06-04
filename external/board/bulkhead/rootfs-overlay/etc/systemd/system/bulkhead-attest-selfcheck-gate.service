@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # ADR-0023: CRYPTOGRAPHIC self-check GATE — the on-box upgrade of the load-bearing gate from a live
-# map-READ (ADR-0021) to a TPM-SIGNED self-verify. The box produces a FRESH-NONCE quote under its
-# EK-rooted AK and runs the five `attest verify` checks against the expected DEFAULT-ARMED D, all in
-# the COLLECTOR (TCB). A pass proves the GENUINE TPM signed a FRESH quote whose PCR 14 == H(0^32||D),
-# i.e. the box BOOTED in the expected default-armed posture — catching a NEVER-ARMED box whose tampered
-# collector merely LIES about the live maps (which the ADR-0021 map read cannot, if the TCB lies), plus
-# software-forged / replayed quotes. HONEST LIMITS: a SAME-BOX self-check, strictly WEAKER than the
-# off-box relying-party verify (scripts/qemu-attest-check.py). It does NOT catch a runtime in-TCB
-# compromise AFTER the boot extend (PCR is a boot snapshot), nor a BINARY SWAP (the expected D hashes
-# the box's OWN /proc/self/exe, so a swapped collector self-derives a matching D).
+# map-READ (ADR-0021) to a TPM-SIGNED self-verify. The box produces a FRESH-NONCE quote of the
+# BOOT-extended PCR 14 and runs the five `attest verify` checks against the expected DEFAULT-ARMED D,
+# all in the COLLECTOR (TCB). The boot PCR is IMMUTABLE, so a pass proves the box BOOTED in the
+# expected default-armed posture — catching a NEVER-ARMED boot AND a runtime MAP-FLIP (the map read
+# passes but the immutable boot PCR does not), NEITHER of which the ADR-0021 map read catches.
+# STRENGTH DEPENDS ON THE PIN: with a pre-provisioned EK-rooted pin (/data) the quote's AK is matched
+# to a KNOWN TPM key, authenticating the quote as genuine-TPM and rejecting a SOFTWARE-FORGED quote; in
+# the STRUCTURAL FALLBACK (no pin — the shipped default under qemu) the verifying AK is the quote's
+# OWN, so it does NOT authenticate the TPM and does NOT catch a TAMPERED collector (which forges the
+# whole envelope in software) — assuming an honest collector it adds freshness + the immutable boot
+# PCR over the map read. HONEST LIMITS: a SAME-BOX self-check, strictly WEAKER than the off-box
+# relying-party verify (scripts/qemu-attest-check.py). It does NOT catch a runtime in-TCB compromise
+# AFTER the boot extend (PCR is a boot snapshot), nor a BINARY SWAP (the expected D hashes the box's
+# OWN /proc/self/exe, so a swapped collector self-derives a matching D).
 #
 # AUGMENT, NEVER REPLACE: this is a SECOND gate LAYERED on top of the UNCONDITIONAL ADR-0021 map-read
 # gate (bulkhead-attest-gate.service), NOT a replacement. A crypto gate needs a TPM, so it
