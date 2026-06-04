@@ -164,8 +164,9 @@ type verifierRound struct {
 // collector binary + the expected posture, never from the box's own `attest: extended` journal line.
 // Canonical = domain/version tag, fixed field order, 8-byte BE length prefix on every variable field,
 // hook ids sorted ascending, NEVER json (mirrors the audit canonical() discipline). Any change to
-// these bytes is a digest FORMAT change and MUST bump the domain tag; TestComposeDigestByteIdentity
-// pins the v1 bytes so a silent drift fails CI.
+// these bytes is a digest FORMAT change and MUST bump the domain tag; TestComposeDigestGoldenV1 pins
+// the v1 bytes (and TestComposeDigestFieldsBind / TestComposeDigestAbsentHookIsObserve the semantics)
+// so a silent drift fails CI.
 func composeDigest(exeHashHex string, flagVals map[uint32]uint32, tcbCount int, tcbClean bool) [32]byte {
 	var b bytes.Buffer
 	var u8 [8]byte
