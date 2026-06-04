@@ -37,25 +37,30 @@ off-box verify discipline. Four steps, two control round-trips with the verifier
    assert `tpmtECCToPKIX(ak_pub_tpmt) == ak_pub_der` (the key challenged == the key pinned); (bare
    metal) validate `ek_cert_der` chains to the supplied EK-CA root AND cert-pub == EK-pub; pick a
    fresh 32-byte secret; `ImportEncapsulationKey(EK)` → `CreateCredential` → a challenge bound to the
-   AK Name and encapsulated to the EK. The secret is held verifier-private — it is the per-round
-   replay defense and is NEVER sent to the box.
+   AK Name and encapsulated to the EK. make-credential persists a verifier-PRIVATE round-state — the
+   fresh secret AND the RECOMPUTED PKIX of the key it wrapped to — for enroll-verify; the secret is the
+   per-round replay defense and is NEVER sent to the box.
 
 3. **`attest activate <challenge>`** (on-box; control verb `ATTEST-ACTIVATE`, collector/TCB):
    re-derive EK + AK; satisfy the EK's `AuthPolicy` (a fresh `PolicySession` running
    `TPM2_PolicySecret(RH_ENDORSEMENT)`, rebuilt per `tpmRetry` attempt because the session is
    consumed); `ActivateCredential(AK, EK, challenge)` → the recovered secret.
 
-4. **`attest enroll-verify <response> <secret> <request> <out-pin>`** (OFF-BOX): the recovered secret
-   must bytewise-equal the challenge secret. A match proves the AK is loaded in the genuine TPM that
-   owns the EK — write its PKIX as the now-EK-ROOTED pin. Thereafter `attest verify … @<pin>` is
-   byte-identical to ADR-0019.
+4. **`attest enroll-verify <response> <round-state> <out-pin>`** (OFF-BOX): the recovered secret must
+   bytewise-equal the secret in make-credential's round-state, and the pin written is the bound key
+   from that SAME round-state. A match proves the AK is loaded in the genuine TPM that owns the EK, and
+   the pinned key is provably the AK whose Name that secret was wrapped to — there is no separately-
+   supplied request in the trust path. Thereafter `attest verify … @<pin>` is byte-identical to
+   ADR-0019.
 
 **The AK template is UNCHANGED** (ECDSA-P256 restricted-sign, Owner hierarchy, FIXED template).
 Credential-activation binds by NAME, which is independent of the parent hierarchy, so the EK and AK
 need not share a hierarchy for the same-TPM proof; the enrolled pin is therefore byte-identical to the
 quote AK and the ADR-0019 verify + harness are regression-free. The verifier's discipline — recompute
-the Name, bind the wrap to it, and assert the challenged key == the pinned key — stops a tampered box
-from pinning one key while proving possession of another.
+the Name from `ak_pub_tpmt`, bind the wrap to it, and carry the RECOMPUTED key forward in the
+round-state as the pin — stops a tampered box (or a mismatched-request tool composition) from pinning
+one key while proving possession of another: the key pinned and the Name possession-proven come from
+one make-credential round, with no re-suppliable request in the trust path.
 
 ## Verification
 

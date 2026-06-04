@@ -118,15 +118,17 @@ try:
     check("RC=0" in ek and "RC=0" in same,
           "attest ek: enrollment request produced; the enrolled AK == the quote AK (EK-rooting binds the same identity the quote uses)")
 
-    # POSITIVE 9: off-box MakeCredential (no TPM) — a fresh secret wrapped to the EK + AK Name.
-    mc = run("bulkhead-collector attest make-credential /tmp/ereq.json /tmp/esecret.hex > /tmp/echal.json 2>/tmp/mc.err; echo RC=$?")
-    check("RC=0" in mc and "RC=0" in run("test -s /tmp/echal.json && test -s /tmp/esecret.hex; echo RC=$?"),
+    # POSITIVE 9: off-box MakeCredential (no TPM) — a fresh secret wrapped to the EK + AK Name; the
+    # round-state (secret + the recomputed bound AK key) is the verifier's private state enroll-verify
+    # consumes (no re-suppliable request in the trust path -> can't pin a different key than proven).
+    mc = run("bulkhead-collector attest make-credential /tmp/ereq.json /tmp/eround.json > /tmp/echal.json 2>/tmp/mc.err; echo RC=$?")
+    check("RC=0" in mc and "RC=0" in run("test -s /tmp/echal.json && test -s /tmp/eround.json; echo RC=$?"),
           "attest make-credential: verifier wrapped a fresh secret to the EK + AK Name (CreateCredential, no TPM)")
 
-    # POSITIVE 10: on-box ActivateCredential recovers it -> enroll-verify OK -> writes the EK-rooted pin.
+    # POSITIVE 10: on-box ActivateCredential recovers it -> enroll-verify (round-state only) OK -> pin.
     act = run("bulkhead-collector attest activate /tmp/echal.json > /tmp/eresp.json 2>/tmp/act.err; echo RC=$?")
     out("\n[activate err]\n" + run("cat /tmp/act.err 2>&1") + "\n")
-    ev = run("bulkhead-collector attest enroll-verify /tmp/eresp.json /tmp/esecret.hex /tmp/ereq.json /tmp/ek-pin.hex 2>&1; echo RC=$?")
+    ev = run("bulkhead-collector attest enroll-verify /tmp/eresp.json /tmp/eround.json /tmp/ek-pin.hex 2>&1; echo RC=$?")
     out("\n[enroll-verify]\n" + ev + "\n")
     check("RC=0" in act and "enroll-verify: OK" in ev and "RC=0" in ev,
           "EK-rooting loop closes: ActivateCredential recovered the secret -> AK is EK-rooted (loaded in the genuine TPM that owns the EK)")

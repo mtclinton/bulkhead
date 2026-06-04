@@ -145,6 +145,16 @@ type activationResponse struct {
 	RecoveredSecret string `json:"recovered_secret"`
 }
 
+// verifierRound is make-credential's PRIVATE per-round state (NOT on the wire): the fresh secret it
+// wrapped AND the RECOMPUTED PKIX of the key it bound that secret to (== the AK whose Name the secret
+// was wrapped to). enroll-verify consumes ONLY this — so the pinned key is provably the one the
+// recovered secret proves possession of, with no re-suppliable enrollRequest in the trust path (a
+// separately-supplied request could otherwise pin key A while the secret only proved possession of B).
+type verifierRound struct {
+	Secret   string `json:"secret"`
+	AKPubDER string `json:"ak_pub_der"`
+}
+
 // ---- the measured digest ----------------------------------------------------------------------
 
 // attestDigest computes D = SHA-256(canonical(TCB state)) from the LIVE in-process state, plus a
@@ -756,8 +766,13 @@ func cmdAttestMakeCredential(reqPath, secretOutPath, ekCAArg string) {
 	if err != nil {
 		fatalf("attest make-credential: CreateCredential: %v", err)
 	}
-	if err := os.WriteFile(secretOutPath, []byte(hex.EncodeToString(secret)), 0o600); err != nil {
-		fatalf("attest make-credential: write secret: %v", err)
+	// Persist the verifier's PRIVATE round-state: the secret AND the RECOMPUTED key the secret was
+	// wrapped to (derFromTPMT == tpmtECCToPKIX(ak_pub_tpmt)), NOT the raw request field. enroll-verify
+	// pins this, so the pinned key is provably the AK whose Name was credential-activated.
+	round := verifierRound{Secret: hex.EncodeToString(secret), AKPubDER: hex.EncodeToString(derFromTPMT)}
+	rb, _ := json.Marshal(round)
+	if err := os.WriteFile(secretOutPath, rb, 0o600); err != nil {
+		fatalf("attest make-credential: write round-state: %v", err)
 	}
 	chal := activationChallenge{CredBlob: hex.EncodeToString(idObject), EncSecret: hex.EncodeToString(encSecret)}
 	out, _ := json.Marshal(chal)
@@ -765,9 +780,12 @@ func cmdAttestMakeCredential(reqPath, secretOutPath, ekCAArg string) {
 }
 
 // cmdAttestEnrollVerify is the OFF-BOX final step: the box's recovered secret must bytewise-equal the
-// fresh challenge secret. A match proves the AK is loaded in the genuine TPM that owns the EK — so we
-// write its PKIX pin (from the request) for `attest verify ... @<pin>`. Fail-closed on any mismatch.
-func cmdAttestEnrollVerify(respPath, secretPath, reqPath, outPinPath string) {
+// fresh secret make-credential wrapped THIS round, and the pin written is the key make-credential
+// bound that secret to — BOTH read from the same verifier-private round-state, so the pinned key is
+// provably the AK whose Name the recovered secret proves possession of. There is no separately-
+// supplied enrollRequest in the trust path (which could otherwise pin a different key than was
+// possession-proven). Fail-closed on any mismatch.
+func cmdAttestEnrollVerify(respPath, roundPath, outPinPath string) {
 	rraw, err := os.ReadFile(respPath)
 	if err != nil {
 		fatalf("attest enroll-verify: read response: %v", err)
@@ -780,33 +798,30 @@ func cmdAttestEnrollVerify(respPath, secretPath, reqPath, outPinPath string) {
 	if err != nil {
 		fatalf("attest enroll-verify: recovered_secret hex: %v", err)
 	}
-	sraw, err := os.ReadFile(secretPath)
+	rsraw, err := os.ReadFile(roundPath)
 	if err != nil {
-		fatalf("attest enroll-verify: read secret: %v", err)
+		fatalf("attest enroll-verify: read round-state: %v", err)
 	}
-	secret, err := hex.DecodeString(strings.TrimSpace(string(sraw)))
+	var round verifierRound
+	if err := json.Unmarshal(rsraw, &round); err != nil {
+		fatalf("attest enroll-verify: parse round-state: %v", err)
+	}
+	secret, err := hex.DecodeString(round.Secret)
 	if err != nil {
-		fatalf("attest enroll-verify: secret hex: %v", err)
+		fatalf("attest enroll-verify: round secret hex: %v", err)
 	}
 	if len(secret) < 16 || !bytes.Equal(recovered, secret) {
-		fatalf("attest enroll-verify: FAIL — recovered secret != challenge secret (AK is NOT loaded in the genuine EK's TPM)")
+		fatalf("attest enroll-verify: FAIL — recovered secret != this round's challenge secret (AK is NOT loaded in the genuine EK's TPM)")
 	}
-	rqraw, err := os.ReadFile(reqPath)
-	if err != nil {
-		fatalf("attest enroll-verify: read request: %v", err)
-	}
-	var req enrollRequest
-	if err := json.Unmarshal(rqraw, &req); err != nil {
-		fatalf("attest enroll-verify: parse request: %v", err)
-	}
-	der, err := hex.DecodeString(req.AKPubDER)
-	if err != nil || len(req.AKPubDER) == 0 {
-		fatalf("attest enroll-verify: request has no/invalid ak_pub_der")
+	// pin the key make-credential bound the secret to (recomputed from ak_pub_tpmt that round).
+	der, err := hex.DecodeString(round.AKPubDER)
+	if err != nil || len(round.AKPubDER) == 0 {
+		fatalf("attest enroll-verify: round-state has no/invalid ak_pub_der")
 	}
 	if _, err := ecdsaPubFromDER(der); err != nil {
-		fatalf("attest enroll-verify: ak_pub_der is not a valid ECDSA pub: %v", err)
+		fatalf("attest enroll-verify: round-state ak_pub_der is not a valid ECDSA pub: %v", err)
 	}
-	if err := os.WriteFile(outPinPath, []byte(req.AKPubDER+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(outPinPath, []byte(round.AKPubDER+"\n"), 0o600); err != nil {
 		fatalf("attest enroll-verify: write pin: %v", err)
 	}
 	fmt.Printf("attest enroll-verify: OK — AK is EK-rooted (credential-activation secret recovered); wrote EK-rooted pin to %s\n", outPinPath)
@@ -924,7 +939,7 @@ func cmdAttestAKPub(envPath string) {
 func cmdAttest(args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <env.json> | verify <env.json> <D-hex> <nonce-hex> <pin-hex|@file>")
-		fmt.Fprintln(os.Stderr, "       EK-rooting (ADR-0020): ek | activate <challenge.json> | make-credential <request.json> <secret-out> [ek-ca-pem|@file] | enroll-verify <response.json> <secret-file> <request.json> <out-pin>")
+		fmt.Fprintln(os.Stderr, "       EK-rooting (ADR-0020): ek | activate <challenge.json> | make-credential <request.json> <round-out> [ek-ca-pem|@file] | enroll-verify <response.json> <round-state> <out-pin>")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -984,9 +999,10 @@ func cmdAttest(args []string) {
 		}
 		fmt.Println(strings.TrimPrefix(resp, "OK "))
 	case "make-credential":
-		// OFF-BOX, no TPM: MakeCredential a fresh secret bound to the box's EK + AK Name.
+		// OFF-BOX, no TPM: MakeCredential a fresh secret bound to the box's EK + AK Name; writes a
+		// private round-state {secret, bound-AK-PKIX} to <round-out> for enroll-verify.
 		if len(args) != 3 && len(args) != 4 {
-			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest make-credential <request.json> <secret-out-file> [ek-ca-pem|@file]")
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest make-credential <request.json> <round-out-file> [ek-ca-pem|@file]")
 			os.Exit(2)
 		}
 		ekCA := ""
@@ -995,12 +1011,12 @@ func cmdAttest(args []string) {
 		}
 		cmdAttestMakeCredential(args[1], args[2], ekCA)
 	case "enroll-verify":
-		// OFF-BOX, no TPM: secret equality -> write the EK-rooted pin.
-		if len(args) != 5 {
-			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest enroll-verify <response.json> <secret-file> <request.json> <out-pin-file>")
+		// OFF-BOX, no TPM: secret equality vs make-credential's round-state -> write the EK-rooted pin.
+		if len(args) != 4 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest enroll-verify <response.json> <round-state-file> <out-pin-file>")
 			os.Exit(2)
 		}
-		cmdAttestEnrollVerify(args[1], args[2], args[3], args[4])
+		cmdAttestEnrollVerify(args[1], args[2], args[3])
 	case "verify":
 		// OFF-BOX: no TPM, no maps — runs anywhere (a relying party's machine). The PINNED AK binds
 		// the proof to THE expected box; without it any genuine TPM could forge a PASS.
