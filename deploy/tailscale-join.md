@@ -71,14 +71,23 @@ console):
    systemctl restart bulkhead-attest-gate.service   # re-passes once armed
    systemctl start tailscale-up.service             # rejoins
    ```
-2. **Mask (deliberate, persistent observe-mode soak/debug box):** `systemctl mask
-   bulkhead-attest-gate.service` makes the `Requires=` vacuously satisfied — but
-   you must **also** neutralize the `ExecStartPre` re-check (a `tailscale-up.service`
-   drop-in that clears `ExecStartPre=`, or simply keep enforce armed). This is a
-   conscious posture **downgrade** that removes the load-bearing guarantee;
-   reversible with `systemctl unmask`, and auditable via `systemctl is-enabled`.
+   Re-arm is the **supported recovery** — prefer it.
+2. **Persistent observe-mode downgrade (deliberate soak/debug box):** do **not**
+   `systemctl mask bulkhead-attest-gate.service` — a masked `Requires=` is a hard
+   `Unit bulkhead-attest-gate.service is masked` transaction failure, so masking
+   makes `tailscale-up` *refuse to start* and **bricks the rejoin after a reboot**
+   (a masked dependency is NOT vacuously satisfied — only a *condition-skipped* one
+   is). To run a box in observe mode that still joins, **edit the base
+   `tailscale-up.service`** to drop (or change to `Wants=`) the
+   `Requires=bulkhead-attest-gate.service` line **and** clear the `ExecStartPre=`
+   re-check. A drop-in cannot empty a dependency list, and clearing only the
+   `ExecStartPre` is insufficient (the hard `Requires=` edge still refuses the
+   start). This is a conscious posture **downgrade** that removes the load-bearing
+   guarantee.
 3. **Console backstop:** console root already has authority equal to `systemctl
    stop bulkhead-enforce`, so no kernel-cmdline/env bypass is added — recover via
    (1) or (2). Sharp edge: an operator who soft-disarms a **remote** box over the
-   tailnet keeps the *current* session but will **not** rejoin after a reboot —
-   re-arm before rebooting, or pre-stage the mask.
+   tailnet keeps the *current* session but will **not** rejoin after a reboot (a
+   not-armed gate refuses the join) — **re-arm before rebooting**. Masking the gate
+   does NOT help (it makes the rejoin fail outright); only the base-unit downgrade
+   above, or re-arming, restores rejoin.

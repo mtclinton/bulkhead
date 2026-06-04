@@ -216,6 +216,27 @@ try:
     check("RC=0" in g3 and "e0=1" in g3 and is_active("bulkhead-attest-gate.service"),
           "re-arm (break-glass) restored: gate passes again + unit active (clean armed box for poweroff)")
 
+    # MASK regression (ADR-0021 review fix): a MASKED Requires= is a hard "is masked" failure, NOT a
+    # vacuous-satisfy -> masking the gate REFUSES a Requires= dependent (so masking bricks the rejoin;
+    # re-arm is the supported break-glass, per the corrected deploy/tailscale-join.md). Unmask -> clean.
+    # MASK regression (ADR-0021 review fix): on the SHIPPED systemd (verified 255.21), masking the gate
+    # makes the REAL file-based Requires= dependent FAIL ("A dependency job for tailscale-up.service
+    # failed") -> masking BRICKS the rejoin, so re-arm is the supported break-glass (the corrected
+    # deploy/tailscale-join.md). Stop+mask so the edge hits the mask (not a still-active instance), test
+    # the actual tailscale-up.service (a systemd-run --property=Requires= transient does NOT replicate
+    # file-based Requires= masking on 255), then restore a clean armed box.
+    run("systemctl stop bulkhead-attest-gate.service 2>&1; echo done", t=30)
+    run("systemctl mask bulkhead-attest-gate.service 2>&1; echo done", t=30)
+    tsmk = run("systemctl start tailscale-up.service 2>&1; echo RC=$?")
+    out("\n[masked gate -> tailscale-up start]\n" + tsmk + "\n")
+    run("systemctl reset-failed tailscale-up.service 2>/dev/null; true")
+    run("systemctl unmask bulkhead-attest-gate.service 2>&1; echo done", t=30)
+    run("systemctl start bulkhead-attest-gate.service 2>&1; echo done", t=30)  # restore active + clean
+    check("RC=0" not in tsmk and ("dependency" in tsmk.lower() or "masked" in tsmk.lower()),
+          "masked gate FAILS the real tailscale-up Requires= ('dependency job failed') -> masking BRICKS rejoin; re-arm is the supported break-glass (doc claim corrected + regression-guarded on systemd 255)")
+    check(is_active("bulkhead-attest-gate.service"),
+          "mask probe left the gate active again (clean armed box for poweroff)")
+
     run("poweroff", t=20)
 except Exception as e:
     out(f"\n[harness] EXC {type(e).__name__}: {e}\n")

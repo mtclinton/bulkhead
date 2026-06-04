@@ -55,8 +55,10 @@ the headline operational property today.
 
 **Polarity** is deliberately OPPOSITE ADR-0018's fail-safe: this BLOCKS the tailnet on observe.
 Blocking is NOT a brick — only the JOIN is gated; the serial/local console always survives.
-**Break-glass** (re-arm, or mask + neutralize the ExecStartPre) is documented in
-`deploy/tailscale-join.md`. Continuous runtime teardown (BindsTo/timer killing an established tailnet
+**Break-glass** is documented in `deploy/tailscale-join.md`: the supported recovery is to RE-ARM; a
+deliberate persistent observe-mode downgrade requires EDITING the base unit to drop the hard
+`Requires=` (masking the gate does NOT work — a masked `Requires=` is a hard `is masked` failure that
+refuses the join, not a vacuous satisfaction, so masking would brick the rejoin). Continuous runtime teardown (BindsTo/timer killing an established tailnet
 on a later disarm) is deliberately OUT of scope: this is boot/restart-time fail-closed, not a live
 kill-switch.
 
@@ -86,7 +88,12 @@ to start; then RE-ARM restores a clean gate-passing box for a graceful poweroff.
   intent-vs-tamper lives; the gate does not consult it).
 - **Only the JOIN is gated**, the lowest-blast-radius action: a box already on the tailnet stays on
   until the session drops, and non-tailnet egress remains the BPF-LSM E2 floor's continuous job.
-- **Fail-open if the collector never binds.** A crash-looping collector (binary present, socket never
-  bound) leaves `attest gate` retrying then failing — fail-closed for the gate unit, but the Condition
-  is on the binary so the unit still runs. A genuinely collector-less image Condition-skips (not
-  bricked). Tightening the collector-down window is the cryptographic gate's job.
+- **Fail-CLOSED if the collector never binds.** A crash-looping collector (binary present, socket
+  never bound) leaves `attest gate` retrying then exiting non-zero — the gate oneshot FAILS, so
+  `tailscale-up`'s `Requires=` refuses the join (fail-closed). A genuinely collector-less image
+  Condition-skips the gate (the `Requires=` is then vacuously satisfied), but `tailscale-up`'s own
+  `ExecStartPre=/usr/bin/bulkhead-collector` cannot exec the absent binary, so the join still
+  fail-closes. The `tcb_clean` read's broker dependency is satisfied transitively: the gate is
+  `After=bulkhead-enforce.service`, which `ExecStartPre=ctl wait-broker-tcb` blocks on the broker's
+  TCB registration, so by the time the gate runs the broker cgroup is present (live boots measure
+  `count=3` clean).
