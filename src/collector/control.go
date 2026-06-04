@@ -64,6 +64,14 @@ func isBrokerCaller(cgPath string) bool {
 // egressMu/launchMu/grantMu (a different process), so there is no cross-process lock inversion.
 // It ALSO serializes the control-chain audit appends (recordControl), which auditLog does not
 // internally lock — every write verb holds it across both the map Update and the append.
+//
+// ADR-0024 ATOMICITY INVARIANT: controlMu must be held for the entirety of ANY operation that
+// reads OR writes enforce_flags / tcb_cgroups as a snapshot — the WRITERS (ENFORCE-SET, the
+// self-verbs, TCB-REGISTER-BROKER, gc's deletes) AND the multi-key READERS (attestDigest, gatePosture)
+// — so an attestation digest / posture gate can never observe a TORN, never-real posture interleaved
+// with a concurrent ENFORCE-SET or gc. The collector is the single bpf map writer, so this one
+// process-local mutex is the complete serialization point. The attest readers take it BEFORE tpmMu
+// (never the reverse), so it does not nest with the TPM lock.
 var controlMu sync.Mutex
 
 // controlAL is the collector's CONTROL audit chain (ADR-0017): a separate, domain-tagged,

@@ -230,18 +230,24 @@ func attestDigest() ([32]byte, map[string]string, error) {
 	defer ef.Close()
 	flagVals := map[uint32]uint32{}
 	var flagsClaim bytes.Buffer
+	// controlMu makes the enforce_flags + tcb_cgroups reads ONE ATOMIC snapshot vs the controlMu-holding
+	// map MUTATORS (ENFORCE-SET, TCB-REGISTER-BROKER, the self-verbs, gc — ADR-0024). Without it a
+	// concurrent ENFORCE-SET (operator disarm, or a collector-restart PartOf cascade) could interleave
+	// mid-loop and the digest/quote would encode a TORN, never-real posture. Short-held + process-local;
+	// the callers (doAttestExtend/doAttestQuote) call attestDigest BEFORE tpmMu, so it never nests.
+	controlMu.Lock()
 	for _, id := range sortedHookIDs() {
 		var v uint32
 		_ = ef.Lookup(id, &v) // miss => 0 (observe)
 		flagVals[id] = v
 		fmt.Fprintf(&flagsClaim, "%s=%d ", hookNames[id], v)
 	}
-	claims["enforce_flags"] = strings.TrimSpace(flagsClaim.String())
-
-	count, clean, err := tcbMembershipState()
-	if err != nil {
-		return [32]byte{}, nil, err
+	count, clean, cerr := tcbMembershipState()
+	controlMu.Unlock()
+	if cerr != nil {
+		return [32]byte{}, nil, cerr
 	}
+	claims["enforce_flags"] = strings.TrimSpace(flagsClaim.String())
 	claims["tcb_count"] = fmt.Sprintf("%d", count)
 	claims["tcb_clean"] = fmt.Sprintf("%t", clean)
 
@@ -302,9 +308,13 @@ func gatePosture() (bool, string, error) {
 		return false, "", fmt.Errorf("open enforce_flags: %w", err)
 	}
 	defer ef.Close()
+	// controlMu: one atomic snapshot of enforce_flags + tcb_cgroups vs the map mutators (ADR-0024) —
+	// see attestDigest. No nesting (gatePosture takes no other lock).
 	armed := func(h uint32) bool { var v uint32; _ = ef.Lookup(h, &v); return v == 1 } // miss => 0 => observe
+	controlMu.Lock()
 	e0, e2 := armed(hookBPF), armed(hookConnect)
 	count, clean, err := tcbMembershipState()
+	controlMu.Unlock()
 	if err != nil {
 		return false, "", err
 	}

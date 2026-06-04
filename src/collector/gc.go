@@ -215,22 +215,30 @@ func gcLoop(stop <-chan struct{}) {
 				continue
 			}
 			live := liveAgentCgids()
+			tcb, terr := ebpf.LoadPinnedMap(filepath.Join(pinDir, "tcb_cgroups"), nil)
+			// controlMu (ADR-0024): gc's bpf-map deletes (grant_once/egress_policy/tcb_cgroups) must be
+			// serialized vs the attestDigest/gatePosture reads, so a digest/gate never observes a TORN map
+			// mid-gc. Held ONLY across the (bounded, <=1024-entry) mutations, NOT the cgroup-fs scan above.
+			controlMu.Lock()
 			gd, ed := runGCPass(live, gm, ep, seen)
+			var tp []uint64
+			if terr == nil {
+				tp = reconcileTCB(tcb)
+			}
+			controlMu.Unlock()
 			gm.Close()
 			ep.Close()
+			if terr == nil {
+				tcb.Close()
+			}
 			for _, k := range gd {
 				log.Printf("gc: pruned grant_once cg=%d hook=%s", k.Cgid, hookNames[k.Hook])
 			}
 			for _, cg := range ed {
 				log.Printf("gc: pruned egress_policy cg=%d", cg)
 			}
-			var tp []uint64
-			if tcb, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "tcb_cgroups"), nil); err == nil {
-				tp = reconcileTCB(tcb)
-				tcb.Close()
-				for _, cg := range tp {
-					log.Printf("gc: pruned STALE tcb_cgroup cg=%d (recycle-escape guard)", cg)
-				}
+			for _, cg := range tp {
+				log.Printf("gc: pruned STALE tcb_cgroup cg=%d (recycle-escape guard)", cg)
 			}
 			if len(gd) > 0 || len(ed) > 0 || len(tp) > 0 {
 				log.Printf("gc: pruned %d grant_once + %d egress_policy + %d tcb_cgroups (live agents: %d)", len(gd), len(ed), len(tp), len(live))
