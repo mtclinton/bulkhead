@@ -238,12 +238,17 @@ try:
     # deploy/tailscale-join.md). Stop+mask so the edge hits the mask (not a still-active instance), test
     # the actual tailscale-up.service (a systemd-run --property=Requires= transient does NOT replicate
     # file-based Requires= masking on 255), then restore a clean armed box.
+    # NOTE: `systemctl mask` (persistent) FAILS on the RO rootfs (it can't overwrite the installed
+    # unit at /etc/systemd/system) -> use `mask --runtime` which masks in /run (tmpfs, writable, and
+    # /run OVERRIDES /etc), so the mask actually applies and the masked Requires= fails the join FAST
+    # at transaction build (no ExecStart -> no hang). `timeout 20` is a belt-and-suspenders so a future
+    # wiring change can never hang the harness on a blocking `systemctl start`.
     run("systemctl stop bulkhead-attest-gate.service 2>&1; echo done", t=30)
-    run("systemctl mask bulkhead-attest-gate.service 2>&1; echo done", t=30)
-    tsmk = run("systemctl start tailscale-up.service 2>&1; echo RC=$?")
+    run("systemctl mask --runtime bulkhead-attest-gate.service 2>&1; echo done", t=30)
+    tsmk = run("systemctl start tailscale-up.service 2>&1; echo RC=$?", t=40)
     out("\n[masked gate -> tailscale-up start]\n" + tsmk + "\n")
     run("systemctl reset-failed tailscale-up.service 2>/dev/null; true")
-    run("systemctl unmask bulkhead-attest-gate.service 2>&1; echo done", t=30)
+    run("systemctl unmask --runtime bulkhead-attest-gate.service 2>&1; echo done", t=30)
     run("systemctl start bulkhead-attest-gate.service 2>&1; echo done", t=30)  # restore active + clean
     check("RC=0" not in tsmk and ("dependency" in tsmk.lower() or "masked" in tsmk.lower()),
           "masked gate FAILS the real tailscale-up Requires= ('dependency job failed') -> masking BRICKS rejoin; re-arm is the supported break-glass (doc claim corrected + regression-guarded on systemd 255)")
@@ -302,9 +307,12 @@ try:
           "ADR-0023 WIRING: tailscale-up Requires= BOTH the map-read gate (unconditional) AND the crypto self-check gate (augment, never replace) -> the join is coupled to a TPM-signed proof, layered on the live map read")
     # the crypto gate conditions on the TPM (so a no-TPM box skips it, gated only by the map read); the
     # map-read gate does NOT (so a no-TPM enforcing box is still gated, never bricked).
-    cond_sc = run("systemctl show bulkhead-attest-selfcheck-gate.service -p ConditionResult -p Conditions 2>&1")
-    cond_mr = run("systemctl show bulkhead-attest-gate.service -p Conditions 2>&1")
-    out("\n[selfcheck-gate conditions]\n" + cond_sc + "\n[map-read-gate conditions]\n" + cond_mr + "\n")
+    # systemctl show -p Conditions serializes as "[unprintable]", so read the Condition from the
+    # installed unit files: the crypto gate is conditioned on /dev/tpmrm0 (skips no-TPM), the map-read
+    # gate is NOT (conditioned on the collector binary, so it still gates a no-TPM enforcing box).
+    cond_sc = run("systemctl cat bulkhead-attest-selfcheck-gate.service 2>&1 | grep ConditionPathExists")
+    cond_mr = run("systemctl cat bulkhead-attest-gate.service 2>&1 | grep ConditionPathExists")
+    out("\n[selfcheck-gate Condition]\n" + cond_sc + "\n[map-read-gate Condition]\n" + cond_mr + "\n")
     check("/dev/tpmrm0" in cond_sc and "/dev/tpmrm0" not in cond_mr,
           "ADR-0023 NO-TPM DEGRADE (never-brick): the crypto gate ConditionPathExists=/dev/tpmrm0 (skips on a TPM-less box) while the map-read gate does NOT -> a no-TPM enforcing box is still gated by the map read, not fail-open and not bricked")
 
