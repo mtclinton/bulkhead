@@ -26,6 +26,11 @@
 # gate` returns OK while E0+E2 armed + tcb_clean; tailscale-up Requires= the gate; NEGATIVE: soft-disarm
 # -> gate fails closed fast -> the gate unit fails -> a Requires=-the-gate unit is refused; then re-arm
 # restores a clean box. Makes a real action (the tailnet join) fail-closed on the live enforcing posture.
+#
+# ADR-0022 (reproducible expected-D): the expected digest D is DERIVED OFF-BOX via `attest expected-d
+# <collector-binary>` (composeDigest over the known-good binary + the default-armed posture) and that
+# off-box D drives every verify -- the journal grep is kept only as a cross-check. Breaks the journal-
+# circularity (a tampered collector can no longer self-pass by logging a green D).
 import pexpect, sys, os, re, secrets
 RUN = "/home/work/ideas/bulkhead/yocto/scripts/run-qemu-tpm.sh"
 # A DIFFERENT, VALID P-256 PKIX-DER pubkey (generated off-box) — the "wrong box" AK for the
@@ -62,14 +67,22 @@ try:
     for _ in range(15):
         if not is_active("bulkhead-attest.service"): run("sleep 2 2>/dev/null; true")
         else: break
-    # the COLLECTOR (TCB) does the extend in-process and logs the digest to ITS journal; the attest
-    # unit's own journal just carries the CLI's "OK <digest>". Read D from the collector journal.
+    # ADR-0022: the verifier DERIVES the expected digest D OFF-BOX from the known-good (byte-
+    # reproducible) collector binary + the expected default-armed posture, via `attest expected-d` --
+    # it NO LONGER sources D from the box's own `attest: extended` journal line (that grep is kept ONLY
+    # as a cross-check). /usr/bin/bulkhead-collector == the running collector's /proc/self/exe on the RO
+    # rootfs, so this is the on-box stand-in for a relying party's known-good binary (the host can run
+    # the SAME static binary against the byte-reproduced artifact off-box).
+    dx = run("bulkhead-collector attest expected-d /usr/bin/bulkhead-collector 2>/tmp/xd.err").strip()
+    mx = re.search(r"\b([0-9a-f]{64})\b", dx)
+    Dx = mx.group(1) if mx else ""
     aj = run("journalctl -u bulkhead-collector.service --no-pager 2>&1 | grep -a 'attest: extended' | tail -2")
-    out("\n[attest extend (collector journal)]\n" + aj + "\n")
-    m = re.search(r"TCB digest ([0-9a-f]{64})", aj)
-    D = m.group(1) if m else ""
-    check(is_active("bulkhead-attest.service") and D != "",
-          "bulkhead-attest.service extended the TCB digest into the PCR at boot (post-arm, via the collector)")
+    out("\n[expected-d off-box]\n" + dx + "\n[attest extend (collector journal, CROSS-CHECK only)]\n" + aj + "\n")
+    mj = re.search(r"TCB digest ([0-9a-f]{64})", aj)
+    Dj = mj.group(1) if mj else ""
+    D = Dx  # the VERIFIER uses the OFF-BOX-derived D, not the journal
+    check(is_active("bulkhead-attest.service") and Dx != "" and Dx == Dj,
+          "ADR-0022: expected-D derived OFF-BOX (collector binary + default-armed posture) MATCHES the box's extended digest -> journal-circularity broken (verifier no longer trusts the box's own journal)")
 
     # quote under a FRESH verifier nonce -> envelope written directly to a guest file.
     nonce = secrets.token_hex(32)

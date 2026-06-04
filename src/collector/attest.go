@@ -157,77 +157,94 @@ type verifierRound struct {
 
 // ---- the measured digest ----------------------------------------------------------------------
 
-// attestDigest computes D = SHA-256(canonical(TCB state)) from the LIVE in-process state, plus a
-// human-readable claims map. Canonical mirrors the audit canonical() discipline: a domain/version
-// tag, fixed field order, 8-byte big-endian length prefix on every variable field, sorted map
-// iteration, NEVER json. Each field is justified by the exact tamper it catches.
-func attestDigest() ([32]byte, map[string]string, error) {
+// composeDigest is the PURE canonical serialization shared by the LIVE attestDigest AND the OFF-BOX
+// `attest expected-D` subcommand (ADR-0022) — ONE source of truth, so the box's extended digest and a
+// relying party's independently-computed expected digest are byte-identical. THAT is what breaks the
+// journal-circularity: the verifier derives the expected D from the known-good (byte-reproducible)
+// collector binary + the expected posture, never from the box's own `attest: extended` journal line.
+// Canonical = domain/version tag, fixed field order, 8-byte BE length prefix on every variable field,
+// hook ids sorted ascending, NEVER json (mirrors the audit canonical() discipline). Any change to
+// these bytes is a digest FORMAT change and MUST bump the domain tag; TestComposeDigestByteIdentity
+// pins the v1 bytes so a silent drift fails CI.
+func composeDigest(exeHashHex string, flagVals map[uint32]uint32, tcbCount int, tcbClean bool) [32]byte {
 	var b bytes.Buffer
 	var u8 [8]byte
 	put := func(v uint64) { binary.BigEndian.PutUint64(u8[:], v); b.Write(u8[:]) }
 	putStr := func(s string) { put(uint64(len(s))); b.WriteString(s) }
-	claims := map[string]string{}
 
-	putStr("bulkhead-attest-v1") // domain/version tag — a record of another purpose can never collide
-
-	// (1) the collector binary hash — catches a MODIFIED collector (the core forge: a tampered
-	// collector that flips flags to observe is a DIFFERENT binary => different hash). /proc/self/exe
-	// is the running image; on the read-only rootfs it is the shipped /usr/bin/bulkhead-collector.
-	exe, err := os.ReadFile("/proc/self/exe")
-	if err != nil {
-		return [32]byte{}, nil, fmt.Errorf("read self exe: %w", err)
+	putStr("bulkhead-attest-v1") // (0) domain/version tag — a record of another purpose can never collide
+	putStr(exeHashHex)           // (1) collector binary hash — catches a MODIFIED collector
+	// (2) the enforce_flags snapshot over the canonical hook set (hookNames keys), sorted ascending so
+	// both callers serialize the SAME set/order; absent => 0 (observe), mirroring the live Lookup miss.
+	hooks := sortedHookIDs()
+	put(uint64(len(hooks)))
+	for _, id := range hooks {
+		put(uint64(id))
+		put(uint64(flagVals[id]))
 	}
-	exeSum := sha256.Sum256(exe)
-	putStr(hex.EncodeToString(exeSum[:]))
-	claims["collector_sha256"] = hex.EncodeToString(exeSum[:])
-
-	// (2) the enforce_flags snapshot, sorted by hook id — catches E0/E1/E2/E3 flipped from
-	// ENFORCE(1) to observe(0): a box reporting all-green-while-OBSERVING produces a different digest.
-	// This measures the enforce POSTURE (which hooks deny), NOT per-agent policy CONTENTS: the E2
-	// egress_policy manifests and the one-shot grant_once grants are written per-agent at spawn (AFTER
-	// this boot extend) and are runtime/dynamic, so they are out of this stable snapshot by design —
-	// "E2 armed" here means the socket_connect hook DENIES, not that a given agent's manifest is
-	// restrictive (continuous per-agent manifest/grant enforcement is the BPF-LSM floor's job).
-	ef, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
-	if err != nil {
-		return [32]byte{}, nil, fmt.Errorf("open enforce_flags: %w", err)
+	// (3) the tcb_cgroups membership state (count, clean) — catches a stranger or a missing member.
+	put(uint64(tcbCount))
+	if tcbClean {
+		put(1)
+	} else {
+		put(0)
 	}
-	defer ef.Close()
+	return sha256.Sum256(b.Bytes())
+}
+
+// sortedHookIDs is the canonical hook-id set (hookNames keys) ascending — the single ordering both
+// the digest serialization and the live flag read iterate.
+func sortedHookIDs() []uint32 {
 	hooks := make([]uint32, 0, len(hookNames))
 	for id := range hookNames {
 		hooks = append(hooks, id)
 	}
 	sort.Slice(hooks, func(i, j int) bool { return hooks[i] < hooks[j] })
-	put(uint64(len(hooks)))
+	return hooks
+}
+
+// expectedTCBCount is the size of the genuine TCB set {root, collector, broker} — the count a relying
+// party expects, and what tcbMembershipState measures live on a clean hardened boot.
+const expectedTCBCount = 3
+
+// attestDigest computes D = composeDigest(LIVE in-process state), plus a human-readable claims map.
+// The collector binary hash catches a MODIFIED collector; the enforce_flags snapshot catches a hook
+// flipped to observe (POSTURE, not per-agent policy CONTENTS — egress_policy/grant_once are runtime);
+// the tcb (count, clean) catches a TCB stranger or missing member.
+func attestDigest() ([32]byte, map[string]string, error) {
+	claims := map[string]string{}
+
+	exe, err := os.ReadFile("/proc/self/exe")
+	if err != nil {
+		return [32]byte{}, nil, fmt.Errorf("read self exe: %w", err)
+	}
+	exeSum := sha256.Sum256(exe)
+	exeHex := hex.EncodeToString(exeSum[:])
+	claims["collector_sha256"] = exeHex
+
+	ef, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, "enforce_flags"), nil)
+	if err != nil {
+		return [32]byte{}, nil, fmt.Errorf("open enforce_flags: %w", err)
+	}
+	defer ef.Close()
+	flagVals := map[uint32]uint32{}
 	var flagsClaim bytes.Buffer
-	for _, id := range hooks {
+	for _, id := range sortedHookIDs() {
 		var v uint32
 		_ = ef.Lookup(id, &v) // miss => 0 (observe)
-		put(uint64(id))
-		put(uint64(v))
+		flagVals[id] = v
 		fmt.Fprintf(&flagsClaim, "%s=%d ", hookNames[id], v)
 	}
 	claims["enforce_flags"] = strings.TrimSpace(flagsClaim.String())
 
-	// (3) the tcb_cgroups membership, measured STABLY across boots (the raw cgids are per-boot inodes,
-	// so we measure the COUNT + whether membership is EXACTLY the collector's expected TCB set {root,
-	// collector, broker} with NO stranger). A stranger (an extra E0-exempt cgroup = a privilege escape
-	// hatch) flips cleanness; a missing legit member flips it too. The binary hash (1) anchors trust in
-	// THIS collector code, so the genuine code's own clean/anomalous assessment is trustworthy.
 	count, clean, err := tcbMembershipState()
 	if err != nil {
 		return [32]byte{}, nil, err
 	}
-	put(uint64(count))
-	if clean {
-		put(1)
-	} else {
-		put(0)
-	}
 	claims["tcb_count"] = fmt.Sprintf("%d", count)
 	claims["tcb_clean"] = fmt.Sprintf("%t", clean)
 
-	return sha256.Sum256(b.Bytes()), claims, nil
+	return composeDigest(exeHex, flagVals, count, clean), claims, nil
 }
 
 // tcbMembershipState returns (count, clean): clean iff the live tcb_cgroups map is EXACTLY the
@@ -971,11 +988,31 @@ func cmdAttestAKPub(envPath string) {
 	fmt.Println(env.AKPubDER)
 }
 
+// cmdAttestExpectedD is the OFF-BOX (no TPM, no maps) expected-digest derivation (ADR-0022): a relying
+// party computes the digest D the box SHOULD extend, from the known-good collector binary + the
+// expected ENFORCING posture — the SAME composeDigest the live box uses, so it matches byte-for-byte
+// WITHOUT reading the box's `attest: extended` journal line. The posture is the ADR-0018 default-armed
+// expectation: E0(bpf)+E2(socket_connect) ENFORCE, E1/E3 observe, tcb clean with exactly {root,
+// collector, broker}. (Deliberately NOT "all-armed": E1/E3 are not armed by default, so requiring them
+// would compute a D no healthy box ever extends.) Feed the byte-reproducible STRIPPED rootfs binary,
+// which equals the running collector's /proc/self/exe on the read-only rootfs.
+func cmdAttestExpectedD(binPath string) {
+	exe, err := os.ReadFile(binPath)
+	if err != nil {
+		fatalf("attest expected-d: read collector binary: %v", err)
+	}
+	exeSum := sha256.Sum256(exe)
+	flagVals := map[uint32]uint32{hookBPF: 1, hookConnect: 1} // ptrace/setuid/capset default 0 (observe)
+	d := composeDigest(hex.EncodeToString(exeSum[:]), flagVals, expectedTCBCount, true)
+	fmt.Println(hex.EncodeToString(d[:]))
+}
+
 func cmdAttest(args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <env.json> | verify <env.json> <D-hex> <nonce-hex> <pin-hex|@file>")
 		fmt.Fprintln(os.Stderr, "       EK-rooting (ADR-0020): ek | activate <challenge.json> | make-credential <request.json> <round-out> [ek-ca-pem|@file] | enroll-verify <response.json> <round-state> <out-pin>")
 		fmt.Fprintln(os.Stderr, "       posture gate (ADR-0021): gate  (exit 0 = E0+E2 armed + tcb_clean; non-zero = fail-closed)")
+		fmt.Fprintln(os.Stderr, "       reproducible expected-D (ADR-0022): expected-d <collector-binary>  (off-box D for `verify`, no journal)")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -1015,6 +1052,14 @@ func cmdAttest(args []string) {
 			fatalf("attest gate: %s", resp)
 		}
 		fmt.Println(resp)
+	case "expected-d":
+		// OFF-BOX, no TPM/maps: derive the expected D from a known-good collector binary + the default-
+		// armed posture (ADR-0022) — what a relying party feeds to `attest verify`, NOT the box journal.
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest expected-d <collector-binary>")
+			os.Exit(2)
+		}
+		cmdAttestExpectedD(args[1])
 	case "ek":
 		// on-box: ask the collector (TCB) for the EK enrollment request (EK pub + cert + AK pub/Name).
 		ok, resp := controlRPC("ATTEST-EK")
