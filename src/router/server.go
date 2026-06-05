@@ -21,6 +21,7 @@ type server struct {
 	providers   map[string]Backend // paid 'api' backends, by canonical name
 	defaultName string             // provider for an api request whose model matches no prefix
 	http        *http.Client       // shared no-redirect client (proxyLocal + every backend)
+	audit       *auditLog          // ADR-0027 signed routing-decision chain; nil in unit tests (audit skipped)
 }
 
 func newServer(cfg config, providers map[string]Backend, hc *http.Client) *server {
@@ -88,6 +89,22 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	d := decide(&req, s.cfg.Threshold, s.cfg.DefaultRoute)
 	w.Header().Set("X-Bulkhead-Route", string(d.Route))
+
+	// ADR-0027: record the routing decision in the signed chain BEFORE acting on it. The provider (the
+	// outbound destination for an api route) is selectProvider(model) — deterministic at decide-time, so
+	// it is bound into the SAME record. FAIL-CLOSED: if the append fails we refuse the request rather than
+	// route un-audited (the broker's precedent — accountability is load-bearing, not best-effort).
+	provider := ""
+	if d.Route == RouteAPI {
+		provider = selectProvider(req.Model, s.defaultName)
+	}
+	if s.audit != nil {
+		if err := s.audit.recordRoute(string(d.Route), d.Reason, req.Model, promptLen(&req), provider); err != nil {
+			log.Printf("audit: routing-decision append FAILED: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
 	log.Printf("route=%s reason=%q model=%q promptlen=%d", d.Route, d.Reason, req.Model, promptLen(&req))
 
 	switch d.Route {
@@ -95,8 +112,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// Pick WHICH paid provider serves this api request. selectProvider runs ONLY
 		// here, after decide() already returned RouteAPI — it chooses the vendor, never
 		// the tier, so it cannot turn a short prompt into a paid call.
-		name := selectProvider(req.Model, s.defaultName)
-		p, ok := s.providers[name]
+		p, ok := s.providers[provider]
 		if !ok {
 			writeError(w, http.StatusServiceUnavailable, "api provider unavailable")
 			return

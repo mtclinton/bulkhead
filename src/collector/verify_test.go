@@ -6,11 +6,27 @@ package main
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// canonicalRouterGoldenV1 pins the COLLECTOR's canonical() over the SAME fixed record + "router" domain as
+// the router module's TestCanonicalGoldenV1 (src/router/audit_test.go). The router carries a COPY of
+// canonical(); the collector's verify-audit recomputes it over router records, so the two MUST agree —
+// this golden fails in CI if EITHER module's canonical() drifts (ADR-0027 cross-module drift guard).
+const canonicalRouterGoldenV1 = "835f49b5abe034b3b4252fa8d2a671fb0a43ab3d3c0dfdf2d9df1249fcc36e31"
+
+func TestCanonicalRouterDomainGolden(t *testing.T) {
+	r := auditRecord{Seq: 1, TS: 0, CgroupID: 0, PID: 0, Comm: "router", Hook: "route", Decision: "local", Mode: "reason=x model=m promptlen=5"}
+	prev := make([]byte, sha256.Size)
+	sum := sha256.Sum256(canonical(r, prev, "router"))
+	if hex.EncodeToString(sum[:]) != canonicalRouterGoldenV1 {
+		t.Fatalf("collector canonical() drifted from the router's pinned golden: got %s want %s (cross-module verify would break)", hex.EncodeToString(sum[:]), canonicalRouterGoldenV1)
+	}
+}
 
 // newTestLog opens an auditLog on path with a deterministic key (so the test owns the pub) and
 // a domain, CONTINUING the hash chain from the prior content (F5 cross-boot linkage) just like

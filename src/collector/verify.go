@@ -226,15 +226,18 @@ func cmdVerifyAudit(args []string) {
 }
 
 // chainDomain infers the per-chain domain (F4) the verifier must use from the chain's path.
-// The two on-box chains are the collector provenance (/data/bulkhead/audit) and the broker
-// decision chain (/data/bulkhead/audit-broker); the domain is the VERIFIER's belief about
-// which chain this is, never read from the record (so a transplant fails). Overridable for
-// offline use via BULKHEAD_AUDIT_DOMAIN.
+// The on-box chains are the collector provenance (/data/bulkhead/audit), the broker decision
+// chain (/data/bulkhead/audit-broker), and the router routing-decision chain (ADR-0027,
+// /data/bulkhead/audit-router); the domain is the VERIFIER's belief about which chain this is,
+// never read from the record (so a transplant fails). Overridable for offline use via
+// BULKHEAD_AUDIT_DOMAIN.
 func chainDomain(chain string) string {
 	if d := os.Getenv("BULKHEAD_AUDIT_DOMAIN"); d != "" {
 		return d
 	}
 	switch {
+	case strings.Contains(chain, "audit-router"): // ADR-0027: the router routing-decision chain
+		return "router"
 	case strings.Contains(chain, "audit-broker"):
 		return "broker"
 	case strings.Contains(filepath.Base(chain), "control"): // ADR-0017: the control-write chain

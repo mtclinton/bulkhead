@@ -38,6 +38,20 @@ PROBE = (
     "http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' "
     "-d \"{\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"$LONG\\\"}],\\\"max_tokens\\\":16}\"; "
     "curl -s -m 5 -o /dev/null -w 'source status=%{http_code}\\n' http://127.0.0.1:8080/source; "
+    # ADR-0027: the two chat requests above each wrote a SIGNED routing-decision record. Verify the chain
+    # IN-VM with the collector's verify-audit (resolves the sibling audit-pub.txt; domain=router from the
+    # path), then exercise the ADR-0026 no-rewind verdict on it. Write to /tmp + grep -c to dodge quoting.
+    "RC=/var/lib/bulkhead/audit-router/provenance.jsonl; "
+    "echo \"router-records=$(grep -c . $RC 2>/dev/null || echo 0)\"; "
+    "bulkhead-collector verify-audit $RC >/tmp/va 2>&1; "
+    "echo \"router-verify-ok=$(grep -c 'verify-audit: OK' /tmp/va)\"; "
+    "TIP=$(sed -n 's/.*tip=\\([0-9a-f]*\\).*/\\1/p' /tmp/va); "
+    "bulkhead-collector verify-audit $RC --since=$TIP >/tmp/nr 2>&1; "
+    "echo \"router-norewind=$(grep -c 'no-rewind CLEAN' /tmp/nr)\"; "
+    "bulkhead-collector verify-audit $RC --since=de00000000000000000000000000000000000000000000000000000000000000 >/tmp/rw 2>&1; "
+    "echo \"router-rewind-detect=$(grep -c 'REWOUND/FORKED' /tmp/rw)\"; "
+    "bulkhead-collector verify-audit $RC --expect-tip=$TIP >/tmp/et 2>&1; "
+    "echo \"router-expecttip=$(grep -c 'tip == the quote-bound HEAD' /tmp/et)\"; "
     "echo 'ROUTEREND>>>'; "
     "poweroff\n"
 )
@@ -119,6 +133,12 @@ def main():
         ("long prompt routes api", re.search(r"api route=api", body) is not None),
         ("api route 503 without key", re.search(r"api route=api status=503", body) is not None),
         ("/source redirects (302)", "source status=302" in body),
+        # ADR-0027: the router's signed routing-decision audit chain, verified live by verify-audit.
+        ("ADR-0027: router signed chain has records", re.search(r"router-records=[1-9]", body) is not None),
+        ("ADR-0027: verify-audit OK on the router chain", "router-verify-ok=1" in body),
+        ("ADR-0027: no-rewind CLEAN (--since the prior tip)", "router-norewind=1" in body),
+        ("ADR-0027: rewind/fork detected (--since a bogus head)", "router-rewind-detect=1" in body),
+        ("ADR-0027: --expect-tip ties to the verified tip", "router-expecttip=1" in body),
     ]
     print("\n\n=== bulkhead router verification ===")
     ok = True

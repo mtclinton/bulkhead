@@ -206,9 +206,19 @@ func main() {
 	hc := newNoRedirectClient()
 	providers := buildProviders(cfg, hc)
 
+	// ADR-0027: open the signed routing-decision chain before serving. Fail-closed at startup — a router
+	// that cannot record its decisions must not run un-audited.
+	al, err := openAuditLog("router", "provenance.jsonl")
+	if err != nil {
+		log.Fatalf("audit: open routing chain: %v", err)
+	}
+	defer al.Close()
+	srv := newServer(cfg, providers, hc)
+	srv.audit = al
+
 	hs := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           newServer(cfg, providers, hc).routes(),
+		Handler:           srv.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      150 * time.Second, // must exceed the upstream client timeout
