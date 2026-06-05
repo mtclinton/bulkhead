@@ -149,27 +149,34 @@ func TestQuoteExtraDataDomainSeparated(t *testing.T) {
 	}
 }
 
-// parseExpectedHeads round-trips the colon-joined form `attest heads` prints, and rejects malformed
-// input (wrong arity, bad hex, wrong length) — fail-closed at parse so a typo can't degrade the check.
-func TestParseExpectedHeads(t *testing.T) {
-	c, ct, b := qedHead("collector"), qedHead("control"), qedHead("broker")
-	in := hex.EncodeToString(c) + ":" + hex.EncodeToString(ct) + ":" + hex.EncodeToString(b)
-	gc, gct, gb, err := parseExpectedHeads(in)
-	if err != nil {
-		t.Fatalf("parseExpectedHeads rejected a valid triple: %v", err)
+// envHeads decodes the envelope's reported HEADs, and the verifier's recomputed binding is
+// TAMPER-EVIDENT: altering any reported head_*_hex changes quoteExtraData(nonce, envHeads(env)) so the
+// quote's fixed ExtraData no longer matches (verify fails closed); a malformed/empty field decodes to a
+// genesis-zero HEAD rather than panicking.
+func TestEnvHeadsTamperEvident(t *testing.T) {
+	n := qedNonce()
+	env := &attestEnvelope{
+		HeadCollector: hex.EncodeToString(qedHead("collector")),
+		HeadControl:   hex.EncodeToString(qedHead("control")),
+		HeadBroker:    hex.EncodeToString(qedHead("broker")),
 	}
-	if hex.EncodeToString(gc) != hex.EncodeToString(c) || hex.EncodeToString(gct) != hex.EncodeToString(ct) || hex.EncodeToString(gb) != hex.EncodeToString(b) {
-		t.Fatal("parseExpectedHeads round-trip mismatch")
+	hc, hct, hb := envHeads(env)
+	base := quoteExtraData(n, hc, hct, hb)
+	if base != quoteExtraData(n, qedHead("collector"), qedHead("control"), qedHead("broker")) {
+		t.Fatal("envHeads did not decode the reported HEADs faithfully")
 	}
-	for _, bad := range []string{
-		"",                    // empty
-		hex.EncodeToString(c), // 1 part
-		hex.EncodeToString(c) + ":" + hex.EncodeToString(ct),         // 2 parts
-		"zz:" + hex.EncodeToString(ct) + ":" + hex.EncodeToString(b), // bad hex
-		"00:" + hex.EncodeToString(ct) + ":" + hex.EncodeToString(b), // wrong length (1 byte)
-	} {
-		if _, _, _, err := parseExpectedHeads(bad); err == nil {
-			t.Fatalf("parseExpectedHeads accepted malformed input %q", bad)
-		}
+	tampered := &attestEnvelope{
+		HeadCollector: hex.EncodeToString(qedHead("TAMPERED")),
+		HeadControl:   env.HeadControl,
+		HeadBroker:    env.HeadBroker,
+	}
+	thc, thct, thb := envHeads(tampered)
+	if quoteExtraData(n, thc, thct, thb) == base {
+		t.Fatal("a tampered reported HEAD did not change the binding — not tamper-evident")
+	}
+	empty := &attestEnvelope{}
+	ec, ect, eb := envHeads(empty)
+	if quoteExtraData(n, ec, ect, eb) != quoteExtraData(n, nil, nil, nil) {
+		t.Fatal("empty/malformed reported HEADs must bind as genesis zeros (fail-closed, no panic)")
 	}
 }
