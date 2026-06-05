@@ -172,22 +172,22 @@ try:
           "wrong-AK rejected: verify FAILS on the AK pin (a forged/other-box envelope cannot pass for the expected box)")
 
     # NEGATIVE 4 — TAMPER-EVIDENT HEADS (ADR-0025): alter a REPORTED chain HEAD in the envelope
-    # (head_collector_hex, one byte flipped) but leave the TPM-signed quote intact. The verifier
+    # (head_collector_hex, first nibble flipped) but leave the TPM-signed quote intact. The verifier
     # recomputes the ExtraData over the (now-altered) reported heads, which no longer matches the quote's
     # signed ExtraData -> FAIL CLOSED. Proves the reported heads are non-repudiable: a MITM/box cannot
     # restate the audit-chain heads a quote committed to. (No-rewind vs a prior obs is verify-audit's job.)
-    # flip the first nibble of the reported collector head to a guaranteed-different hex digit (robust
-    # JSON edit on the guest, which has python3):
-    run("python3 - <<'PY'\n"
-        "import json\n"
-        "e=json.load(open('/tmp/env.json'))\n"
-        "h=e.get('head_collector_hex','00'*32)\n"
-        "e['head_collector_hex']=('1' if h[0]!='1' else '0')+h[1:]\n"
-        "json.dump(e,open('/tmp/env-badhead.json','w'))\n"
-        "PY")
+    # The guest is a minimal image with NO python3 — extract the reported head here (host) and apply the
+    # flip with guest sed (busybox). The 64-hex head is unique in the one-line envelope, so the exact-
+    # string substitution hits only that field.
+    cc = run("grep -o '\"head_collector_hex\":\"[0-9a-f]*\"' /tmp/env.json")
+    mcc = re.search(r"head_collector_hex\":\"([0-9a-f]{64})", cc)
+    h_coll = mcc.group(1) if mcc else ""
+    bad_coll = ("1" if h_coll[:1] != "1" else "0") + h_coll[1:]
+    sed = run(f"sed 's/{h_coll}/{bad_coll}/' /tmp/env.json > /tmp/env-badhead.json; "
+              f"test \"$(cat /tmp/env-badhead.json)\" != \"$(cat /tmp/env.json)\"; echo RC=$?")
     v5 = run(f"bulkhead-collector attest verify /tmp/env-badhead.json {D} {nonce} @/tmp/box-ak.hex 2>&1; echo RC=$?")
     out("\n[verify- tampered reported head]\n" + v5 + "\n")
-    check("RC=0" not in v5 and "FAIL" in v5,
+    check(h_coll != "" and "RC=0" in sed and "RC=0" not in v5 and "FAIL" in v5,
           "tamper-evident HEADs: verify FAILS when a REPORTED chain HEAD is altered (the quote's ExtraData non-repudiably commits to the heads; they cannot be restated)")
 
     # ===== ADR-0020: EK-cert credential-activation — ROOT the AK in the TPM EK =====
