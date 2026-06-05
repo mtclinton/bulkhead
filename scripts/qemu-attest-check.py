@@ -42,6 +42,13 @@
 # FAILS CLOSED when a REPORTED head_*_hex is altered (the heads are non-repudiable). Honest seam: the
 # quote makes the reported HEADs unforgeable+fresh; NO-REWIND vs a prior observation is a SEPARATE
 # verify-audit step on the shipped logs (continuity + tip == bound HEAD + no regression).
+#
+# ADR-0026 (the no-rewind VERDICT): verify-audit gained --expect-tip (the verified log's tip must == a
+# quote's reported+attested HEAD, joining the non-repudiable HEAD to the continuity proof) and --since
+# (a prior-observed HEAD must be a VERIFIED ANCESTOR of the tip -> no-rewind CLEAN; a HEAD not in the
+# chain -> REWOUND/FORKED, fail-closed). Checks: 26.1 the quote's control HEAD == the verify-audit tip;
+# 26.2 --since a prior HEAD is CLEAN; 26.3 --since a HEAD not in the chain fails closed. Closes the loop
+# ADR-0025 deferred: quote (unforgeable current HEAD) + verify-audit (continuity + ancestry) = no-rewind.
 import pexpect, sys, os, re, secrets
 RUN = "/home/work/ideas/bulkhead/yocto/scripts/run-qemu-tpm.sh"
 # A DIFFERENT, VALID P-256 PKIX-DER pubkey (generated off-box) — the "wrong box" AK for the
@@ -189,6 +196,41 @@ try:
     out("\n[verify- tampered reported head]\n" + v5 + "\n")
     check(h_coll != "" and "RC=0" in sed and "RC=0" not in v5 and "FAIL" in v5,
           "tamper-evident HEADs: verify FAILS when a REPORTED chain HEAD is altered (the quote's ExtraData non-repudiably commits to the heads; they cannot be restated)")
+
+    # ===== ADR-0026: the NO-REWIND VERDICT (verify-audit ties the quote's HEAD to a continuity-verified
+    # log + proves a prior observation is an ancestor) — closing the loop ADR-0025 deferred =====
+    CTLCHAIN = "/data/bulkhead/audit/control.jsonl"  # resolves the sibling audit-pub.txt; domain=control
+    # 26.1 END-TO-END TIE: the verified control log's tip == the quote's REPORTED+attested control HEAD,
+    # so this continuity-verified chain IS the one the quote committed to (joins the non-repudiable HEAD
+    # from `attest verify` to the hash-chain integrity proof). Exit 0 + "tip == the quote-bound HEAD".
+    e2e = run(f"bulkhead-collector verify-audit {CTLCHAIN} --expect-tip={env_ctrl} 2>&1; echo RC=$?")
+    out("\n[ADR-0026 expect-tip]\n" + e2e + "\n")
+    check("RC=0" in e2e and "tip == the quote-bound HEAD" in e2e and "verify-audit: OK" in e2e,
+          "ADR-0026: verify-audit ties the quote's attested control HEAD to the continuity-verified log (tip == the quote-bound HEAD)")
+
+    # 26.2 ANCESTRY CLEAN: a prior-observed HEAD (here the current control tip, captured live) is a
+    # verified ANCESTOR of the tip -> no-rewind CLEAN, exit 0. (h_ctrl == the tip now; the advanced-
+    # ancestor case is unit-tested in verify_test.go where seq>1 records sit above the observation.)
+    clean = run(f"bulkhead-collector verify-audit {CTLCHAIN} --since={h_ctrl} 2>&1; echo RC=$?")
+    out("\n[ADR-0026 since CLEAN]\n" + clean + "\n")
+    check("RC=0" in clean and "no-rewind CLEAN" in clean,
+          "ADR-0026: verify-audit --since a prior-observed HEAD renders no-rewind CLEAN (the chain extends the observation)")
+
+    # 26.3 REWIND/FORK DETECTED: a prior HEAD that is NOT in the chain (a fork that dropped it, or a
+    # rewind below it) cannot reproduce its hash -> REWOUND/FORKED, fail-closed exit 1.
+    bogus_head = "de" + "0" * 62
+    rew = run(f"bulkhead-collector verify-audit {CTLCHAIN} --since={bogus_head} 2>&1; echo RC=$?")
+    out("\n[ADR-0026 since REWOUND]\n" + rew + "\n")
+    check("RC=0" not in rew and "REWOUND/FORKED" in rew,
+          "ADR-0026: verify-audit --since a HEAD NOT in the chain FAILS CLOSED as REWOUND/FORKED (the no-rewind teeth)")
+
+    # 26.4 FAIL-OPEN GUARD (adversarial-review fix): a misspelled flag (--sinc=) must NOT be silently
+    # dropped into the pubkey positional and ignored — that would skip a REQUESTED no-rewind check yet
+    # exit 0 (false assurance). It must fail CLOSED with "unknown flag".
+    typo = run(f"bulkhead-collector verify-audit {CTLCHAIN} --sinc={h_ctrl} 2>&1; echo RC=$?")
+    out("\n[ADR-0026 typo-flag]\n" + typo + "\n")
+    check("RC=0" not in typo and "unknown flag" in typo,
+          "ADR-0026: a misspelled flag fails CLOSED (unknown flag), never silently skipping a requested no-rewind check")
 
     # ===== ADR-0020: EK-cert credential-activation — ROOT the AK in the TPM EK =====
     # POSITIVE 8: the enrollment request; the enrolled AK IS the quote AK (continuity). `attest akpub`

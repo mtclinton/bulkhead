@@ -58,6 +58,51 @@ func TestVerifyChainRoundTrip(t *testing.T) {
 	}
 }
 
+// ADR-0026: verifyChainState returns the tip (binds to a quote's reported HEAD) and resolves no-rewind
+// ancestry — a prior-observed HEAD that is a real record's VERIFIED hash is found (with its seq); a HEAD
+// not in the chain (rewound/forked away) is not. This is the no-rewind verdict primitive.
+func TestVerifyChainStateTipAndAncestry(t *testing.T) {
+	priv := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	pub := priv.Public().(ed25519.PublicKey)
+	path := filepath.Join(t.TempDir(), "provenance.jsonl")
+
+	a := newTestLog(t, path, "test", priv)
+	if err := a.append(provEvent{CgroupID: 1, Comm: "x", Hook: "ptrace", Decision: "denied", Mode: "enforce"}); err != nil {
+		t.Fatalf("append1: %v", err)
+	}
+	mid := string(lastChainHash(path)) // the seq-1 record's hash — a prior observation
+	for i := 0; i < 2; i++ {
+		if err := a.append(provEvent{CgroupID: uint64(2 + i), Comm: "x", Hook: "connect", Decision: "allowed", Mode: "enforce"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	a.Close()
+	wantTip := string(lastChainHash(path))
+
+	// nil since: tip is the last record's hash; no ancestry tracked.
+	n, tip, _, found, err := verifyChainState(path, pub, "test", nil)
+	if err != nil || n != 3 {
+		t.Fatalf("verifyChainState: n=%d err=%v (want 3, nil)", n, err)
+	}
+	if string(tip) != wantTip {
+		t.Fatalf("tip mismatch: got %x want %x", tip, wantTip)
+	}
+	if found {
+		t.Fatal("foundSince true for a nil since")
+	}
+
+	// a prior observation that IS a real record's verified hash -> found, with its seq.
+	if _, _, seq, found, err := verifyChainState(path, pub, "test", []byte(mid)); err != nil || !found || seq != 1 {
+		t.Fatalf("ancestry of a real mid HEAD: found=%v seq=%d err=%v (want true,1,nil)", found, seq, err)
+	}
+
+	// a HEAD not in the chain (rewound/forked away) -> not found (no false-positive ancestry).
+	bogus := sha256.Sum256([]byte("not in the chain"))
+	if _, _, _, found, _ := verifyChainState(path, pub, "test", bogus[:]); found {
+		t.Fatal("ancestry false positive: a HEAD not in the chain reported as found")
+	}
+}
+
 func TestVerifyChainMissingAndEmpty(t *testing.T) {
 	dir := t.TempDir()
 	pub := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)).Public().(ed25519.PublicKey)
