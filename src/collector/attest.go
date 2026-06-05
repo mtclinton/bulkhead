@@ -105,6 +105,13 @@ type attestEnvelope struct {
 	Nonce    string            `json:"nonce_hex"`
 	PCR      int               `json:"pcr"`
 	Claims   map[string]string `json:"claims"`
+	// ADR-0025: the three chain HEADs the quote's ExtraData is bound to (collector provenance, control,
+	// broker), each 64 hex (genesis => 64 zeros). TRANSPARENCY/operator context ONLY — the verifier
+	// checks the quote against its OWN prior-observed expected HEADs, never these attacker-suppliable
+	// claims (mirroring the ADR-0019 nonce discipline).
+	HeadCollector string `json:"head_collector_hex,omitempty"`
+	HeadControl   string `json:"head_control_hex,omitempty"`
+	HeadBroker    string `json:"head_broker_hex,omitempty"`
 }
 
 // ---- EK-cert credential-activation (ADR-0020): ROOT the AK in the TPM EK ------------------------
@@ -341,12 +348,12 @@ func attestAK(tpm transport.TPM) (*tpm2.CreatePrimaryResponse, error) {
 		Type:    tpm2.TPMAlgECC,
 		NameAlg: tpm2.TPMAlgSHA256,
 		ObjectAttributes: tpm2.TPMAObject{
-			FixedTPM:             true,
-			FixedParent:          true,
-			SensitiveDataOrigin:  true,
-			UserWithAuth:         true,
-			Restricted:           true,
-			SignEncrypt:          true,
+			FixedTPM:            true,
+			FixedParent:         true,
+			SensitiveDataOrigin: true,
+			UserWithAuth:        true,
+			Restricted:          true,
+			SignEncrypt:         true,
 		},
 		Parameters: tpm2.NewTPMUPublicParms(tpm2.TPMAlgECC, &tpm2.TPMSECCParms{
 			Scheme: tpm2.TPMTECCScheme{
@@ -453,8 +460,83 @@ func readAttestPCR(tpm transport.TPM) ([]byte, error) {
 	return rsp.PCRValues.Digests[0].Buffer, nil
 }
 
-// doAttestQuote derives the AK, quotes attestPCR under the verifier nonce, and returns the envelope
-// as compact JSON (one line). RUNS IN THE COLLECTOR PROCESS (TCB) — see doAttestExtend.
+// ---- ADR-0025: bind the three signed-chain HEADs into the quote ----------------------------------
+//
+// ADR-0019 binds only the verifier nonce into the quote (QualifyingData == nonce). This adds the HEAD
+// (last record hash) of each of the three signed audit chains — collector provenance, control, broker
+// provenance — so ONE TPM2_Quote proves BOTH the enforcing POSTURE (via PCR 14) AND a no-rewind/no-fork
+// AUTHORITY HISTORY: a box that rewound, forked or truncated any chain below a relying party's prior-
+// observed (TOFU) HEAD cannot produce a quote whose ExtraData matches that expected HEAD, so the verify
+// fails closed. The HONEST scope: it proves the chains were AT these HEADs at quote time (fresh nonce,
+// TPM-signed) — NOT continuous history BETWEEN quotes, and the on-box self-check (which binds its own
+// claimed HEADs) gains no rewind teeth; those are the OFF-BOX relying party's (it holds the expected).
+
+// auditBaseDir mirrors openAuditLog's directory resolution: the collector's chains live in
+// $BULKHEAD_AUDIT_DIR (provenance.jsonl + control.jsonl), defaulting to /var/lib/bulkhead/audit.
+func auditBaseDir() string {
+	if d := os.Getenv("BULKHEAD_AUDIT_DIR"); d != "" {
+		return d
+	}
+	return "/var/lib/bulkhead/audit"
+}
+
+// brokerAuditDir resolves the BROKER's separate chain directory. The broker is a distinct process with
+// its OWN $BULKHEAD_AUDIT_DIR (= the collector's base + "-broker" in every shipped config: dev
+// /var/lib/bulkhead/audit-broker, image /data/bulkhead/audit-broker). The derivation encodes that
+// coupling; $BULKHEAD_BROKER_AUDIT_DIR overrides it if the two are ever decoupled.
+func brokerAuditDir() string {
+	if d := os.Getenv("BULKHEAD_BROKER_AUDIT_DIR"); d != "" {
+		return d
+	}
+	return auditBaseDir() + "-broker"
+}
+
+// attestChainHeads reads the current HEAD (last well-formed record hash) of the three signed chains
+// from DISK. Each is a coherent per-file snapshot: append() writes each record with a SINGLE
+// write()+fsync and every chain has a single writer, so lastChainHash never observes a torn line and no
+// lock is needed (a concurrent append advancing a HEAD between the three reads is benign — the quote
+// binds whatever was on disk, and the relying party checks its OWN prior-observed expected). A
+// genesis/empty/unreadable chain yields nil, which quoteExtraData maps to 32 zero bytes.
+func attestChainHeads() (hColl, hCtrl, hBroker []byte) {
+	base := auditBaseDir()
+	hColl = lastChainHash(filepath.Join(base, "provenance.jsonl"))
+	hCtrl = lastChainHash(filepath.Join(base, "control.jsonl"))
+	hBroker = lastChainHash(filepath.Join(brokerAuditDir(), "provenance.jsonl"))
+	return
+}
+
+// headOrZero normalizes a chain HEAD to a fixed 32 bytes: a nil/genesis HEAD becomes 32 zero bytes,
+// exactly the openAuditLog genesis prevHash, so a fresh box has a well-defined reproducible binding and
+// the hex form is always 64 chars.
+func headOrZero(h []byte) []byte {
+	if len(h) != sha256.Size {
+		return make([]byte, sha256.Size)
+	}
+	return h
+}
+
+// quoteExtraData binds the verifier's fresh nonce to the three chain HEADs, yielding the 32 bytes
+// placed in the quote's QualifyingData (ExtraData). Domain-separated (so it can NEVER collide with a
+// bare-nonce ADR-0019 quote or composeDigest) and length-prefixed, with the HEADs in a FIXED order
+// (collector provenance, control, broker). Both the off-box verify (expected HEADs from args) and the
+// on-box self-check (its own claimed HEADs) recompute via THIS one helper — single source of truth.
+func quoteExtraData(nonce, hColl, hCtrl, hBroker []byte) [32]byte {
+	var b bytes.Buffer
+	var u8 [8]byte
+	put := func(v uint64) { binary.BigEndian.PutUint64(u8[:], v); b.Write(u8[:]) }
+	putStr := func(s string) { put(uint64(len(s))); b.WriteString(s) }
+	putBytes := func(p []byte) { put(uint64(len(p))); b.Write(p) }
+	putStr("bulkhead-attest-qd-v1") // domain/version tag — never collides with a bare-nonce quote
+	putBytes(nonce)
+	putBytes(headOrZero(hColl))
+	putBytes(headOrZero(hCtrl))
+	putBytes(headOrZero(hBroker))
+	return sha256.Sum256(b.Bytes())
+}
+
+// doAttestQuote derives the AK, quotes attestPCR under the verifier nonce BOUND to the three chain
+// HEADs (ADR-0025), and returns the envelope as compact JSON (one line). RUNS IN THE COLLECTOR PROCESS
+// (TCB) — see doAttestExtend.
 func doAttestQuote(nonceHex string) (string, error) {
 	nonce, err := hex.DecodeString(nonceHex)
 	if err != nil || len(nonce) < 16 {
@@ -465,6 +547,12 @@ func doAttestQuote(nonceHex string) (string, error) {
 		return "", err
 	}
 	_ = d
+	// ADR-0025: read the three chain HEADs from disk (coherent single-writer snapshot, no lock) and bind
+	// them with the nonce into the quote's ExtraData. One quote then covers the enforcing posture (PCR)
+	// AND a no-rewind authority history. The HEADs are read BEFORE tpmMu so the bound value is fixed
+	// before the TPM op (the self-check reads the SAME values back from the envelope claims, below).
+	hColl, hCtrl, hBroker := attestChainHeads()
+	extra := quoteExtraData(nonce, hColl, hCtrl, hBroker)
 	tpmMu.Lock()
 	defer tpmMu.Unlock()
 	tpm, err := linuxtpm.Open(tpmDevice)
@@ -488,7 +576,7 @@ func doAttestQuote(nonceHex string) (string, error) {
 			// the AK is a TRANSIENT handle, so go-tpm needs its Name explicitly (it can't derive it
 			// the way it does for permanent handles like a PCR).
 			SignHandle:     tpm2.AuthHandle{Handle: ak.ObjectHandle, Name: ak.Name, Auth: tpm2.PasswordAuth(nil)},
-			QualifyingData: tpm2.TPM2BData{Buffer: nonce},
+			QualifyingData: tpm2.TPM2BData{Buffer: extra[:]},
 			PCRSelect:      sel,
 			InScheme: tpm2.TPMTSigScheme{
 				Scheme:  tpm2.TPMAlgECDSA,
@@ -517,6 +605,10 @@ func doAttestQuote(nonceHex string) (string, error) {
 		Nonce:    nonceHex,
 		PCR:      attestPCR,
 		Claims:   claims,
+		// ADR-0025: ship the bound HEADs (transparency only; the verifier uses its OWN expected).
+		HeadCollector: hex.EncodeToString(headOrZero(hColl)),
+		HeadControl:   hex.EncodeToString(headOrZero(hCtrl)),
+		HeadBroker:    hex.EncodeToString(headOrZero(hBroker)),
 	}
 	out, _ := json.Marshal(env)
 	return string(out), nil
@@ -702,12 +794,13 @@ func doAttestActivate(credBlobHex, encSecretHex string) (string, error) {
 // trusting it to verify the signature. Without this pin the verifying key would be read straight from
 // the (attacker-controllable) envelope, and ANY genuine TPM (or even a hand-rolled software key over a
 // fabricated TPMS_ATTEST) could forge a PASS for the expected box. It then checks (a) the quote's
-// magic == TPM_GENERATED_VALUE, (b) the echoed qualifyingData == the fresh nonce (no replay), (c) the
-// ECDSA signature over SHA-256(Quoted) under the PINNED AK, (d) the quote covers EXACTLY attestPCR in
-// the SHA-256 bank (so a forger cannot launder the digest through a resettable PCR), and (e) that
-// PCR's digest == H(0^32 || expected-D). Fail-closed on any mismatch. expectedDHex is the good
-// composite digest the verifier computed from known-good TCB values out-of-band.
-func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
+// magic == TPM_GENERATED_VALUE, (b) the echoed qualifyingData == quoteExtraData(fresh nonce, the
+// verifier's EXPECTED chain HEADs) — no replay AND no-rewind (ADR-0025), (c) the ECDSA signature over
+// SHA-256(Quoted) under the PINNED AK, (d) the quote covers EXACTLY attestPCR in the SHA-256 bank (so a
+// forger cannot launder the digest through a resettable PCR), and (e) that PCR's digest == H(0^32 ||
+// expected-D). Fail-closed on any mismatch. expectedDHex is the good composite digest, and
+// expectedHeadsArg the prior-observed (TOFU) chain HEADs, both supplied out-of-band by the relying party.
+func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK, expectedHeadsArg string) {
 	raw, err := os.ReadFile(envPath)
 	if err != nil {
 		fatalf("attest verify: read envelope: %v", err)
@@ -727,6 +820,15 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
 	if err != nil || len(nonce) < 16 {
 		fatalf("attest verify: nonce must be >= 16 bytes hex (the verifier's fresh challenge)")
 	}
+	// ADR-0025: the EXPECTED chain HEADs are the verifier's OWN prior-observed (TOFU) values — like the
+	// nonce, supplied out-of-band, NEVER read from the attacker-controllable envelope. quoteExtraData
+	// folds them with the nonce into the value the genuine quote's ExtraData must equal; a box that
+	// rewound/forked/truncated a chain below these cannot match it and fails check (b), closed.
+	hColl, hCtrl, hBroker, err := parseExpectedHeads(expectedHeadsArg)
+	if err != nil {
+		fatalf("attest verify: %v", err)
+	}
+	expectedExtra := quoteExtraData(nonce, hColl, hCtrl, hBroker)
 	akDER, _ := hex.DecodeString(env.AKPubDER)
 
 	// (0) PIN THE AK out-of-band. The envelope's AK is attacker-controllable, so it is trusted ONLY
@@ -743,10 +845,38 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
 
 	// (a)-(e) the cryptographic checks, factored into verifyEnvelopeChecks so the SAME five checks
 	// drive the OFF-BOX verifier AND the on-box `attest selfcheck` (ADR-0023) — one source of truth.
-	if err := verifyEnvelopeChecks(&env, expectedD, nonce, akDER); err != nil {
+	if err := verifyEnvelopeChecks(&env, expectedD, expectedExtra[:], akDER); err != nil {
 		fatalf("attest verify: %v", err)
 	}
-	fmt.Printf("attest verify: OK — genuine TPM quote under the PINNED AK, fresh nonce, PCR %d (SHA-256) == expected enforcing-TCB state\n", env.PCR)
+	fmt.Printf("attest verify: OK — genuine TPM quote under the PINNED AK, fresh nonce bound to the expected audit-chain HEADs (no replay, no rewind), PCR %d (SHA-256) == expected enforcing-TCB state\n", env.PCR)
+}
+
+// parseExpectedHeads parses the relying party's prior-observed (TOFU) chain HEADs for `attest verify`,
+// in the colon-joined "collHex:ctrlHex:brokerHex" form `attest heads` prints (or @file). Each HEAD is
+// 64 hex (32 bytes); the all-zero form denotes a genesis/empty chain. A rewind/fork below these fails
+// the ADR-0025 ExtraData check, closed.
+func parseExpectedHeads(arg string) (hColl, hCtrl, hBroker []byte, err error) {
+	s := arg
+	if strings.HasPrefix(s, "@") {
+		raw, e := os.ReadFile(s[1:])
+		if e != nil {
+			return nil, nil, nil, fmt.Errorf("read expected-heads file: %w", e)
+		}
+		s = string(raw)
+	}
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) != 3 {
+		return nil, nil, nil, fmt.Errorf("expected-heads must be collHex:ctrlHex:brokerHex (3 colon-separated), got %d part(s)", len(parts))
+	}
+	out := make([][]byte, 3)
+	for i, p := range parts {
+		h, e := hex.DecodeString(strings.TrimSpace(p))
+		if e != nil || len(h) != sha256.Size {
+			return nil, nil, nil, fmt.Errorf("expected-head %d must be 64 hex (32 bytes)", i)
+		}
+		out[i] = h
+	}
+	return out[0], out[1], out[2], nil
 }
 
 // verifyEnvelopeChecks runs verify checks (a)-(e) against an already-PINNED AK (akDER), returning an
@@ -755,10 +885,13 @@ func cmdAttestVerify(envPath, expectedDHex, nonceHex, pinnedAK string) {
 // caller supplies the AK pub it has decided to trust (the off-box pin, or — in the self-check structural
 // fallback — the quote's own attacker-suppliable AK, which gives freshness + PCR-match but does NOT
 // authenticate the TPM nor assert identity; check (c) under an unpinned AK is self-consistency only). The
-// five checks: (a) magic == TPM_GENERATED, (b) QualifyingData == the supplied fresh nonce (no replay),
-// (c) ECDSA sig over SHA-256(Quoted) under akDER, (d) the quote covers EXACTLY attestPCR (SHA-256), so
-// a digest can't be laundered through a resettable PCR, and (e) that PCR's digest == H(0^32||expected-D).
-func verifyEnvelopeChecks(env *attestEnvelope, expectedD, nonce, akDER []byte) error {
+// five checks: (a) magic == TPM_GENERATED, (b) QualifyingData == the supplied expectedExtraData — the
+// caller's precomputed quoteExtraData(fresh-nonce, expected chain HEADs) (ADR-0025), so a stale/replayed
+// quote OR one over a rewound/forked audit chain mismatches (no replay, no-rewind); (c) ECDSA sig over
+// SHA-256(Quoted) under akDER, (d) the quote covers EXACTLY attestPCR (SHA-256), so a digest can't be
+// laundered through a resettable PCR, and (e) that PCR's digest == H(0^32||expected-D). The check stays
+// a PURE ExtraData==expected equality — the nonce+HEAD construction lives in quoteExtraData (the caller).
+func verifyEnvelopeChecks(env *attestEnvelope, expectedD, expectedExtraData, akDER []byte) error {
 	quoted, _ := hex.DecodeString(env.Quoted)
 	// (a)+(b) parse the TPMS_ATTEST and check magic + nonce.
 	att, err := tpm2.Unmarshal[tpm2.TPMSAttest](quoted)
@@ -768,8 +901,8 @@ func verifyEnvelopeChecks(env *attestEnvelope, expectedD, nonce, akDER []byte) e
 	if att.Magic != tpm2.TPMGeneratedValue {
 		return fmt.Errorf("FAIL — magic != TPM_GENERATED (not a genuine TPM quote)")
 	}
-	if !bytes.Equal(att.ExtraData.Buffer, nonce) {
-		return fmt.Errorf("FAIL — qualifyingData != the fresh nonce (stale/replayed quote)")
+	if !bytes.Equal(att.ExtraData.Buffer, expectedExtraData) {
+		return fmt.Errorf("FAIL — qualifyingData != expected (stale/replayed quote, wrong nonce, or rewound/forked audit chain)")
 	}
 	// (c) ECDSA signature over SHA-256(quoted) under the supplied AK pub.
 	pub, err := ecdsaPubFromDER(akDER)
@@ -1191,15 +1324,29 @@ func doAttestSelfCheck() (string, error) {
 		return "", fmt.Errorf("self-check: EK-rooted pin %s present but unreadable: %w", ekRootedPinPath, perr)
 	}
 
-	if err := verifyEnvelopeChecks(&env, expD[:], nonce[:], trustedAK); err != nil {
+	// ADR-0025: recompute the expected ExtraData from the HEADs the quote CLAIMS to have bound (shipped in
+	// the envelope by the SAME in-process doAttestQuote) — NOT a fresh disk re-read, which could differ if
+	// a chain advanced between the quote and here (a spurious self-check failure). The self-check's HEAD
+	// role is binding INTEGRITY (the quote is well-formed over its claimed chain state); rewind DETECTION
+	// is the OFF-BOX verifier's job (it supplies its own prior-observed expected). Consistent by
+	// construction under the honest-collector assumption that already scopes the structural fallback.
+	// A decode error here is benign: a malformed/empty field decodes to nil, quoteExtraData maps it to
+	// zeros, and any mismatch with the quote's actual ExtraData fails verify CLOSED below — and this
+	// in-process envelope comes from the same doAttestQuote, so the fields are always well-formed.
+	ehColl, _ := hex.DecodeString(env.HeadCollector)
+	ehCtrl, _ := hex.DecodeString(env.HeadControl)
+	ehBroker, _ := hex.DecodeString(env.HeadBroker)
+	expExtra := quoteExtraData(nonce[:], ehColl, ehCtrl, ehBroker)
+
+	if err := verifyEnvelopeChecks(&env, expD[:], expExtra[:], trustedAK); err != nil {
 		return "", fmt.Errorf("self-check %v", err)
 	}
-	return fmt.Sprintf("fresh-nonce quote verifies, PCR %d == expected default-armed D, identity=%s", attestPCR, identity), nil
+	return fmt.Sprintf("fresh-nonce quote verifies, PCR %d == expected default-armed D, chain HEADs bound, identity=%s", attestPCR, identity), nil
 }
 
 func cmdAttest(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <env.json> | verify <env.json> <D-hex> <nonce-hex> <pin-hex|@file>")
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest extend | quote <nonce-hex> | akpub <env.json> | heads | verify <env.json> <D-hex> <nonce-hex> <pin-hex|@file> <expected-heads|@file>")
 		fmt.Fprintln(os.Stderr, "       EK-rooting (ADR-0020): ek | activate <challenge.json> | make-credential <request.json> <round-out> [ek-ca-pem|@file] | enroll-verify <response.json> <round-state> <out-pin>")
 		fmt.Fprintln(os.Stderr, "       posture gate (ADR-0021): gate  (exit 0 = E0+E2 armed + tcb_clean; non-zero = fail-closed)")
 		fmt.Fprintln(os.Stderr, "       crypto self-check gate (ADR-0023): selfcheck  (exit 0 = fresh-nonce quote verifies against expected default-armed D; non-zero = fail-closed)")
@@ -1310,14 +1457,25 @@ func cmdAttest(args []string) {
 			os.Exit(2)
 		}
 		cmdAttestEnrollVerify(args[1], args[2], args[3])
+	case "heads":
+		// OFF-BOX/on-box, no TPM/socket: print the three signed-chain HEADs as collHex:ctrlHex:brokerHex
+		// (genesis => 64 zeros) — the relying party's prior-observed (TOFU) expected for `attest verify`
+		// (ADR-0025). Reads the chain FILES via $BULKHEAD_AUDIT_DIR (+ the derived broker dir); set it to
+		// the box's audit dir when run from a bare shell (the collector unit sets it; a shell does not).
+		hColl, hCtrl, hBroker := attestChainHeads()
+		fmt.Printf("%s:%s:%s\n",
+			hex.EncodeToString(headOrZero(hColl)),
+			hex.EncodeToString(headOrZero(hCtrl)),
+			hex.EncodeToString(headOrZero(hBroker)))
 	case "verify":
 		// OFF-BOX: no TPM, no maps — runs anywhere (a relying party's machine). The PINNED AK binds
-		// the proof to THE expected box; without it any genuine TPM could forge a PASS.
-		if len(args) != 5 {
-			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest verify <envelope.json> <expected-digest-hex> <nonce-hex> <pinned-ak-pub-hex|@file>")
+		// the proof to THE expected box; without it any genuine TPM could forge a PASS. The expected
+		// HEADs (ADR-0025) add the no-rewind check — supplied out-of-band, like the nonce and the pin.
+		if len(args) != 6 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector attest verify <envelope.json> <expected-digest-hex> <nonce-hex> <pinned-ak-pub-hex|@file> <expected-heads collHex:ctrlHex:brokerHex|@file>")
 			os.Exit(2)
 		}
-		cmdAttestVerify(args[1], args[2], args[3], args[4])
+		cmdAttestVerify(args[1], args[2], args[3], args[4], args[5])
 	default:
 		fmt.Fprintln(os.Stderr, "unknown attest verb")
 		os.Exit(2)

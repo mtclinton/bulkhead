@@ -31,6 +31,14 @@
 # <collector-binary>` (composeDigest over the known-good binary + the default-armed posture) and that
 # off-box D drives every verify -- the journal grep is kept only as a cross-check. Breaks the journal-
 # circularity (a tampered collector can no longer self-pass by logging a green D).
+#
+# ADR-0025 (bind audit-chain HEADs into the quote): `attest heads` reads the three signed chains'
+# HEADs (collector provenance, control, broker) as collHex:ctrlHex:brokerHex; the quote's ExtraData is
+# quoteExtraData(nonce || those HEADs), so ONE quote proves the enforcing posture AND a no-rewind/no-
+# fork authority history. Every verify supplies the relying party's prior-observed (TOFU) HEADs;
+# NEGATIVE 4 — verify FAILS CLOSED against an expected HEAD the quote was not bound to (a rewound/forked
+# chain cannot pass). Honest seam: proves the chains were AT these HEADs at quote time (not continuous
+# history between quotes); the on-box self-check binds its own claimed HEADs (no rewind teeth there).
 import pexpect, sys, os, re, secrets
 RUN = "/home/work/ideas/bulkhead/yocto/scripts/run-qemu-tpm.sh"
 # A DIFFERENT, VALID P-256 PKIX-DER pubkey (generated off-box) — the "wrong box" AK for the
@@ -98,22 +106,45 @@ try:
     check("RC=0" in ak and "RC=0" in run("test -s /tmp/box-ak.hex; echo RC=$?"),
           "attest akpub captured the box AK pub (the out-of-band TOFU pin)")
 
-    # POSITIVE verify: genuine quote, fresh nonce, PINNED-AK sig, PCR-14 selection, PCR == H(0^32||D).
-    v = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/box-ak.hex 2>&1; echo RC=$?")
+    # ADR-0025: capture the box's three signed-chain HEADs (collector provenance, control, broker) as
+    # collHex:ctrlHex:brokerHex — the relying party's prior-observed (TOFU) expected for the no-rewind
+    # verify. The collector unit sets BULKHEAD_AUDIT_DIR; a bare shell does not, so pass the image's
+    # audit dir explicitly (the broker dir derives as <base>-broker). The file is consumed via @path.
+    hraw = run("BULKHEAD_AUDIT_DIR=/data/bulkhead/audit bulkhead-collector attest heads > /tmp/heads.txt 2>/tmp/heads.err; echo RC=$?")
+    HEADS_OUT = run("cat /tmp/heads.txt")
+    mh = re.search(r"([0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64})", HEADS_OUT)
+    HEADS = mh.group(1) if mh else ""
+    out("\n[attest heads]\n" + HEADS_OUT + "\n")
+    check("RC=0" in hraw and mh is not None,
+          "ADR-0025: attest heads read the three signed-chain HEADs as collHex:ctrlHex:brokerHex (the TOFU expected the quote's ExtraData is bound to)")
+
+    # ADR-0025 path-correctness: the broker chain is genesis (HEAD 0*64) until the first delegation, so a
+    # zero broker HEAD here is EXPECTED. Assert the broker's provenance.jsonl EXISTS at the derived
+    # brokerAuditDir (<base>-broker) — the broker creates it at startup (openAuditLog MkdirAll+O_CREATE) —
+    # so a genesis broker HEAD is a real EMPTY chain, NOT a silently mis-resolved path binding zeros (the
+    # collector binds the SAME derived path, so a wrong path would bind nothing for the broker undetected).
+    bex = run("test -f /data/bulkhead/audit-broker/provenance.jsonl; echo RC=$?")
+    check("RC=0" in bex,
+          "ADR-0025: the broker chain file exists at the derived brokerAuditDir (a genesis broker HEAD is an empty chain, not a mis-resolved path)")
+
+    # POSITIVE verify: genuine quote, fresh nonce BOUND to the expected chain HEADs (ADR-0025), PINNED-AK
+    # sig, PCR-14 selection, PCR == H(0^32||D). The HEADs are an INDEPENDENT read (attest heads), not the
+    # envelope's claim, so this also proves the quote bound the box's ACTUAL chain state.
+    v = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/box-ak.hex @/tmp/heads.txt 2>&1; echo RC=$?")
     out("\n[verify+]\n" + v + "\n")
     check("attest verify: OK" in v and "RC=0" in v,
-          "attest verify OK — a relying party can PROVE the enforcing-TCB state (pinned AK + fresh nonce + PCR-14 selection + PCR match)")
+          "attest verify OK — a relying party can PROVE the enforcing-TCB state AND no-rewind audit history (pinned AK + fresh nonce + chain HEADs + PCR-14 selection + PCR match)")
 
-    # NEGATIVE 1 — TAMPER: a different expected digest (one byte flipped), correct pin, must FAIL CLOSED.
+    # NEGATIVE 1 — TAMPER: a different expected digest (one byte flipped), correct pin + heads, must FAIL CLOSED.
     badD = ("0" if D[0] != "0" else "1") + D[1:]
-    v2 = run(f"bulkhead-collector attest verify /tmp/env.json {badD} {nonce} @/tmp/box-ak.hex 2>&1; echo RC=$?")
+    v2 = run(f"bulkhead-collector attest verify /tmp/env.json {badD} {nonce} @/tmp/box-ak.hex @/tmp/heads.txt 2>&1; echo RC=$?")
     out("\n[verify- tamper]\n" + v2 + "\n")
     check("RC=0" not in v2 and "FAIL" in v2,
           "tamper rejected: verify FAILS CLOSED against a different expected digest (a box not in the expected state cannot pass)")
 
-    # NEGATIVE 2 — REPLAY: a different nonce than the quote was bound to, correct pin, must FAIL.
+    # NEGATIVE 2 — REPLAY: a different nonce than the quote was bound to, correct pin + heads, must FAIL.
     other = secrets.token_hex(32)
-    v3 = run(f"bulkhead-collector attest verify /tmp/env.json {D} {other} @/tmp/box-ak.hex 2>&1; echo RC=$?")
+    v3 = run(f"bulkhead-collector attest verify /tmp/env.json {D} {other} @/tmp/box-ak.hex @/tmp/heads.txt 2>&1; echo RC=$?")
     out("\n[verify- replay]\n" + v3 + "\n")
     check("RC=0" not in v3 and "FAIL" in v3,
           "replay rejected: verify FAILS against a nonce the quote was not bound to (no stale-quote replay)")
@@ -122,10 +153,21 @@ try:
     # must FAIL on the pin mismatch. This is the regression test for the forge where any other real
     # TPM (or a software key) could otherwise pass for the expected box.
     run(f"printf '%s' {WRONG_AK} > /tmp/wrong-ak.hex")
-    v4 = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/wrong-ak.hex 2>&1; echo RC=$?")
+    v4 = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/wrong-ak.hex @/tmp/heads.txt 2>&1; echo RC=$?")
     out("\n[verify- wrong-ak]\n" + v4 + "\n")
     check("RC=0" not in v4 and "FAIL" in v4 and "pinned" in v4.lower(),
           "wrong-AK rejected: verify FAILS on the AK pin (a forged/other-box envelope cannot pass for the expected box)")
+
+    # NEGATIVE 4 — NO-REWIND (ADR-0025): a genuine quote, correct D/nonce/pin, but the verifier's
+    # EXPECTED collector HEAD differs by one byte (a rewound/forked/truncated chain, or simply a HEAD the
+    # quote was not bound to). The ExtraData binds the box's ACTUAL HEADs, so it cannot match the
+    # tampered expected -> FAIL CLOSED. This is the no-rewind proof's teeth.
+    tampered = ("0" if HEADS[0] != "0" else "1") + HEADS[1:]
+    run(f"printf '%s' {tampered} > /tmp/heads-bad.txt")
+    v5 = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/box-ak.hex @/tmp/heads-bad.txt 2>&1; echo RC=$?")
+    out("\n[verify- no-rewind]\n" + v5 + "\n")
+    check("RC=0" not in v5 and "FAIL" in v5,
+          "no-rewind rejected: verify FAILS against an expected HEAD the quote was not bound to (a rewound/forked audit chain cannot pass)")
 
     # ===== ADR-0020: EK-cert credential-activation — ROOT the AK in the TPM EK =====
     # POSITIVE 8: the enrollment request; the enrolled AK IS the quote AK (continuity). `attest akpub`
@@ -152,7 +194,7 @@ try:
           "EK-rooting loop closes: ActivateCredential recovered the secret -> AK is EK-rooted (loaded in the genuine TPM that owns the EK)")
 
     # POSITIVE 11: the EK-rooted pin is drop-in for the ADR-0019 quote verify.
-    ekv = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/ek-pin.hex 2>&1; echo RC=$?")
+    ekv = run(f"bulkhead-collector attest verify /tmp/env.json {D} {nonce} @/tmp/ek-pin.hex @/tmp/heads.txt 2>&1; echo RC=$?")
     out("\n[verify+ ek-rooted pin]\n" + ekv + "\n")
     check("attest verify: OK" in ekv and "RC=0" in ekv,
           "the EK-rooted pin drives the existing quote verify to OK (drop-in: EK-rooted pin == the box AK pin)")
