@@ -710,9 +710,20 @@ type provEvent struct {
 	Mode     string // observe | enforce
 }
 
+// durableFile is the subset of *os.File that append() uses. It is an interface (not *os.File directly) so
+// tests can inject I/O faults — a Write or Sync that errors — to exercise the transactional-append rollback
+// in append(). *os.File satisfies it, so production behavior is unchanged. Mirrors router/audit.go.
+type durableFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Truncate(int64) error
+	Stat() (os.FileInfo, error)
+	Close() error
+}
+
 type auditLog struct {
-	mu       sync.Mutex // serialize append: the broker decision chain (brokerAL) is appended from concurrent
-	f        *os.File   // connection-handler goroutines (recordDecision/recordNarrow) — mirrors router/audit.go.
+	mu       sync.Mutex  // serialize append: the broker decision chain (brokerAL) is appended from concurrent
+	f        durableFile // connection-handler goroutines (recordDecision/recordNarrow) — mirrors router/audit.go.
 	path     string
 	priv     ed25519.PrivateKey
 	prevHash []byte
@@ -857,9 +868,9 @@ func lastChainHash(path string) []byte {
 func (a *auditLog) append(ev provEvent) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.seq++
+	nextSeq := a.seq + 1 // a LOCAL: a.seq is not advanced until the write+sync below fully succeed
 	r := auditRecord{
-		Seq: a.seq, TS: time.Now().UnixNano(),
+		Seq: nextSeq, TS: time.Now().UnixNano(),
 		CgroupID: ev.CgroupID, PID: ev.PID, Comm: ev.Comm, Hook: ev.Hook,
 		Decision: ev.Decision, Mode: ev.Mode,
 		PrevHash: hex.EncodeToString(a.prevHash),
@@ -881,14 +892,37 @@ func (a *auditLog) append(ev provEvent) error {
 	if err != nil {
 		return err
 	}
+	// TRANSACTIONAL append (mirrors router/audit.go): capture the pre-append EOF, and on ANY Write/Sync
+	// failure truncate the partial/unacked tail back to it (a.mu makes EOF a stable rollback point).
+	// Combined with advancing a.seq/a.prevHash ONLY on full success, the on-disk chain always ends at the
+	// last fully-synced record — never a gapped seq (a left-advanced a.seq with no record) nor a forked
+	// prev_hash (a durable record the in-memory tip skipped) — so one transient I/O error (ENOSPC/EIO) is
+	// retried cleanly instead of bricking the next boot's fail-closed verify-audit gate (verify.go).
+	fi, err := a.f.Stat()
+	if err != nil {
+		return err
+	}
+	off := fi.Size()
 	if _, err := a.f.Write(append(line, '\n')); err != nil {
+		a.rollback(off)
 		return err
 	}
 	if err := a.f.Sync(); err != nil {
+		a.rollback(off)
 		return err
 	}
+	a.seq = nextSeq // commit the in-memory tip ONLY now that the record is durable
 	a.prevHash = sum[:]
 	return nil
+}
+
+// rollback drops any bytes written past off (the pre-append EOF) so a failed/partial record never strands
+// on disk to gap or fork the chain; append() leaves a.seq/a.prevHash uncommitted, so a clean retry
+// re-appends from off. Best-effort: a Truncate failure is itself a hard I/O fault and is logged, not fatal.
+func (a *auditLog) rollback(off int64) {
+	if err := a.f.Truncate(off); err != nil {
+		log.Printf("audit: rollback truncate to %d: %v", off, err)
+	}
 }
 
 func (a *auditLog) Close() error { return a.f.Close() }
