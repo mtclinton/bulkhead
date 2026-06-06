@@ -8,6 +8,16 @@ inherit core-image
 # lives on a separate persistent partition, not a RAUC slot.
 IMAGE_FEATURES += "read-only-rootfs"
 
+# ADR-0027 production seam: a fixed system group so the router's per-boot DynamicUser can write its
+# persistent signed routing-decision chain on /data across reboots. Each boot the router gets a DIFFERENT
+# dynamic uid, so it cannot OWN the persistent dir/files — instead a group-writable, setgid chain dir is
+# group-owned by this group and the router joins it via SupplementaryGroups (see bulkhead-router-data.conf).
+# Baked into /etc/group at image build because read-only-rootfs leaves no writable /etc for runtime
+# sysusers. Only the router (a DynamicUser service) needs it; the User=root collector/broker chains do not.
+# The name is deliberately distinct from the router unit's DynamicUser name to avoid a transient-user clash.
+inherit extrausers
+EXTRA_USERS_PARAMS = "groupadd -r bulkhead-audit;"
+
 IMAGE_INSTALL += " \
     bulkhead-router \
     bulkhead-agent \

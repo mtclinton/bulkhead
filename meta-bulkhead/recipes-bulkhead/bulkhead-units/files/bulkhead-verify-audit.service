@@ -8,9 +8,15 @@
 #
 # Verifies against the SEALED seed (LoadCredential audit-seed -> sealedAuditPub), NOT the
 # exported audit-pub.txt: an attacker who rewrites a chain can also rewrite a sibling pubkey
-# file, but cannot forge a signature under the sealed/persistent seed. Runs as root (the
-# chains are 0600, owned by the collector/broker DynamicUser uids, and the seed credential
-# is 0400) — it only READS, holds no capabilities, and writes nothing.
+# file, but cannot forge a signature under the sealed/persistent seed. Runs as root holding
+# ONLY CAP_DAC_READ_SEARCH — a read-only DAC bypass. The collector/broker run User=root so
+# their chains are 0600 root:root (root reads them as owner), but the ROUTER runs
+# DynamicUser=yes (ADR-0027), so its chain is 0600 owned by a per-boot NON-root uid that
+# capability-less root cannot open — a live boot caught this as "open
+# .../audit-router/provenance.jsonl: permission denied", which failed the gate CLOSED and
+# bricked the boot. CAP_DAC_READ_SEARCH lets the gate READ any chain regardless of owner; it
+# still writes nothing and cannot modify a chain (that is CAP_DAC_OVERRIDE, deliberately NOT
+# granted), so the "read-only verifier" property holds.
 #
 # Yocto-only (needs /data + the sealed seed). ConditionPathIsMountPoint=/data mirrors the
 # seal service (F6): no real /data => nothing trustworthy to verify, skip and let the
@@ -22,7 +28,7 @@ RequiresMountsFor=/data
 ConditionPathIsMountPoint=/data
 After=bulkhead-seal-audit-key.service
 Requires=bulkhead-seal-audit-key.service
-Before=bulkhead-collector.service bulkhead-broker.service
+Before=bulkhead-collector.service bulkhead-broker.service bulkhead-router.service
 
 [Service]
 Type=oneshot
@@ -35,8 +41,15 @@ ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit-broker/p
 # (per-agent egress manifests, broker TCB registration, enforce toggles). Sibling of the
 # collector chain in the same audit dir; a missing file (no control writes yet) verifies as OK.
 ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit/control.jsonl
+# ADR-0027: the ROUTER's signed routing-decision chain, persisted on /data and signed with the same
+# sealed seed (domain="router", resolved from the audit-router/ path). A missing file (no routing yet,
+# e.g. first boot) verifies as OK; a present-but-tampered router chain fails the boot like the others.
+ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit-router/provenance.jsonl
 User=root
-CapabilityBoundingSet=
+# Read-only DAC bypass: needed to read the router's DynamicUser-owned 0600 chain (see header).
+# NOT CAP_DAC_OVERRIDE — the gate must never be able to modify a chain, only read it.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

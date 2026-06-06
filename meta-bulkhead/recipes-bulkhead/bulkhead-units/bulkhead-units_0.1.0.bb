@@ -7,11 +7,14 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git \
            file://bulkhead-collector-data.conf \
            file://bulkhead-broker-data.conf \
+           file://bulkhead-router-data.conf \
            file://bulkhead-seal-audit-key.service \
            file://bulkhead-seal-audit-key \
            file://bulkhead-verify-audit.service \
            file://bulkhead-selftest-verify.conf"
-SRCREV = "06c35155e0d2a46250e8d3a9d083eb6d510a1048"
+# Pinned to the ADR-0027 snapshot so the fetched rootfs-overlay carries the router's
+# 11-audit.conf base drop-in (the local files/ layer adds 12-data-persistence.conf on top).
+SRCREV = "e3239ef5676aa35473e96ad19088af7d15a50340"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
@@ -86,6 +89,12 @@ do_install() {
 	install -d ${D}${systemd_system_unitdir}/bulkhead-broker.service.d
 	install -m0644 ${WORKDIR}/bulkhead-broker-data.conf \
 		${D}${systemd_system_unitdir}/bulkhead-broker.service.d/10-data-persistence.conf
+
+	# Yocto-only: persist the router's signed routing-decision chain on /data (ADR-0027 seam).
+	# The bulkhead-router.service.d/ dir was already created above for the overlay's 11-audit.conf;
+	# 12- sorts AFTER it so this drop-in's /data BULKHEAD_AUDIT_DIR override is the one that wins.
+	install -m0644 ${WORKDIR}/bulkhead-router-data.conf \
+		${D}${systemd_system_unitdir}/bulkhead-router.service.d/12-data-persistence.conf
 
 	# Yocto-only: first-boot TPM sealing of the audit signing seed (ADR-0008)
 	install -m0644 ${WORKDIR}/bulkhead-seal-audit-key.service ${D}${systemd_system_unitdir}/

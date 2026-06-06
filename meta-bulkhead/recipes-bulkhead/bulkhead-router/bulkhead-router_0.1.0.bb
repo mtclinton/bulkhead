@@ -5,7 +5,10 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-SRCREV = "06c35155e0d2a46250e8d3a9d083eb6d510a1048"
+# Pinned to the ADR-0027 snapshot: the router's signed routing-decision audit chain
+# (src/router/audit.go). The /data + sealed-seed production wiring lives in the local
+# meta-bulkhead layer (bulkhead-router-data.conf), not in this fetched source.
+SRCREV = "e3239ef5676aa35473e96ad19088af7d15a50340"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"

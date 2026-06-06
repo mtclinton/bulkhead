@@ -21,7 +21,7 @@ RequiresMountsFor=/data
 # the collector/broker fail closed (missing credential + BULKHEAD_REQUIRE_SEALED_KEY=1)
 # rather than signing the audit chain with an ephemeral key. The box still boots (nofail).
 ConditionPathIsMountPoint=/data
-Before=bulkhead-collector.service bulkhead-broker.service
+Before=bulkhead-collector.service bulkhead-broker.service bulkhead-router.service
 
 [Service]
 Type=oneshot

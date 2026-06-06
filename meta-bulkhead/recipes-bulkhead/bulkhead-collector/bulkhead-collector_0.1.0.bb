@@ -5,8 +5,10 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-# Pinned to the source snapshot with the cilium/ebpf v0.17.3 re-pin (Go 1.22-buildable).
-SRCREV = "157322689299de082ed7de3bb45616eba058e6b3"
+# Pinned to the ADR-0027 snapshot: verify-audit gains the audit-router -> "router" domain
+# case, so the boot gate can verify the router's chain. (Also carries the cilium/ebpf
+# v0.17.3 re-pin, Go 1.22-buildable, and the ADR-0026 no-rewind verdict.)
+SRCREV = "e3239ef5676aa35473e96ad19088af7d15a50340"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"

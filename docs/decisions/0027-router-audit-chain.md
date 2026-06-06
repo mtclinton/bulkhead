@@ -57,16 +57,39 @@ broken audit path surfaces as the router failing to start / 500ing — caught by
 
 ## Seam
 
-- **Key (v1).** The router uses `loadSigningKey`'s ephemeral per-boot fallback (verified via the exported
-  `audit-pub.txt`) on the Buildroot image — enough to prove the signed chain + verify-audit + no-rewind
-  end-to-end. PRODUCTION on the Yocto appliance needs a STABLE sealed seed for cross-boot verification: a
-  data drop-in redirecting `BULKHEAD_AUDIT_DIR` to `/data/bulkhead/audit-router` (DynamicUser perms via a
-  fixed `SupplementaryGroups` + group-writable dir) and the TPM-sealed `audit-seed`. The three design
-  proposals converged on SHARING the existing sealed seed (domain-separated) — same TPM/boot/admin, so a
-  separate seed adds operational complexity without reducing the real blast radius, and domain tags +
-  file isolation contain a network-facing-router compromise to its own chain. Wiring that + the boot-gate
-  line on the Yocto appliance is the follow-up (it needs a Yocto router-decision live test this
-  environment doesn't yet run).
+- **Key (v1, Buildroot).** The router uses `loadSigningKey`'s ephemeral per-boot fallback (verified via the
+  exported `audit-pub.txt`) on the Buildroot image — enough to prove the signed chain + verify-audit +
+  no-rewind end-to-end.
+- **Key (production, Yocto) — now wired.** PRODUCTION on the read-only-rootfs Yocto appliance uses a STABLE
+  sealed seed for cross-boot verification. The Yocto-only `bulkhead-router-data.conf` drop-in (installed as
+  `bulkhead-router.service.d/12-data-persistence.conf`, sorting after the Buildroot `11-audit.conf`)
+  redirects `BULKHEAD_AUDIT_DIR` to `/data/bulkhead/audit-router` and `LoadCredential`s the TPM-sealed
+  `audit-seed` with `BULKHEAD_REQUIRE_SEALED_KEY=1` (fail-closed). The three design proposals converged on
+  SHARING the existing sealed seed (domain-separated by the `"router"` tag) — same TPM/boot/admin, so a
+  separate seed adds operational complexity without reducing the real blast radius, while domain tags +
+  file isolation contain a network-facing-router compromise to its own chain. The DynamicUser perms problem
+  (the router's uid differs each boot, so it can't OWN a persistent `/data` dir) is solved with a fixed
+  `bulkhead-audit` system group baked into `/etc/group` at image build (`bulkhead-image.bb`, `extrausers`):
+  a `+`-privileged `ExecStartPre` creates the chain dir `root:bulkhead-audit`, setgid `2770`, and
+  group-write-enables any prior-boot chain files, and the router joins the group via `SupplementaryGroups`
+  — so whichever dynamic uid runs can append the same persistent chain. The boot gate gains a
+  `verify-audit /data/bulkhead/audit-router/provenance.jsonl` line (verified against the same sealed seed),
+  and the seal + verify-audit units order `Before=bulkhead-router.service`. The `bulkhead-router`,
+  `bulkhead-collector`, and `bulkhead-units` recipes are pinned to the ADR-0027 source (`e3239ef`) so the
+  image carries the router's audit-chain binary, the `audit-router`→`"router"` verify-audit case, and the
+  `11-audit.conf` overlay.
+- **Live-verified — and the gate must hold `CAP_DAC_READ_SEARCH`.** Booted live under swtpm
+  (`scripts/qemu-yocto-router-check.py`, two boots via an in-guest reboot): all 19 checks pass — the group is
+  baked, the chain persists on `/data` signed by the sealed seed, the verify-audit gate passes on BOTH boots
+  (verifying the persisted chain against the sealed seed before the router restarts), the chain survives the
+  reboot, and the second boot APPENDS to it (no-rewind CLEAN; dir `2770 root:bulkhead-audit`, file
+  group-writable `0660`). The live boot caught a real fail-closed BUG that static review and unit tests both
+  missed: the verify-audit gate ran as capability-less root, which reads the collector/broker chains
+  (`0600 root:root`, as owner) but NOT the router's DynamicUser-owned `0600` chain —
+  `open .../audit-router/provenance.jsonl: permission denied` failed the gate CLOSED and bricked the boot.
+  Fix: grant the gate the read-only `CAP_DAC_READ_SEARCH` (deliberately NOT the write-capable
+  `CAP_DAC_OVERRIDE`), so it can read any chain regardless of owner while remaining unable to modify one — the
+  "read-only verifier" property holds.
 - **Honest limit.** Like every ADR-0017 chain, this gives tamper-EVIDENCE + non-repudiation AFTER the
   fact, not protection against a compromised router altering its own decisions before signing — that is
   the BPF-LSM floor's and the network-isolation's job. The signed chain proves what a relying party can
