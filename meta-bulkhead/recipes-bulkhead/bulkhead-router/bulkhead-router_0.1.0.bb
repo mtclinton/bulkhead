@@ -5,10 +5,11 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-# Pinned to the ADR-0027 snapshot: the router's signed routing-decision audit chain
-# (src/router/audit.go). The /data + sealed-seed production wiring lives in the local
-# meta-bulkhead layer (bulkhead-router-data.conf), not in this fetched source.
-SRCREV = "e3239ef5676aa35473e96ad19088af7d15a50340"
+# Pinned to the ADR-0029 snapshot (lockstep with the collector): the router's signed
+# routing-decision audit chain (src/router/audit.go) carries the 015ef04 audit-chain UTF-8
+# coercion fix landed since e3239ef. The /data + sealed-seed production wiring lives in the
+# local meta-bulkhead layer (bulkhead-router-data.conf), not in this fetched source.
+SRCREV = "9aa207d69d3d3815600da99a377edb20f7c75677"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
