@@ -74,3 +74,38 @@ func TestIsBrokerCaller(t *testing.T) {
 		}
 	}
 }
+
+// TestShouldRetryControl — regression for the ADR-0018 boot-race retry gap. egress-set-self (and the
+// other one-shot verbs) used to fail on the FIRST non-OK reply, so a cold-boot dial that lost the race
+// against the collector binding the socket (controlRPC returns a "control dial ..." TRANSPORT error)
+// failed the agent unit outright. The fix retries TRANSPORT failures for every verb while keeping a
+// SERVER rejection ("ERR ...") terminal, so a genuine rejection still fail-closes fast. wait-broker-tcb
+// remains the sole verb that polls on a server reply too (its "ERR not-registered" is the poll loop).
+func TestShouldRetryControl(t *testing.T) {
+	// Transport failures (the boot race) are retried for EVERY verb — controlRPC wraps dial/send/read
+	// errors with a "control " prefix.
+	transport := []string{"control dial: no such file or directory", "control send: broken pipe", "control read: EOF"}
+	for _, verb := range []string{"egress-set-self", "egress-clear-self", "grant-clear-self", "tcb-register-broker", "wait-broker-tcb"} {
+		for _, resp := range transport {
+			if !shouldRetryControl(verb, resp) {
+				t.Fatalf("verb %q must RETRY a transport failure %q (the boot race)", verb, resp)
+			}
+		}
+	}
+	// A SERVER rejection is terminal for the one-shot verbs — fail-closed fast, do NOT hang the 30s
+	// boot-race window on a genuine rejection.
+	for _, verb := range []string{"egress-set-self", "egress-clear-self", "grant-clear-self", "tcb-register-broker"} {
+		for _, resp := range []string{"ERR not-an-agent", "ERR bad-classes", "ERR map", "ERR update", "ERR not-broker"} {
+			if shouldRetryControl(verb, resp) {
+				t.Fatalf("verb %q must NOT retry a server rejection %q (must fail-closed fast)", verb, resp)
+			}
+		}
+	}
+	// wait-broker-tcb is the exception: it polls on a server reply too, since "ERR not-registered" is
+	// its expected loop condition while the broker self-registers into tcb_cgroups.
+	for _, resp := range []string{"ERR not-registered", "ERR map", "ERR broker-cgroup"} {
+		if !shouldRetryControl("wait-broker-tcb", resp) {
+			t.Fatalf("wait-broker-tcb must keep polling on server reply %q", resp)
+		}
+	}
+}

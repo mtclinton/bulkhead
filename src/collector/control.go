@@ -396,9 +396,15 @@ func cmdControl(args []string) {
 		fmt.Fprintln(os.Stderr, "unknown ctl verb")
 		os.Exit(2)
 	}
-	// wait-broker-tcb polls (the broker may still be starting); the others are one-shot. The
-	// agent +ExecStartPre uses egress-set-self: a non-OK reply => non-zero exit => the unit
-	// fails => the payload never forks (ADR-0005 fail-closed preserved).
+	// Every verb tolerates the ADR-0018 boot race: the collector is Type=exec and binds the control
+	// socket as its LAST startup step, so an early caller — notably the agent's +ExecStartPre
+	// egress-set-self, ordered only After=bulkhead-collector (which does NOT guarantee the socket is
+	// bound) — can dial before the socket exists and get a TRANSPORT failure ("control dial ..." from
+	// controlRPC). That is retried (shouldRetryControl). A SERVER reply ("ERR ...") is a real
+	// rejection and is TERMINAL: egress-set-self fail-closes IMMEDIATELY — a non-OK exit fails the
+	// unit so the payload never forks (ADR-0005 preserved) — rather than masking a genuine rejection
+	// behind the 30s boot-race window. wait-broker-tcb is the one verb that also polls a server reply
+	// (its expected "ERR not-registered" while the broker self-registers into tcb_cgroups).
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		ok, resp := controlRPC(line)
@@ -406,12 +412,28 @@ func cmdControl(args []string) {
 			fmt.Println(resp)
 			return
 		}
-		if args[0] != "wait-broker-tcb" || time.Now().After(deadline) {
+		if !shouldRetryControl(args[0], resp) || time.Now().After(deadline) {
 			fmt.Fprintln(os.Stderr, resp)
 			os.Exit(1)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// shouldRetryControl decides whether cmdControl keeps polling after a non-OK controlRPC reply. It
+// closes the ADR-0018 boot-race gap in which egress-set-self (the agent +ExecStartPre manifest write)
+// failed on the FIRST dial: a TRANSPORT failure (resp prefixed "control " — controlRPC's dial/send/
+// read error wrap) means the collector has not yet bound the socket, and is retried for EVERY verb.
+// A SERVER reply (any non-"control " resp, i.e. "ERR ...") is a real rejection and is terminal — so a
+// genuine egress-set-self rejection (bad-classes, not-an-agent) fail-closes fast instead of hanging
+// the 30s window. wait-broker-tcb is the sole exception: it deliberately polls on a server reply too,
+// since "ERR not-registered" IS its expected loop condition while the broker registers. PURE /
+// unit-testable (cmdControl itself os.Exit()s); mirrors controlRPCGate's transport-vs-server split.
+func shouldRetryControl(verb, resp string) bool {
+	if verb == "wait-broker-tcb" {
+		return true // polls on any non-OK until its deadline (waiting for broker TCB registration)
+	}
+	return strings.HasPrefix(resp, "control ") // transport failure (boot race) only; server ERRs terminal
 }
 
 // controlRPCRetry re-dials the control socket until OK or a bounded deadline. ADR-0018: boot-time
