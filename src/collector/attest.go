@@ -69,6 +69,22 @@ func claimsLine(c map[string]string) string {
 
 func mustHex(s string) []byte { b, _ := hex.DecodeString(s); return b }
 
+// decodeECDSASig decodes the hex R and S of an ECDSA signature. Unlike mustHex (which silently returns
+// empty bytes on bad hex -> big.Int(0), so a malformed component logs IDENTICALLY to a genuine signature
+// mismatch -- a security-audit clarity gap), a non-hex component here is a DISTINCT, explicit error. The
+// crypto stays fail-closed either way (a malformed sig never verifies); this only sharpens the audit trail.
+func decodeECDSASig(rHex, sHex string) (*big.Int, *big.Int, error) {
+	rb, err := hex.DecodeString(rHex)
+	if err != nil {
+		return nil, nil, fmt.Errorf("AK signature component R not valid hex")
+	}
+	sb, err := hex.DecodeString(sHex)
+	if err != nil {
+		return nil, nil, fmt.Errorf("AK signature component S not valid hex")
+	}
+	return new(big.Int).SetBytes(rb), new(big.Int).SetBytes(sb), nil
+}
+
 func ecdsaPubFromDER(der []byte) (*ecdsa.PublicKey, error) {
 	pk, err := x509.ParsePKIXPublicKey(der)
 	if err != nil {
@@ -916,8 +932,10 @@ func verifyEnvelopeChecks(env *attestEnvelope, expectedD, nonce, akDER []byte) e
 		return fmt.Errorf("AK pub: %v", err)
 	}
 	h := sha256.Sum256(quoted)
-	r := new(big.Int).SetBytes(mustHex(env.SigR))
-	s := new(big.Int).SetBytes(mustHex(env.SigS))
+	r, s, err := decodeECDSASig(env.SigR, env.SigS)
+	if err != nil {
+		return fmt.Errorf("FAIL — %v", err)
+	}
 	if !ecdsa.Verify(pub, h[:], r, s) {
 		return fmt.Errorf("FAIL — AK signature invalid")
 	}

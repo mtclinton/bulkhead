@@ -745,8 +745,13 @@ func delegatedDropIn(classes, instance, routerURL string, hasTask bool) string {
 		// split it into invalid assignments).
 		b.WriteString("Environment=\"BULKHEAD_AGENT_TASK=Report your egress manifest over loopback, then finish.\"\n")
 	}
-	if routerURL != "" {
-		b.WriteString("Environment=BULKHEAD_ROUTER_URL=" + routerURL + "\n")
+	// Defense-in-depth (security audit): routerURL is operator-set (TCB), but write it like the task above
+	// — the WHOLE assignment double-quoted — AND drop it entirely if it carries a control char. A literal
+	// newline would otherwise break out of the line and inject systemd directives into the child's drop-in;
+	// a clean URL never has control chars, so this only rejects a malformed config (the child then falls back
+	// to its own default router endpoint), never a legitimate value.
+	if routerURL != "" && strings.IndexFunc(routerURL, func(r rune) bool { return r < 0x20 || r == 0x7f }) < 0 {
+		b.WriteString("Environment=\"BULKHEAD_ROUTER_URL=" + routerURL + "\"\n")
 	}
 	return b.String()
 }

@@ -192,7 +192,7 @@ func TestDelegatedDropInNoTaskBytes(t *testing.T) {
 		"Environment=BULKHEAD_AGENT_NO_EXPAND=1\n",       // a delegated child cannot self-widen (lifetime narrow-never-widen)
 		"LoadCredential=agent-task:/run/bulkhead/tasks/d1-deadbeef-kid.task\n",
 		"Environment=BULKHEAD_AGENT_TASK_CRED=agent-task\n",
-		"Environment=BULKHEAD_ROUTER_URL=http://127.0.0.1:8088\n",
+		"Environment=\"BULKHEAD_ROUTER_URL=http://127.0.0.1:8088\"\n", // double-quoted hardening (security audit)
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("drop-in missing fixed line %q\n---\n%s", want, out)
