@@ -21,14 +21,42 @@ func TestSelectGrantPrunes(t *testing.T) {
 		{Cgid: 100, Hook: hookSetuid}, // live -> kept (per-hook, both survive)
 		{Cgid: 200, Hook: hookSetuid}, // dead -> pruned
 	}
-	del := selectGrantPrunes(keys, live)
+	del := selectGrantPrunes(keys, live, nil) // nil grantSeen == cmdGC authoritative one-shot
 	if len(del) != 1 || del[0].Cgid != 200 {
 		t.Fatalf("selectGrantPrunes = %v, want exactly {200,setuid}", del)
 	}
 	// Recycle: a cgid present in BOTH live and as a grant key must NOT be pruned (its inode
 	// currently backs a live agent dir).
-	if del2 := selectGrantPrunes([]bpfGrantKey{{Cgid: 100, Hook: hookPtrace}}, live); len(del2) != 0 {
+	if del2 := selectGrantPrunes([]bpfGrantKey{{Cgid: 100, Hook: hookPtrace}}, live, nil); len(del2) != 0 {
 		t.Fatalf("a recycled-onto-live cgid must never be pruned, got %v", del2)
+	}
+}
+
+// TestSelectGrantPrunesRaceGuard — regression for BH-001 (the gc-delete/writer race). The concurrent
+// gcLoop scans live cgids lock-free (gc.go:230, deliberately outside controlMu for latency) and only
+// then takes controlMu to delete. A grant_once written by handleBrokerConn for an agent that was created
+// AFTER that scan (so it is absent from the stale `live` set) must NOT be reaped on the racing pass.
+// With a non-nil grantSeen the selector applies the same two-pass witnessed-live guard as egress: a dead
+// cgid is pruned only if a PRIOR pass saw it live. A never-witnessed dead cgid (the freshly-written grant)
+// is spared; once a later pass witnesses it live and it then dies, it is reaped. nil grantSeen (cmdGC's
+// one-shot, not concurrent with the loop) keeps the authoritative single-pass — covered above.
+func TestSelectGrantPrunesRaceGuard(t *testing.T) {
+	grantSeen := map[uint64]struct{}{} // the loop's persistent witnessed-live set, fresh
+	// Pass 1: cgid 200's grant exists but 200 is NOT in the (stale, race-losing) live set and was never
+	// witnessed live -> it is the freshly-written-during-the-race grant and MUST be spared, not reaped.
+	if del := selectGrantPrunes([]bpfGrantKey{{Cgid: 200, Hook: hookSetuid}}, map[uint64]struct{}{}, grantSeen); len(del) != 0 {
+		t.Fatalf("a never-witnessed dead grant cgid was reaped (the BH-001 race): %v", del)
+	}
+	// Pass 2: 200 is now witnessed live -> recorded in grantSeen, still not pruned.
+	if del := selectGrantPrunes([]bpfGrantKey{{Cgid: 200, Hook: hookSetuid}}, map[uint64]struct{}{200: {}}, grantSeen); len(del) != 0 {
+		t.Fatalf("a live grant cgid must never be pruned, got %v", del)
+	}
+	if _, ok := grantSeen[200]; !ok {
+		t.Fatal("a witnessed-live grant cgid (200) must be recorded in grantSeen")
+	}
+	// Pass 3: 200's agent has now genuinely died (gone from live) AND was previously witnessed -> reap it.
+	if del := selectGrantPrunes([]bpfGrantKey{{Cgid: 200, Hook: hookSetuid}}, map[uint64]struct{}{}, grantSeen); len(del) != 1 || del[0].Cgid != 200 {
+		t.Fatalf("a witnessed-then-dead grant cgid must be reaped, got %v", del)
 	}
 }
 

@@ -68,15 +68,16 @@ func liveAgentCgids() map[uint64]struct{} {
 // runGCPass deletes per-agent map entries for dead cgids. DELETE-ONLY; never Update/create;
 // never touches tcb_cgroups/enforce_flags. Returns what it deleted (for logging + `gc`).
 //
-//   - grant_once: delete key iff its cgid is NOT live. No provenance gate is needed — GRANT-ONCE
-//     is structurally agent-gated (handleBrokerConn rejects any non-agent cgroup before a grant
-//     is written), so every grant cgid is agent-born; not-live == a dead agent. (Fail-DANGEROUS
-//     target — a stranded grant over-permits.)
+//   - grant_once: delete key iff its cgid is NOT live (and, in the concurrent gcLoop, was previously
+//     WITNESSED live — the `grantSeen` two-pass guard, mirroring egress; see selectGrantPrunes). No
+//     provenance gate is needed — GRANT-ONCE is structurally agent-gated (handleBrokerConn rejects any
+//     non-agent cgroup before a grant is written), so every grant cgid is agent-born; not-live == a
+//     dead agent. (Fail-DANGEROUS target — a stranded grant over-permits.)
 //   - egress_policy: delete key iff its cgid is NOT live AND was previously WITNESSED live under
 //     the agent slice (in `seen`). egress_policy legitimately holds arbitrary non-agent cgids
 //     (`egress set <cgroup>`), which are never seen live as an agent, so are never pruned.
 //     `seen` grows with every live agent egress cgid this pass. (Fail-safe secondary target.)
-func runGCPass(live map[uint64]struct{}, gm, ep *ebpf.Map, seen map[uint64]struct{}) (grantDel []bpfGrantKey, egressDel []uint64) {
+func runGCPass(live map[uint64]struct{}, gm, ep *ebpf.Map, seen, grantSeen map[uint64]struct{}) (grantDel []bpfGrantKey, egressDel []uint64) {
 	if gm != nil {
 		var keys []bpfGrantKey
 		var k bpfGrantKey
@@ -85,7 +86,7 @@ func runGCPass(live map[uint64]struct{}, gm, ep *ebpf.Map, seen map[uint64]struc
 		for it.Next(&k, &v) { // collect-then-delete: never mutate the map under its iterator
 			keys = append(keys, k)
 		}
-		grantDel = selectGrantPrunes(keys, live)
+		grantDel = selectGrantPrunes(keys, live, grantSeen)
 		for _, dk := range grantDel {
 			if err := gm.Delete(dk); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 				log.Printf("gc: delete grant_once cg=%d hook=%d: %v", dk.Cgid, dk.Hook, err)
@@ -110,12 +111,25 @@ func runGCPass(live map[uint64]struct{}, gm, ep *ebpf.Map, seen map[uint64]struc
 	return grantDel, egressDel
 }
 
-// selectGrantPrunes returns the grant keys whose cgid is NOT live — a dead agent's grant (every
-// grant cgid is agent-born by construction). Pure; the safety-critical predicate.
-func selectGrantPrunes(keys []bpfGrantKey, live map[uint64]struct{}) []bpfGrantKey {
+// selectGrantPrunes returns the grant keys to prune (every grant cgid is agent-born by construction).
+// With a non-nil grantSeen (the concurrent gcLoop) it applies the SAME two-pass witnessed-live guard as
+// egress: prune a dead cgid only if it was previously witnessed live (in grantSeen), so a grant WRITTEN
+// between the lock-free live scan and the controlMu delete (a stale-live TOCTOU) is never reaped on the
+// racing pass — it is simply spared until a later pass witnesses it live, then dead. With a nil grantSeen
+// (cmdGC's one-shot, which is NOT concurrent with the loop) it prunes any dead cgid in a single pass,
+// preserving cmdGC's documented "authoritative for grant_once" behavior. Pure; the safety-critical predicate.
+func selectGrantPrunes(keys []bpfGrantKey, live, grantSeen map[uint64]struct{}) []bpfGrantKey {
 	var del []bpfGrantKey
 	for _, k := range keys {
-		if _, ok := live[k.Cgid]; !ok {
+		if _, ok := live[k.Cgid]; ok {
+			if grantSeen != nil {
+				grantSeen[k.Cgid] = struct{}{}
+			}
+			continue
+		}
+		if grantSeen == nil { // cmdGC one-shot: authoritative, prune any dead cgid immediately
+			del = append(del, k)
+		} else if _, was := grantSeen[k.Cgid]; was { // gcLoop: only prune a cgid we previously witnessed live (race-safe)
 			del = append(del, k)
 		}
 	}
@@ -198,6 +212,7 @@ func reconcileTCB(tcb *ebpf.Map) (pruned []uint64) {
 // safe because runCollector os.RemoveAll(pinDir) wipes egress_policy on the same start.
 func gcLoop(stop <-chan struct{}) {
 	seen := map[uint64]struct{}{}
+	grantSeen := map[uint64]struct{}{}
 	t := time.NewTicker(gcInterval)
 	defer t.Stop()
 	for {
@@ -220,7 +235,7 @@ func gcLoop(stop <-chan struct{}) {
 			// serialized vs the attestDigest/gatePosture reads, so a digest/gate never observes a TORN map
 			// mid-gc. Held ONLY across the (bounded, <=1024-entry) mutations, NOT the cgroup-fs scan above.
 			controlMu.Lock()
-			gd, ed := runGCPass(live, gm, ep, seen)
+			gd, ed := runGCPass(live, gm, ep, seen, grantSeen)
 			var tp []uint64
 			if terr == nil {
 				tp = reconcileTCB(tcb)
@@ -264,7 +279,7 @@ func cmdGC() {
 	}
 	defer ep.Close()
 	live := liveAgentCgids()
-	gd, ed := runGCPass(live, gm, ep, map[uint64]struct{}{})
+	gd, ed := runGCPass(live, gm, ep, map[uint64]struct{}{}, nil)
 	for _, k := range gd {
 		fmt.Printf("gc: pruned grant_once cg=%d hook=%s\n", k.Cgid, hookNames[k.Hook])
 	}
