@@ -14,12 +14,12 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-selftest-verify.conf \
            file://audit-cred-tpm2.conf \
            file://seal-tpm2-mode.conf"
-# Pinned to the ADR-0029 snapshot, in lockstep with the collector/router recipes. This is a
-# no-op for the built output (the fetched rootfs-overlay is byte-identical between e3239ef and
-# 9aa207d — the four intervening commits touch src/ and the local files/ layer, not the
+# Pinned to the router-audit snapshot (d09f0db), in lockstep with the collector/router recipes.
+# Still a no-op for the built output (the fetched rootfs-overlay is byte-identical from e3239ef
+# through d09f0db — the intervening commits touch src/ and the local files/ layer, not the
 # overlay), bumped only to keep all three bulkhead-repo recipes on one snapshot. The overlay
 # still carries the router's 11-audit.conf base drop-in (local files/ adds 12- on top).
-SRCREV = "9aa207d69d3d3815600da99a377edb20f7c75677"
+SRCREV = "d09f0db7f336b6d0d3cee806677233ad88a76783"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
