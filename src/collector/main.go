@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -710,7 +711,8 @@ type provEvent struct {
 }
 
 type auditLog struct {
-	f        *os.File
+	mu       sync.Mutex // serialize append: the broker decision chain (brokerAL) is appended from concurrent
+	f        *os.File   // connection-handler goroutines (recordDecision/recordNarrow) — mirrors router/audit.go.
 	path     string
 	priv     ed25519.PrivateKey
 	prevHash []byte
@@ -853,6 +855,8 @@ func lastChainHash(path string) []byte {
 }
 
 func (a *auditLog) append(ev provEvent) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.seq++
 	r := auditRecord{
 		Seq: a.seq, TS: time.Now().UnixNano(),
@@ -860,6 +864,15 @@ func (a *auditLog) append(ev provEvent) error {
 		Decision: ev.Decision, Mode: ev.Mode,
 		PrevHash: hex.EncodeToString(a.prevHash),
 	}
+	// Coerce the chained string fields to valid UTF-8 BEFORE signing. json.Marshal replaces ill-formed
+	// UTF-8 with U+FFFD on write, so a raw-byte signature over invalid UTF-8 (e.g. a non-UTF-8 process
+	// Comm, or an untrusted client field) would never re-verify after the JSON round-trip and verify-audit
+	// would fail the boot gate CLOSED on a self-inconsistent record. Coercing here (not in canonical())
+	// keeps canonical() byte-identical across modules; for valid UTF-8 it is a no-op (the golden is unchanged).
+	r.Comm = strings.ToValidUTF8(r.Comm, "�")
+	r.Hook = strings.ToValidUTF8(r.Hook, "�")
+	r.Decision = strings.ToValidUTF8(r.Decision, "�")
+	r.Mode = strings.ToValidUTF8(r.Mode, "�")
 	sum := sha256.Sum256(canonical(r, a.prevHash, a.domain))
 	r.Hash = hex.EncodeToString(sum[:])
 	r.Sig = hex.EncodeToString(ed25519.Sign(a.priv, sum[:]))

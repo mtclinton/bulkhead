@@ -88,7 +88,10 @@ func resolveAgentTarget(target string) (uint64, string, error) {
 		}
 	}
 	full := filepath.Clean(filepath.Join("/sys/fs/cgroup", rel))
-	if !strings.Contains(full, "/bulkhead-agent.slice/bulkhead-agent@") {
+	// Use the SAME anchored predicate as the broker/control gates (isAgentCgroup), NOT a substring match:
+	// a crafted nested path like /…/bulkhead-agent@x.service/payload.scope must NOT pass (the ADR-0016 C1
+	// gap, fixed in control.go/broker.go but historically missed here).
+	if !isAgentCgroup(strings.TrimPrefix(full, "/sys/fs/cgroup")) {
 		return 0, "", errNarrowNotAgent
 	}
 	cgID, err := cgroupIDFromInode(full)

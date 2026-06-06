@@ -25,8 +25,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // auditEvent is the router's overload of the six chained fields (mirrors the collector's provEvent).
@@ -182,6 +184,15 @@ func (a *auditLog) append(ev auditEvent) error {
 		Comm: ev.Comm, Hook: ev.Hook, Decision: ev.Decision, Mode: ev.Mode,
 		PrevHash: hex.EncodeToString(a.prevHash),
 	}
+	// Coerce the chained string fields to valid UTF-8 BEFORE signing. json.Marshal replaces ill-formed
+	// UTF-8 with U+FFFD on write, so a raw-byte signature over invalid UTF-8 (e.g. an untrusted client
+	// model name split mid-rune by the cap) would never re-verify after the JSON round-trip and the boot
+	// gate would fail CLOSED on a self-inconsistent record (a remote brick). Coercing here (not in
+	// canonical()) keeps canonical() byte-identical with the collector; for valid UTF-8 it is a no-op.
+	r.Comm = strings.ToValidUTF8(r.Comm, "�")
+	r.Hook = strings.ToValidUTF8(r.Hook, "�")
+	r.Decision = strings.ToValidUTF8(r.Decision, "�")
+	r.Mode = strings.ToValidUTF8(r.Mode, "�")
 	sum := sha256.Sum256(canonical(r, a.prevHash, a.domain))
 	r.Hash = hex.EncodeToString(sum[:])
 	r.Sig = hex.EncodeToString(ed25519.Sign(a.priv, sum[:]))
@@ -215,7 +226,14 @@ const maxAuditModelLen = 200
 // received the prompt). One signed, non-repudiable record per routing decision.
 func (a *auditLog) recordRoute(route, reason, model string, promptLen int, provider string) error {
 	if len(model) > maxAuditModelLen {
-		model = model[:maxAuditModelLen] + "...(truncated)"
+		// Truncate on a rune boundary at or before the byte cap: keeps the DoS byte-bound (the cap exists
+		// to bound chain growth from a flood) AND valid UTF-8, so a multi-byte rune is never split mid-way
+		// (which append() would otherwise coerce to U+FFFD in the signed evidence).
+		cut := maxAuditModelLen
+		for cut > 0 && !utf8.RuneStart(model[cut]) {
+			cut--
+		}
+		model = model[:cut] + "...(truncated)"
 	}
 	mode := fmt.Sprintf("reason=%s model=%s promptlen=%d", reason, model, promptLen)
 	if provider != "" {
