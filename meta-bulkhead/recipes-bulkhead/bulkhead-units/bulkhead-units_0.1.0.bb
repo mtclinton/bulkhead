@@ -11,7 +11,9 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-seal-audit-key.service \
            file://bulkhead-seal-audit-key \
            file://bulkhead-verify-audit.service \
-           file://bulkhead-selftest-verify.conf"
+           file://bulkhead-selftest-verify.conf \
+           file://audit-cred-tpm2.conf \
+           file://seal-tpm2-mode.conf"
 # Pinned to the ADR-0027 snapshot so the fetched rootfs-overlay carries the router's
 # 11-audit.conf base drop-in (the local files/ layer adds 12-data-persistence.conf on top).
 SRCREV = "e3239ef5676aa35473e96ad19088af7d15a50340"
@@ -22,6 +24,13 @@ inherit systemd allarch
 # Yocto-only collector drop-in (redirect the audit log to /data) lives in files/,
 # NOT the shared rootfs-overlay (so Buildroot's writable-rootfs path is untouched).
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+
+# ADR-0028: audit-seed key delivery, chosen at build time. "plain" (default, VM/dev) ships the
+# plaintext-on-/data seed via LoadCredential. "tpm2" (bare metal) installs override drop-ins so the
+# seal service hardware-seals the seed and every consumer loads it via LoadCredentialEncrypted.
+# Set BULKHEAD_SEAL_KEY = "tpm2" in local.conf for a bare-metal build. do_install branches on it.
+BULKHEAD_SEAL_KEY ??= "plain"
+do_install[vardeps] += "BULKHEAD_SEAL_KEY"
 
 # Files-only recipe; ${S} is the repo root whose Makefile is the Buildroot
 # prototype's — keep base_do_configure from running `make clean` against it.
@@ -106,6 +115,23 @@ do_install() {
 	install -d ${D}${systemd_system_unitdir}/bulkhead-selftest.service.d
 	install -m0644 ${WORKDIR}/bulkhead-selftest-verify.conf \
 		${D}${systemd_system_unitdir}/bulkhead-selftest.service.d/10-verify-chain.conf
+
+	# ADR-0028: bare-metal tpm2 production wiring (BULKHEAD_SEAL_KEY=tpm2). Coherently switch the
+	# seed delivery from plaintext-on-/data (LoadCredential) to a TPM2-sealed cred
+	# (LoadCredentialEncrypted) across the seal service + EVERY audit-seed consumer in one place.
+	# Default plain (VM/dev) installs none of this, so that path stays byte-for-byte unchanged.
+	if [ "${BULKHEAD_SEAL_KEY}" = "tpm2" ]; then
+		install -d ${D}${systemd_system_unitdir}/bulkhead-seal-audit-key.service.d
+		install -m0644 ${WORKDIR}/seal-tpm2-mode.conf \
+			${D}${systemd_system_unitdir}/bulkhead-seal-audit-key.service.d/20-tpm2.conf
+		# Same cred override for each consumer; 20- sorts after their base drop-in (10-/12-). The
+		# .d dirs for collector/broker/router exist from above; install -d is idempotent for them.
+		for svc in bulkhead-collector bulkhead-broker bulkhead-router bulkhead-verify-audit; do
+			install -d ${D}${systemd_system_unitdir}/$svc.service.d
+			install -m0644 ${WORKDIR}/audit-cred-tpm2.conf \
+				${D}${systemd_system_unitdir}/$svc.service.d/20-audit-cred-tpm2.conf
+		done
+	fi
 
 	# nftables default-deny egress floor
 	install -Dm0644 ${OV}/etc/nftables.conf ${D}${sysconfdir}/nftables.conf

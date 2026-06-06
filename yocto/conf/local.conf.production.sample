@@ -29,6 +29,16 @@ BULKHEAD_RAUC_KEYDIR = "/etc/bulkhead/rauc"
 RAUC_KEY_FILE  = "/etc/bulkhead/rauc/release.key.pem"
 RAUC_CERT_FILE = "/etc/bulkhead/rauc/release.cert.pem"
 
+# --- Audit-seed key delivery (ADR-0008/0028) ---
+# On BARE-METAL hardware (a reliable TPM), uncomment this to hardware-seal the audit signing
+# seed: the seal service writes a TPM2-sealed /data/bulkhead/audit-seed.cred (PCR 7) and every
+# audit-seed consumer (collector, broker, router, verify-audit) loads it via
+# LoadCredentialEncrypted -- encrypted at rest, unsealable only on the expected boot. Leave it
+# DEFAULT (plain) for qemu/VM builds: qemu's vTPM makes PID1 LoadCredentialEncrypted
+# non-deterministically flaky (systemd #21747 / ADR-0001 #12), so the VM ships a plaintext
+# on-device seed instead. The tpm2 SEAL mechanism is spike-proven; live PID1 use is bare-metal.
+#   BULKHEAD_SEAL_KEY = "tpm2"
+
 # A/B wic disk: GRUB A/B bootconf + UEFI firmware to assemble/boot the image.
 PREFERRED_RPROVIDER_virtual-grub-bootconf = "rauc-qemu-grubconf"
 EXTRA_IMAGEDEPENDS += "ovmf"
