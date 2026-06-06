@@ -258,8 +258,15 @@ const maxAuditModelLen = 200
 
 // recordRoute overloads the six chained fields onto a routing decision (the broker's recordDecision is the
 // precedent): Hook="route", Decision=the route (local|api), Mode carries the reason + request evidence
-// (model + prompt length, and the chosen paid provider for an api route — the outbound destination that
-// received the prompt). One signed, non-repudiable record per routing decision.
+// (model + prompt length, and the chosen paid provider for an api route — the provider this request was
+// ROUTED to). One signed, non-repudiable record per routing decision.
+//
+// SEMANTICS (intent, not delivery): this record is written BEFORE the upstream call (record-before-act —
+// a failed append refuses the request, so no route ever proceeds un-audited; ADR-0005 fail-closed). So
+// provider= attests the routing DECISION, not confirmed delivery: a subsequent upstream 503/timeout/
+// missing-key does NOT retract it. This is deliberately conservative — it can over-attribute a paid
+// intent that never reached the wire, but it can never HIDE a paid call (which is what a denial-of-wallet
+// auditor cares about). A relying party must read provider= as "routed to", not "billed by".
 func (a *auditLog) recordRoute(route, reason, model string, promptLen int, provider string) error {
 	if len(model) > maxAuditModelLen {
 		// Truncate on a rune boundary at or before the byte cap: keeps the DoS byte-bound (the cap exists
