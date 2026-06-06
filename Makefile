@@ -29,6 +29,7 @@ help:
 	@echo "  make verify-attest  boot under swtpm, assert TPM-quoted proof of the enforcing TCB (+ tamper/replay rejected)"
 	@echo "  make tsauth-disk    build the Tailscale auth-key provisioning volume"
 	@echo "  make verify-tailnet boot with the key volume and assert the node joins"
+	@echo "  make verify-yocto-router  (Yocto wic + swtpm) assert the router /data signed chain survives a reboot"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -81,6 +82,12 @@ tsauth-disk:
 
 verify-tailnet:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-tailnet-check.py
+
+# Yocto (not Buildroot): boots the wic image under swtpm via yocto/scripts/run-qemu-tpm.sh
+# and asserts the router's signed routing-decision chain persists on /data and is appended
+# across an in-guest reboot (ADR-0027/0028). Needs a built wic (bitbake bulkhead-image).
+verify-yocto-router:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-yocto-router-check.py
 
 menuconfig: | $(BUILDROOT_DIR)
 	$(BR) menuconfig
