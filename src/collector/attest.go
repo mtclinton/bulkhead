@@ -343,7 +343,18 @@ func gatePosture() (bool, string, error) {
 		return false, "", err
 	}
 	detail := fmt.Sprintf("e0=%d e2=%d tcb_clean=%t count=%d", b2i(e0), b2i(e2), clean, count)
-	return e0 && e2 && clean, detail, nil
+	return posturePass(e0, e2, clean, count), detail, nil
+}
+
+// posturePass is the gate predicate, extracted pure so the invariant is unit-testable. It enforces the
+// SAME cardinality the attestation digest does: the live TCB must have EXACTLY expectedTCBCount members.
+// `clean` alone is insufficient — tcbMembershipState compares live against an `expected` set that DROPS
+// the broker when brokerCgroupPath is unresolvable (broker not running), so a broker-absent {root,collector}
+// reads clean at count=2 and would pass a gate that checked only `e0 && e2 && clean`, while the off-box
+// verifier (expectedDefaultArmedD bakes in expectedTCBCount) and the crypto self-check both reject it.
+// Requiring count==expectedTCBCount closes that gate-vs-verify divergence and fails closed on count<3.
+func posturePass(e0, e2, clean bool, count int) bool {
+	return e0 && e2 && clean && count == expectedTCBCount
 }
 
 func b2i(b bool) int {
