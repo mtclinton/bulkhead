@@ -143,26 +143,9 @@ func cmdVerifyAudit(args []string) {
 		os.Exit(2)
 	}
 	chain := args[0]
-	var sinceArg, expectTip string
-	var rest []string
-	for _, a := range args[1:] {
-		switch {
-		case strings.HasPrefix(a, "--since="):
-			sinceArg = strings.TrimPrefix(a, "--since=")
-		case strings.HasPrefix(a, "--expect-tip="):
-			expectTip = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(a, "--expect-tip=")))
-		case strings.HasPrefix(a, "-"):
-			// A misspelled flag (e.g. --sinc=) must NOT be silently dropped into rest[] and ignored —
-			// that would skip a REQUESTED no-rewind/tip check yet exit 0 (false assurance). Fail closed.
-			log.Fatalf("verify-audit: unknown flag %q (expected --since=<head-hex|@file> or --expect-tip=<head-hex>)", a)
-		default:
-			rest = append(rest, a) // the optional pubkey positional
-		}
-	}
-	// At most ONE positional after the chain (the pubkey). Extra positionals are a typo/misuse, not a
-	// silently-ignored second key — fail closed so a requested check can't be quietly skipped.
-	if len(rest) > 1 {
-		log.Fatalf("verify-audit: unexpected extra argument(s) %v (only one pubkey positional is accepted)", rest[1:])
+	sinceArg, expectTip, rest, err := parseVerifyArgs(args[1:])
+	if err != nil {
+		log.Fatalf("verify-audit: %v", err)
 	}
 	pub, src, err := resolveAuditPub(rest, filepath.Dir(chain))
 	if err != nil {
@@ -223,6 +206,42 @@ func cmdVerifyAudit(args []string) {
 	if failed {
 		os.Exit(1)
 	}
+}
+
+// parseVerifyArgs parses the verify-audit argv after the chain: the optional pubkey positional and the
+// --since=/--expect-tip= flags. It FAILS CLOSED on every malformed flag rather than dropping a requested
+// check and exiting 0 (false assurance): an unknown flag, more than one positional, OR a present-but-EMPTY
+// --since=/--expect-tip= — the empty case guards the offline relying-party footgun where an unset/typo'd
+// shell var (`--since=$TIP` with $TIP unset) expands to `--since=` and would otherwise silently downgrade a
+// requested no-rewind/tip binding to a plain integrity check. (The all-zero genesis form is `--since=0000…`,
+// 64 hex zeros, NOT empty.) Pure so the fail-closed parsing is unit-testable (cmdVerifyAudit log.Fatalf's it).
+func parseVerifyArgs(args []string) (sinceArg, expectTip string, rest []string, err error) {
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--since="):
+			sinceArg = strings.TrimPrefix(a, "--since=")
+			if strings.TrimSpace(sinceArg) == "" {
+				return "", "", nil, fmt.Errorf("--since= has an empty value (a requested no-rewind check must not be silently skipped — did a shell var expand to empty? genesis is --since=<64 hex zeros>)")
+			}
+		case strings.HasPrefix(a, "--expect-tip="):
+			expectTip = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(a, "--expect-tip=")))
+			if expectTip == "" {
+				return "", "", nil, fmt.Errorf("--expect-tip= has an empty value (a requested tip check must not be silently skipped — did a shell var expand to empty?)")
+			}
+		case strings.HasPrefix(a, "-"):
+			// A misspelled flag (e.g. --sinc=) must NOT be silently dropped into rest[] and ignored —
+			// that would skip a REQUESTED no-rewind/tip check yet exit 0 (false assurance). Fail closed.
+			return "", "", nil, fmt.Errorf("unknown flag %q (expected --since=<head-hex|@file> or --expect-tip=<head-hex>)", a)
+		default:
+			rest = append(rest, a) // the optional pubkey positional
+		}
+	}
+	// At most ONE positional after the chain (the pubkey). Extra positionals are a typo/misuse, not a
+	// silently-ignored second key — fail closed so a requested check can't be quietly skipped.
+	if len(rest) > 1 {
+		return "", "", nil, fmt.Errorf("unexpected extra argument(s) %v (only one pubkey positional is accepted)", rest[1:])
+	}
+	return sinceArg, expectTip, rest, nil
 }
 
 // chainDomain infers the per-chain domain (F4) the verifier must use from the chain's path.
