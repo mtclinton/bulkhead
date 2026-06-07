@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only
-# RAUC install-check hook (ADR-0031 seam): refuse a bundle OLDER than the running system version, so a
+# RAUC install-check hook (ADR-0039 seam): refuse a bundle OLDER than the running system version, so a
 # still-validly-signed PAST release cannot be replayed to reintroduce a patched vulnerability (no
 # downgrade below the INSTALLED version). This is the DYNAMIC complement to system.conf's STATIC
 # min-bundle-version floor: the floor (device-side) blocks everything below a fixed point and catches even

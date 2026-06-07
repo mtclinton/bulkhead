@@ -1,7 +1,8 @@
-# ADR-0031: RAUC A/B update-path hardening — close the rollback axis
+# ADR-0039: RAUC A/B update-path hardening — close the rollback axis
 
 Status: Accepted
 Date: 2026-06-07
+Note: originally committed as ADR-0031; renumbered to 0039 so the isolation-substrate architecture roadmap (ADR-0031–0038) keeps its contiguous, cross-referenced block. Earlier commit messages/comments reference the old number.
 Relates to: ADR-0003 (Yocto production + RAUC A/B verity updates — the capability this hardens), the
 `verify-rauc` live test (the A/B install + rollback check this extends). Closes the HIGH + supporting
 findings of the 2026-06-07 RAUC update-path adversarial audit.

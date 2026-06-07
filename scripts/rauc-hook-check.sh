@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-only
-# Host-side check for the RAUC no-downgrade install-check hook (ADR-0031). Drives the hook with crafted
+# Host-side check for the RAUC no-downgrade install-check hook (ADR-0039). Drives the hook with crafted
 # RAUC_MF_VERSION (incoming) + BULKHEAD_RUNNING_VERSION (running) and asserts the exit code: a downgrade
 # rejects (RAUC treats exit >=10 as reject), same/newer/missing allow (exit 0). No qemu, no bundle.
 set -u

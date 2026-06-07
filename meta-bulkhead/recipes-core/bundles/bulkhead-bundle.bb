@@ -7,7 +7,7 @@ inherit bundle
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
-# Downgrade protection part 2 (ADR-0031 seam): an install-check hook that refuses a bundle OLDER than the
+# Downgrade protection part 2 (ADR-0039 seam): an install-check hook that refuses a bundle OLDER than the
 # running version (no downgrade below INSTALLED) — the dynamic complement to system.conf's static
 # min-bundle-version floor. The hook is signed (part of the bundle), runs in the running system's context,
 # and reads /etc/os-release VERSION_ID. Host-tested via `make verify-rauc-hook`.
