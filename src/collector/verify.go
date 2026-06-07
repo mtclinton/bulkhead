@@ -15,6 +15,20 @@ package main
 // by shipping the log off-box). The verifier therefore treats seq==1 with a zero prev_hash
 // as a legitimate boot boundary and re-anchors there; any OTHER seq reset or non-zero
 // first-link is tampering.
+//
+// DETECTION BOUNDARY (deliberate, ADR-0030). What this on-box verifier DETECTS fail-closed:
+// any in-place edit, fork, reorder, illegal seq reset, forged signature, or deletion of an
+// INTERIOR record / whole MIDDLE subchain (the continuous cross-boot prev_hash linkage breaks).
+// What it deliberately does NOT detect on-box: (a) deletion of the WHOLE chain file, or
+// truncation of its LATEST tail — byte-indistinguishable from a legitimate first boot / empty
+// chain to any purely-local verifier (a box cannot non-circularly verify its own deletable
+// history against its own deletable anchor); and (b) an UNPARSEABLE final record from an
+// interrupted append (crash/power-loss after the write, before the in-process rollback) is
+// TOLERATED as a partial tail (verifyChainState), required so an unclean shutdown does not
+// false-brick the boot. Both (a) and (b) are the same tail boundary, and both are caught
+// OFF-BOX by ADR-0026 `--expect-tip`/`--since` against a fresh attested HEAD (tip=0 / a missing
+// prior-observed HEAD => fail-closed at the relying party). A forged tail is NOT tolerated:
+// it is well-formed JSON and so still fails the hash/sig/seq/prev checks.
 
 import (
 	"bufio"
@@ -66,14 +80,28 @@ func verifyChainState(path string, pub ed25519.PublicKey, domain string, since [
 
 	prev := zeroHash         // running prev-hash; chains CONTINUOUSLY across boots (F5)
 	var expectSeq uint64 = 0 // expected seq WITHIN the current per-boot subchain
+	var tornTail error       // a deferred unmarshal error on a line that MIGHT be an interrupted final record
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
 			continue
 		}
+		if tornTail != nil {
+			// A prior line failed to parse and was NOT the last non-empty line, so it is mid-chain
+			// corruption/tamper, never an interrupted tail. Fail closed.
+			return n, nil, 0, false, tornTail
+		}
 		var r auditRecord
 		if e := json.Unmarshal(line, &r); e != nil {
-			return n, nil, 0, false, fmt.Errorf("record %d: malformed json: %w", n+1, e)
+			// Possibly a torn FINAL record from a crash/power-loss mid-append: append() fsyncs every
+			// record and rolls its tail back on a RETURNED Write/Sync error, but a power cut between the
+			// write and that rollback can still leave an unparseable trailing fragment. DEFER the error —
+			// it is tolerated ONLY if no further non-empty line follows (checked above + after the loop).
+			// A FORGED record is well-formed JSON, so it still reaches the crypto checks below and fails
+			// closed; this tolerates ONLY an unparseable trailing fragment (the accepted, off-box-mitigated
+			// tail-truncation boundary — see the file header).
+			tornTail = fmt.Errorf("record %d: malformed json: %w", n+1, e)
+			continue
 		}
 		// seq resets to 1 at a per-boot boundary; otherwise it increments. But prev_hash
 		// chains CONTINUOUSLY across boots (F5) and is NOT reset here — so deleting a whole
@@ -109,6 +137,13 @@ func verifyChainState(path string, pub ed25519.PublicKey, domain string, since [
 	}
 	if e := sc.Err(); e != nil {
 		return n, nil, 0, false, e
+	}
+	if tornTail != nil {
+		// The deferred parse error was on the LAST non-empty line at EOF — an unacknowledged partial
+		// tail from an interrupted append. Tolerate it: the chain is valid through record n (the last
+		// fully-committed record), which is also the tip. Required by the trust model (a partial tail
+		// must not false-brick the boot); mirrors lastChainHash's tolerant re-anchoring on the same.
+		log.Printf("verify-audit: tolerating an unparseable final record (interrupted-append partial tail; chain valid through %d record(s))", n)
 	}
 	if n == 0 {
 		return 0, nil, 0, false, nil

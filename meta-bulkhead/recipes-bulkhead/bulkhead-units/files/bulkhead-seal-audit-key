@@ -27,6 +27,31 @@ CRED="$DATADIR/audit-seed.cred"
 KEY="${BULKHEAD_SEAL_KEY:-plain}"
 mkdir -p "$DATADIR"
 
+# ADR-0030: refuse to mint a FRESH seed over surviving chains. If the seed/cred is absent or
+# unreadable but signed audit chains from a prior boot still exist on /data, minting a new seed
+# would derive a new pubkey under which every surviving record fails ed25519.Verify -> the
+# verify-audit boot gate bricks with a cryptic per-chain "signature invalid". That is correct
+# fail-closed for TAMPER, but for a legitimate seed loss (a backup/restore that excluded the
+# seed, a TPM clear / PCR-7 change) it should be a LOUD, self-documenting stop that leaves state
+# untouched for recovery — not a fresh seed that masks the cause. So: detect surviving chains and
+# refuse to mint, naming the situation. The operator restores the seed from backup and reboots
+# (this script then finds it valid and leaves it -> the box boots), OR, having genuinely lost the
+# seed and accepting the loss of prior audit history, sets BULKHEAD_SEAL_FORCE_NEW=1 to authorize
+# a fresh identity. First boot / a fully-wiped /data has no chains, so this never blocks it.
+CHAINS="$DATADIR/audit/provenance.jsonl $DATADIR/audit-broker/provenance.jsonl $DATADIR/audit/control.jsonl $DATADIR/audit-router/provenance.jsonl"
+refuse_if_chains_present() {
+	[ "${BULKHEAD_SEAL_FORCE_NEW:-0}" = 1 ] && return 0
+	for c in $CHAINS; do
+		[ -s "$c" ] || continue
+		echo "bulkhead-seal: SEALED AUDIT KEY LOST — the signing seed is absent/unreadable but a signed audit" >&2
+		echo "bulkhead-seal: chain survives on /data ($c). Minting a fresh seed would BRICK the boot (every prior" >&2
+		echo "bulkhead-seal: record fails signature). REFUSING to mint over surviving chains; state left untouched." >&2
+		echo "bulkhead-seal: Restore the seed from backup and reboot, or set BULKHEAD_SEAL_FORCE_NEW=1 to mint a new" >&2
+		echo "bulkhead-seal: identity (this DISCARDS the ability to verify all prior audit history)." >&2
+		exit 1
+	done
+}
+
 if [ "$KEY" = tpm2 ]; then
 	# bare metal: a cred is good iff it decrypts to >= an Ed25519 seed (32 bytes).
 	cred_ok() {
@@ -35,6 +60,7 @@ if [ "$KEY" = tpm2 ]; then
 		[ "${n:-0}" -ge 32 ]
 	}
 	if cred_ok "$CRED"; then echo "bulkhead-seal: $CRED valid (tpm2); leaving it"; exit 0; fi
+	refuse_if_chains_present # don't mint a new key under which the surviving chains would fail to verify
 	echo "bulkhead-seal: tpm2-sealing audit seed (PCR ${BULKHEAD_SEAL_PCRS:-7})"
 	rm -f "$CRED" "$CRED.tmp"
 	if dd if=/dev/urandom bs=32 count=1 2>/dev/null \
@@ -52,6 +78,7 @@ if [ -e "$SEED" ] && [ "$(wc -c < "$SEED" 2>/dev/null || echo 0)" -eq 32 ]; then
 	echo "bulkhead-seal: $SEED present (32B); leaving it"
 	exit 0
 fi
+refuse_if_chains_present # don't mint a new key under which the surviving chains would fail to verify
 echo "bulkhead-seal: provisioning plaintext audit seed at $SEED"
 rm -f "$SEED.tmp"
 dd if=/dev/urandom bs=32 count=1 2>/dev/null > "$SEED.tmp"
