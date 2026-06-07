@@ -14,12 +14,12 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-selftest-verify.conf \
            file://audit-cred-tpm2.conf \
            file://seal-tpm2-mode.conf"
-# Pinned to the boot-gate-audit snapshot (3618d59), in lockstep with the collector/router recipes.
-# The fetched rootfs-overlay is still byte-identical from e3239ef through 3618d59, BUT this recipe's
-# LOCAL files/bulkhead-seal-audit-key changed (ADR-0030: refuse to mint a fresh seed over surviving
-# chains) — that file:// is part of SRC_URI, so do_unpack/do_install re-run and re-install it on
-# rebuild regardless of SRCREV. The overlay still carries the router's 11-audit.conf base drop-in.
-SRCREV = "3618d59a4df5527a3c81d15a114d8cd8615bcb0b"
+# Pinned to the attestation-audit snapshot (672fcea), in lockstep with the collector/router recipes.
+# The fetched rootfs-overlay is still byte-identical from e3239ef through 672fcea; the only units change
+# is the LOCAL files/bulkhead-seal-audit-key (ADR-0030: refuse to mint a fresh seed over surviving
+# chains, shipped at 3618d59) — that file:// is part of SRC_URI, so do_unpack/do_install re-run and
+# re-install it regardless of SRCREV. The overlay still carries the router's 11-audit.conf base drop-in.
+SRCREV = "672fcea64bf142a07207b5ec900c1991826aea08"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
