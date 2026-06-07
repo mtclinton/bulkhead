@@ -4,6 +4,9 @@ Status: Accepted
 Date: 2026-06-01
 Relates to: ADR-0007 (the human approval-gate — this fills its "generalize beyond
 delegation" seam), ADR-0006 (delegation), ADR-0004 (E2 egress manifest).
+Superseded-in-part (roadmap, Proposed): [ADR-0034](0034-egress-structural.md) reclasses the
+domain-allowlist *expansion* this gates as an advisory hint, not the egress boundary; the
+approval-gate mechanism itself is unaffected. Roadmap; in force until the ADR-0034 proxy ships.
 
 ## Context
 

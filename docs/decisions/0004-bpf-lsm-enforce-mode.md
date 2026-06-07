@@ -5,6 +5,12 @@
 - Follows [ADR 0001](0001-foundational-architecture.md) (decision #8: "a BPF-LSM
   deny layer comes later") and [ADR 0003](0003-yocto-production-migration.md)
   (Yocto 6.6 migration).
+- **Superseded-in-part (roadmap, Proposed):** [ADR-0031](0031-isolation-substrate.md)
+  relocates the *default*-tier substrate off this shared-kernel BPF-LSM (which is
+  retained for the trusted/namespace tier), and [ADR-0035](0035-action-authorization.md)
+  supersedes the fail-open / observe-default posture with default-deny resource
+  mediation. Those are roadmap; this ADR remains the authoritative *shipped*
+  enforcement until that substrate ships.
 
 ## Context
 

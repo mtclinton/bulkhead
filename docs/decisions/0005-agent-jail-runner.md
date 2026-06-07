@@ -4,6 +4,10 @@ Status: Accepted
 Date: 2026-05-31
 Relates to: ADR-0001 (decision #7: custom ns+cgroup+seccomp agent jail), ADR-0004
 (BPF-LSM enforce E0–E3, keyed on cgroup id)
+Superseded-in-part (roadmap, Proposed): [ADR-0031](0031-isolation-substrate.md) makes a
+separate-kernel boundary the default tier and reclassifies this shipped ns+cgroup+seccomp
+jail as the trusted/low-threat tier only. Roadmap; this ADR remains the authoritative
+shipped runner until that substrate ships.
 
 ## Context
 

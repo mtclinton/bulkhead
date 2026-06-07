@@ -4,6 +4,11 @@ Status: Accepted
 Date: 2026-05-31
 Relates to: ADR-0004 (E2 per-agent egress), ADR-0005 (agent jail runner), ADR-0001
 (deferred: inter-agent capability delegation)
+Superseded-in-part (roadmap, Proposed): [ADR-0034](0034-egress-structural.md) reclasses the
+dnsmasq→nftset domain allowlist as advisory, not the egress boundary. NB the monotone-attenuating
+*delegation* model here (parent ∩ requested) is NOT superseded — [ADR-0037](0037-multi-agent-domains.md)
+builds its cross-domain authority model on it. Roadmap; the shipped allowlist remains in force until
+the ADR-0034 proxy ships.
 
 ## Context
 

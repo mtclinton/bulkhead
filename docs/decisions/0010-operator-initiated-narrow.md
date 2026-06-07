@@ -5,6 +5,9 @@ Date: 2026-06-02
 Relates to: ADR-0009 (generalized approval-gate + operator-approved egress EXPAND —
 this is its operator-initiated dual), ADR-0007 (the human approval-gate + the uid-0
 operator channel), ADR-0006 (delegation), ADR-0004 (E2 egress manifest).
+Superseded-in-part (roadmap, Proposed): [ADR-0034](0034-egress-structural.md) reclasses the
+egress allowlist this throttles as advisory, not the boundary; the operator NARROW incident-throttle
+mechanism itself is unaffected. Roadmap; in force until the ADR-0034 proxy ships.
 
 ## Context
 
