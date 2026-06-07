@@ -182,14 +182,22 @@ static __always_inline __u32 classify_v4(__u32 a)
 
 // Classify a connect destination into a DST_* class from its sockaddr alone — no
 // IP-set lookup, so nothing to keep in sync with the dnsmasq->nftset allowlist.
-static __always_inline __u32 classify_dest(struct sockaddr *address)
+// addrlen bounds the trustworthy bytes: the LSM hook fires on the kernel's sockaddr
+// copy (only addrlen bytes were copied in) BEFORE the protocol connect rejects a
+// short sockaddr with EINVAL. A sockaddr too short to hold the address for its claimed
+// family is classified DST_OTHER (most-denied) rather than from uninitialized
+// sockaddr_storage bytes — so the verdict hash-chained into the signed provenance log
+// is deterministic, never stack garbage (the connect EINVALs either way; not a bypass).
+static __always_inline __u32 classify_dest(struct sockaddr *address, int addrlen)
 {
-	if (!address)
+	if (!address || addrlen < (int)sizeof(__u16))
 		return DST_OTHER;
 	__u16 fam = 0;
 	bpf_probe_read_kernel(&fam, sizeof(fam), &address->sa_family);
 
 	if (fam == AF_INET) {
+		if (addrlen < (int)sizeof(struct sockaddr_in))
+			return DST_OTHER;                               // too short to hold sin_addr
 		struct sockaddr_in *in = (struct sockaddr_in *)address;
 		__be32 raw = 0;
 		bpf_probe_read_kernel(&raw, sizeof(raw), &in->sin_addr.s_addr);
@@ -197,6 +205,8 @@ static __always_inline __u32 classify_dest(struct sockaddr *address)
 	}
 
 	if (fam == AF_INET6) {
+		if (addrlen < 24) // SIN6_LEN_RFC2133: sin6_addr occupies bytes [8,24)
+			return DST_OTHER;
 		struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)address;
 		__u32 w[4] = {};
 		bpf_probe_read_kernel(&w, sizeof(w), &in6->sin6_addr.in6_u.u6_addr32);
@@ -232,7 +242,7 @@ int BPF_PROG(prov_socket_connect, struct socket *sock, struct sockaddr *address,
 		return ret; // honor a prior LSM deny; never revert (one-way ratchet)
 
 	__u64 cg = bpf_get_current_cgroup_id();
-	__u32 cls = classify_dest(address);
+	__u32 cls = classify_dest(address, addrlen);
 	__u32 decision = 0, mode = 0; // default: allowed, observe
 	int verdict = 0;
 
