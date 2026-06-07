@@ -89,6 +89,13 @@ verify-tailnet:
 verify-yocto-router:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-yocto-router-check.py
 
+# Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
+# bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
+# reboots to prove the rollback to A. Needs a built wic AND bundle (bitbake bulkhead-image
+# bulkhead-bundle).
+verify-rauc:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-rauc-check.py
+
 menuconfig: | $(BUILDROOT_DIR)
 	$(BR) menuconfig
 

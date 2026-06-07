@@ -11,7 +11,9 @@
 # Usage:
 #   yocto/scripts/run-qemu-tpm.sh                 # ephemeral TPM state (fresh PCRs)
 #   BULKHEAD_TPMSTATE=/tmp/bh-tpm run-qemu-tpm.sh # persistent TPM state across reboots
-#   (any extra args are appended to runqemu, e.g. an extra virtio disk for RAUC tests)
+#   BULKHEAD_EXTRA_QEMUPARAMS="-drive file=bundle.img,if=virtio,format=raw,readonly=on" \
+#       run-qemu-tpm.sh                           # attach an extra disk (e.g. a RAUC bundle)
+#   (any trailing args are appended to runqemu, e.g. `snapshot`)
 set -euo pipefail
 
 command -v swtpm >/dev/null 2>&1 || { echo "ERROR: swtpm not installed (apt-get install swtpm swtpm-tools)"; exit 3; }
@@ -51,6 +53,10 @@ echo "[run-qemu-tpm] TPM state: $TPMDIR  (persistent: ${BULKHEAD_TPMSTATE:+yes}$
 # -m 512: the default 256 MiB is too tight for the ADR-0023 self-check (TPM quote + reading the
 # collector binary) on top of the running topology — it intermittently OOM-killed the collector. qemu
 # honors the last -m, so this overrides runqemu's QB_MEM default.
+# BULKHEAD_EXTRA_QEMUPARAMS (optional): folded into the SINGLE qemuparams= string (runqemu keeps only the
+# last qemuparams=, so it must be merged here, not passed separately). Used to attach an extra virtio disk —
+# e.g. a RAUC update bundle for the A/B failover test (scripts/qemu-rauc-check.py).
+QEMUPARAMS="-m 512 -chardev socket,id=chrtpm,path=$SOCK -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 ${BULKHEAD_EXTRA_QEMUPARAMS:-}"
 exec runqemu qemux86-64 wic ovmf nographic kvm slirp \
-	qemuparams="-m 512 -chardev socket,id=chrtpm,path=$SOCK -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0" \
+	qemuparams="$QEMUPARAMS" \
 	"$@"
