@@ -5,12 +5,12 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-# Pinned to the router-audit snapshot (d09f0db): adds 7b545ea — auditLog.append() is now
-# TRANSACTIONAL (a Write/Sync error rolls the unacked tail back instead of bricking the verify-audit
-# boot gate with a durable seq-gap/prev_hash-fork). Carries the ADR-0029 authority-surface race fixes
-# (52f9ab9 control-socket retry, dbda009 BH-001 gc guard), the 015ef04/7c5bc17 audit hardening, the
-# ADR-0027 verify-audit router-chain case, cilium/ebpf v0.17.3, Go 1.22-buildable, ADR-0026 no-rewind.
-SRCREV = "d09f0db7f336b6d0d3cee806677233ad88a76783"
+# Pinned to the boot-gate-audit snapshot (3618d59): ADR-0030 availability hardening — verifyChainState
+# tolerates a crash-interrupted torn final record (no false-brick) and verify-audit fails closed on an
+# empty --since=/--expect-tip= (1e76ea0). Carries the ADR-0029 transactional append (7b545ea) + race
+# fixes (52f9ab9, dbda009), 015ef04/7c5bc17 audit hardening, the ADR-0027 verify-audit router-chain
+# case, cilium/ebpf v0.17.3, Go 1.22-buildable, ADR-0026 no-rewind.
+SRCREV = "3618d59a4df5527a3c81d15a114d8cd8615bcb0b"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
