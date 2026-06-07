@@ -96,6 +96,11 @@ verify-yocto-router:
 verify-rauc:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-rauc-check.py
 
+# Host-side (no qemu): exercise the RAUC no-downgrade install-check hook's exit codes (ADR-0031). A
+# downgrade must reject (exit >=10); same/newer/missing must allow (exit 0). Fast, CI-runnable.
+verify-rauc-hook:
+	@sh $(BULKHEAD_ROOT)/scripts/rauc-hook-check.sh
+
 menuconfig: | $(BUILDROOT_DIR)
 	$(BR) menuconfig
 

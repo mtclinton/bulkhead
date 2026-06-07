@@ -69,5 +69,12 @@ amplifiers). The ROLLBACK axis was open, plus two supporting gaps:
 - **PCR-7 seed-escrow runbook** (ops): a firmware/Secure-Boot/TPM-RMA change perturbs PCR 7 and brings every
   affected box down until the audit seed is restored — provision a seed-escrow/restore runbook (and consider
   auto-reseal after an authenticated firmware update) before bare-metal fleet deployment.
-- **True no-downgrade-below-installed** would need a `RAUC_BUNDLE_HOOKS` install-check comparing to the
-  running version; the static `min-bundle-version` floor is the first, standard step.
+- **True no-downgrade-below-installed** — DONE (this seam item, completed 2026-06-07). A
+  `RAUC_BUNDLE_HOOKS[hooks]="install-check"` hook (`bulkhead-install-check.sh`) rejects (exit ≥ 10, rauc's
+  reject code) a bundle whose `RAUC_MF_VERSION` is older than the running `/etc/os-release` `VERSION_ID`
+  (per-field semver compare in awk; busybox has no `sort -V`) — the DYNAMIC complement to the static
+  `min-bundle-version` floor. The hook ships IN the (CMS-signed) bundle and runs in the running system's
+  context, so it guards downgrades among hook-carrying releases; pre-hook bundles are still caught by the
+  device-side floor as it is raised. Verified: `make verify-rauc-hook` (host, 9 cases — downgrade rejects,
+  same/newer/missing allow) + live (the hook runs at install and allows the current version; verify-rauc's
+  A/B switch + rollback stay green, so a broken hook can't silently brick all updates).
