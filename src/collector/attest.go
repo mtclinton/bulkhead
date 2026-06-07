@@ -421,6 +421,17 @@ func tpmRetry(fn func() error) error {
 
 // tpmMu serializes /dev/tpmrm0 access in the collector process (the TPM is single-session; the
 // extend + quote handlers must not interleave).
+//
+// ACCEPTED ROBUSTNESS DEBT (attestation audit, 2026-06-06): tpmMu is held across the blocking TPM op,
+// which has no per-op deadline/watchdog, so a TPM/swtpm that wedges mid-command (accepts the command but
+// never makes the fd readable) pins tpmMu and blocks every later attestation verb. Assessed and DELIBERATELY
+// not fixed in code: it is NOT input-reachable (malformed credBlob/encSecret/nonce fail hex-decode/length
+// checks before tpmMu is taken), it fails CLOSED (a wedged TPM hangs the quote/selfcheck so no PASS is ever
+// emitted; the relying party hits its own deadline and the gate refuses), it is contingent on a TRUSTED
+// device malfunctioning over a root-only (0660, peerUID==0) socket, and it recovers on collector restart
+// (a unit Restart=/WatchdogSec is the systemd-level mitigation if ever wanted). A per-op TPM watchdog
+// (child goroutine + ctx deadline + Close-on-timeout) was judged not worth the concurrency risk on this
+// path for a trusted-device-malfunction scenario.
 var tpmMu sync.Mutex
 
 // doAttestExtend computes the composite TCB digest and extends it into attestPCR. RUNS IN THE
