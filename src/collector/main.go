@@ -19,6 +19,9 @@
 //	bulkhead-collector probe setuid|capset   run as root from a non-TCB cgroup to
 //	                                  exercise a privilege gain (regain root / re-raise
 //	                                  a capability); exits 1 if E3 denied it (the test).
+//	bulkhead-collector probe connect6 <ip6> <port>   AF_INET6 connect() to a (possibly
+//	                                  v4-mapped) literal from a non-TCB cgroup to exercise
+//	                                  the E2 class gate; exits 1 if E2 denied it (EPERM).
 //	bulkhead-collector status         print the enforce toggles + TCB + egress manifests.
 package main
 
@@ -39,6 +42,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -208,7 +212,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|ptrace|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|narrow <target> <classes>|grant-once <ptrace|setuid|capset>|clear self|gc|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
+	fmt.Fprintln(os.Stderr, "usage: bulkhead-collector run|selftest|enforce on|off [hook]|egress set|clear <cgroup> [classes]|probe setuid|capset|ptrace|connect6 <ip6> <port>|broker|delegate <child-suffix> <classes>|expand <classes>|approve list|allow <id>|deny <id>|narrow <target> <classes>|grant-once <ptrace|setuid|capset>|clear self|gc|verify-audit <chain.jsonl> [pubkeyhex|@pubfile]|status")
 	os.Exit(2)
 }
 
@@ -329,8 +333,51 @@ func cmdEgress(args []string) {
 // then tries to REGAIN it (which the kernel permits but E3 denies when armed).
 // Prints ALLOWED/DENIED and exits 0 (regain allowed) / 1 (regain denied) / 3 (setup).
 func cmdProbe(args []string) {
+	// connect6: issue a genuine AF_INET6 connect() to a (possibly v4-mapped) literal from
+	// THIS process's cgroup, to verify the E2 egress class gate (classify_dest). The LSM
+	// socket_connect hook fires at connect() entry — before the TCP handshake AND before any
+	// v6only check — so an E2 denial surfaces as EPERM synchronously. Building the sockaddr
+	// from net.IP.To16() keeps a v4-mapped literal (::ffff:a.b.c.d) on AF_INET6 — the exact
+	// path a compromised agent would use to dodge a per-class manifest — instead of letting
+	// getaddrinfo normalize it to AF_INET. exit 1 = DENIED (EPERM), 0 = ALLOWED by E2 (we do
+	// not await handshake completion), 3 = setup error.
+	if len(args) >= 1 && args[0] == "connect6" {
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe connect6 <ip6-literal> <port>")
+			os.Exit(2)
+		}
+		ip := net.ParseIP(args[1])
+		if ip == nil || ip.To16() == nil {
+			fmt.Printf("PROBE connect6: bad IPv6 literal %q\n", args[1])
+			os.Exit(3)
+		}
+		port, err := strconv.Atoi(args[2])
+		if err != nil || port < 1 || port > 65535 {
+			fmt.Printf("PROBE connect6: bad port %q\n", args[2])
+			os.Exit(3)
+		}
+		fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			fmt.Printf("PROBE connect6: socket() failed: %v\n", err)
+			os.Exit(3)
+		}
+		defer unix.Close(fd)
+		var sa unix.SockaddrInet6
+		copy(sa.Addr[:], ip.To16())
+		sa.Port = port
+		err = unix.Connect(fd, &sa)
+		if errors.Is(err, unix.EPERM) {
+			fmt.Printf("PROBE connect6 [%s]:%d DENIED (EPERM — E2 egress class gate)\n", args[1], port)
+			os.Exit(1)
+		}
+		// nil or EINPROGRESS (non-blocking) => E2 PERMITTED the connect; any other errno
+		// (ECONNREFUSED/ENETUNREACH/EINVAL...) is a post-permit protocol result — still ALLOWED by E2.
+		fmt.Printf("PROBE connect6 [%s]:%d ALLOWED by E2 (connect err=%v)\n", args[1], port, err)
+		os.Exit(0)
+	}
+
 	if len(args) < 1 || (args[0] != "setuid" && args[0] != "capset" && args[0] != "ptrace") {
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe setuid|capset|ptrace")
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe setuid|capset|ptrace|connect6 <ip6> <port>")
 		os.Exit(2)
 	}
 	// setuid/capset/ptrace are per-thread on Linux; keep the calls on one OS thread.

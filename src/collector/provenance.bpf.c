@@ -164,6 +164,21 @@ static __always_inline void log_decision(__u64 cg, __u32 hook, __u32 decision, _
 	bpf_ringbuf_submit(e, 0);
 }
 
+// Classify a routable IPv4 address (HOST byte order) into its DST_* class.
+// Shared by the AF_INET path and the IPv4-mapped-IPv6 path below so both apply
+// the SAME loopback/link-local/private ladder to an embedded v4 address.
+static __always_inline __u32 classify_v4(__u32 a)
+{
+	__u8 o1 = a >> 24, o2 = (a >> 16) & 0xff;
+	if (o1 == 127) return DST_LOOPBACK;                     // 127.0.0.0/8
+	if (o1 == 169 && o2 == 254) return DST_LINKLOCAL;       // 169.254.0.0/16
+	if (o1 == 10) return DST_PRIVATE;                       // 10.0.0.0/8
+	if (o1 == 172 && (o2 & 0xf0) == 16) return DST_PRIVATE; // 172.16.0.0/12
+	if (o1 == 192 && o2 == 168) return DST_PRIVATE;         // 192.168.0.0/16
+	if (o1 == 100 && (o2 & 0xc0) == 64) return DST_PRIVATE; // 100.64.0.0/10
+	return DST_PUBLIC;
+}
+
 // Classify a connect destination into a DST_* class from its sockaddr alone — no
 // IP-set lookup, so nothing to keep in sync with the dnsmasq->nftset allowlist.
 static __always_inline __u32 classify_dest(struct sockaddr *address)
@@ -177,15 +192,7 @@ static __always_inline __u32 classify_dest(struct sockaddr *address)
 		struct sockaddr_in *in = (struct sockaddr_in *)address;
 		__be32 raw = 0;
 		bpf_probe_read_kernel(&raw, sizeof(raw), &in->sin_addr.s_addr);
-		__u32 a = bpf_ntohl(raw);
-		__u8 o1 = a >> 24, o2 = (a >> 16) & 0xff;
-		if (o1 == 127) return DST_LOOPBACK;                     // 127.0.0.0/8
-		if (o1 == 169 && o2 == 254) return DST_LINKLOCAL;       // 169.254.0.0/16
-		if (o1 == 10) return DST_PRIVATE;                       // 10.0.0.0/8
-		if (o1 == 172 && (o2 & 0xf0) == 16) return DST_PRIVATE; // 172.16.0.0/12
-		if (o1 == 192 && o2 == 168) return DST_PRIVATE;         // 192.168.0.0/16
-		if (o1 == 100 && (o2 & 0xc0) == 64) return DST_PRIVATE; // 100.64.0.0/10
-		return DST_PUBLIC;
+		return classify_v4(bpf_ntohl(raw));
 	}
 
 	if (fam == AF_INET6) {
@@ -194,6 +201,13 @@ static __always_inline __u32 classify_dest(struct sockaddr *address)
 		bpf_probe_read_kernel(&w, sizeof(w), &in6->sin6_addr.in6_u.u6_addr32);
 		if (w[0] == 0 && w[1] == 0 && w[2] == 0 && w[3] == bpf_htonl(1))
 			return DST_LOOPBACK;                            // ::1
+		// IPv4-mapped IPv6 (::ffff:0:0/96): the kernel routes these as IPv4, so an
+		// AF_INET6 connect to e.g. ::ffff:169.254.169.254 actually reaches the IPv4
+		// link-local metadata endpoint. Classify by the EMBEDDED v4 address — same
+		// ladder as AF_INET — so a v4-mapped loopback/link-local/private dest can't
+		// slip through as DST_PUBLIC and bypass the per-class egress manifest.
+		if (w[0] == 0 && w[1] == 0 && w[2] == bpf_htonl(0x0000ffff))
+			return classify_v4(bpf_ntohl(w[3]));
 		__u8 b0 = bpf_ntohl(w[0]) >> 24, b1 = (bpf_ntohl(w[0]) >> 16) & 0xff;
 		if (b0 == 0xfe && (b1 & 0xc0) == 0x80) return DST_LINKLOCAL; // fe80::/10
 		if ((b0 & 0xfe) == 0xfc) return DST_PRIVATE;            // fc00::/7 ULA
