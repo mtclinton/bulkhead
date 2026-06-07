@@ -376,8 +376,48 @@ func cmdProbe(args []string) {
 		os.Exit(0)
 	}
 
+	// connect4: the AF_INET counterpart — a genuine AF_INET connect() to an IPv4 literal,
+	// exercising the AF_INET entry into classify_v4() directly (connect6 with 0.0.0.0 would
+	// take the v4-mapped path instead). The discriminating case is 0.0.0.0 (INADDR_ANY),
+	// which the kernel rewrites to loopback inside ops->connect, AFTER the LSM hook — so a
+	// `public`-but-not-`loopback` agent must see EPERM here. Same exit contract as connect6.
+	if len(args) >= 1 && args[0] == "connect4" {
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe connect4 <ip4-literal> <port>")
+			os.Exit(2)
+		}
+		ip := net.ParseIP(args[1])
+		if ip == nil || ip.To4() == nil {
+			fmt.Printf("PROBE connect4: bad IPv4 literal %q\n", args[1])
+			os.Exit(3)
+		}
+		port, err := strconv.Atoi(args[2])
+		if err != nil || port < 1 || port > 65535 {
+			fmt.Printf("PROBE connect4: bad port %q\n", args[2])
+			os.Exit(3)
+		}
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			fmt.Printf("PROBE connect4: socket() failed: %v\n", err)
+			os.Exit(3)
+		}
+		defer unix.Close(fd)
+		var sa unix.SockaddrInet4
+		copy(sa.Addr[:], ip.To4())
+		sa.Port = port
+		err = unix.Connect(fd, &sa)
+		if errors.Is(err, unix.EPERM) {
+			fmt.Printf("PROBE connect4 %s:%d DENIED (EPERM — E2 egress class gate)\n", args[1], port)
+			os.Exit(1)
+		}
+		// nil or EINPROGRESS (non-blocking) => E2 PERMITTED; any other errno is a post-permit
+		// protocol result (ECONNREFUSED/ENETUNREACH/EINVAL...) — still ALLOWED by E2.
+		fmt.Printf("PROBE connect4 %s:%d ALLOWED by E2 (connect err=%v)\n", args[1], port, err)
+		os.Exit(0)
+	}
+
 	if len(args) < 1 || (args[0] != "setuid" && args[0] != "capset" && args[0] != "ptrace") {
-		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe setuid|capset|ptrace|connect6 <ip6> <port>")
+		fmt.Fprintln(os.Stderr, "usage: bulkhead-collector probe setuid|capset|ptrace|connect4 <ip4> <port>|connect6 <ip6> <port>")
 		os.Exit(2)
 	}
 	// setuid/capset/ptrace are per-thread on Linux; keep the calls on one OS thread.

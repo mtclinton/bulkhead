@@ -170,6 +170,7 @@ static __always_inline void log_decision(__u64 cg, __u32 hook, __u32 decision, _
 static __always_inline __u32 classify_v4(__u32 a)
 {
 	__u8 o1 = a >> 24, o2 = (a >> 16) & 0xff;
+	if (a == 0) return DST_LOOPBACK;                        // 0.0.0.0 (INADDR_ANY): connect() lands on loopback
 	if (o1 == 127) return DST_LOOPBACK;                     // 127.0.0.0/8
 	if (o1 == 169 && o2 == 254) return DST_LINKLOCAL;       // 169.254.0.0/16
 	if (o1 == 10) return DST_PRIVATE;                       // 10.0.0.0/8
@@ -199,6 +200,8 @@ static __always_inline __u32 classify_dest(struct sockaddr *address)
 		struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)address;
 		__u32 w[4] = {};
 		bpf_probe_read_kernel(&w, sizeof(w), &in6->sin6_addr.in6_u.u6_addr32);
+		if (w[0] == 0 && w[1] == 0 && w[2] == 0 && w[3] == 0)
+			return DST_LOOPBACK;                            // :: (IN6ADDR_ANY): connect() lands on loopback
 		if (w[0] == 0 && w[1] == 0 && w[2] == 0 && w[3] == bpf_htonl(1))
 			return DST_LOOPBACK;                            // ::1
 		// IPv4-mapped IPv6 (::ffff:0:0/96): the kernel routes these as IPv4, so an
