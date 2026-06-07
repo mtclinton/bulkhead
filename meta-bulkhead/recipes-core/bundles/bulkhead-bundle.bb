@@ -9,6 +9,14 @@ inherit bundle
 # own system.conf with this string via recipes-core/rauc/files/qemux86-64/system.conf).
 RAUC_BUNDLE_COMPATIBLE = "bulkhead appliance"
 
+# Downgrade protection (RAUC update-path audit). A REAL semver version in the signed manifest (the
+# meta-rauc default is the frozen PV "1.0", which no min-bundle-version gate can act on). The device
+# system.conf sets min-bundle-version so a bundle OLDER than the configured floor is refused at install
+# (rauc check_version_limits: install proceeds iff min <= version, equal allowed). Production overrides
+# this with a monotonic release version (e.g. ${DISTRO_VERSION}-${RELEASE_SERIAL} tied to the release tag),
+# and raises the device floor as old releases age out, so a known-vulnerable signed bundle can't be replayed.
+RAUC_BUNDLE_VERSION = "${DISTRO_VERSION}"
+
 # verity: dm-verity-protected bundle (authenticated, integrity-checked at install).
 RAUC_BUNDLE_FORMAT = "verity"
 

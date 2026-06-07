@@ -54,23 +54,33 @@ ROOTDEV = [
 
 
 def boot1_probe(size):
+    full, off, rem = size // 512, (size // 512) * 512, size % 512
     return [
         READY,
         "echo '<<<BOOT1'",
         *ROOTDEV,
         "rauc status >/tmp/rs1 2>&1",
         "echo \"rauc-compatible=$(grep -c 'bulkhead appliance' /tmp/rs1)\"",
+        "echo \"min-version-set=$(grep -c '^min-bundle-version=' /etc/rauc/system.conf)\"",
         # find the bundle disk: by-id if udev made it, else the 40-300MB whole disk (wic is GBs).
         "BDEV=/dev/disk/by-id/virtio-raucbundle",
         '[ -b "$BDEV" ] || for d in /sys/block/vd? /sys/block/sd?; do [ -e "$d/size" ] || continue; s=$(cat "$d/size"); [ "$s" -ge 80000 ] && [ "$s" -le 600000 ] && BDEV=/dev/$(basename "$d") && break; done',
         'echo "bundle-dev=$BDEV"',
         'echo "bundle-present=$([ -b "$BDEV" ] && echo yes || echo no)"',
-        # copy EXACTLY the bundle bytes (qemu sector-pads the raw drive; trailing zeros break the sig read).
-        # busybox is the only toolset (no head -c, no truncate), so: full 512B sectors via dd, then append
-        # the sub-sector byte remainder (a tiny bs=1 lseek+read). full=size//512 sectors, rem=size%512 bytes.
-        f'dd if="$BDEV" of=/data/bundle.raucb bs=512 count={size // 512} 2>/dev/null',
-        f'dd if="$BDEV" bs=1 skip={(size // 512) * 512} count={size % 512} 2>/dev/null >> /data/bundle.raucb',
+        # exact-byte copy helper (qemu sector-pads the raw drive; trailing zeros break the sig read).
+        # busybox-only (no head -c / truncate): full 512B sectors via dd + the sub-sector byte remainder.
+        # Reused, so /data (100MB) never holds two 74MB copies at once.
+        f'bhcopy() {{ dd if="$BDEV" of=/data/bundle.raucb bs=512 count={full} 2>/dev/null; dd if="$BDEV" bs=1 skip={off} count={rem} 2>/dev/null >> /data/bundle.raucb; }}',
+        "bhcopy",
         'echo "copied-bytes=$(stat -c %s /data/bundle.raucb 2>/dev/null)"',
+        # NEGATIVE — a non-bundle (random blob) MUST be rejected, proving rauc verifies (signature/format)
+        # BEFORE it ever writes a slot, never blindly installing. A small separate blob (busybox dd has no
+        # conv=notrunc for in-place corruption); leaves the good /data/bundle.raucb intact for the real install.
+        'dd if=/dev/urandom of=/data/bad.raucb bs=4096 count=16 2>/dev/null',
+        "rauc install /data/bad.raucb >/tmp/neg 2>&1; echo \"badblob-rc=$?\"",
+        'echo "badblob-tail=$(tail -n1 /tmp/neg)"',
+        "rm -f /data/bad.raucb",
+        # POSITIVE — the real install (default config, min 0.1.0 <= bundle 0.1.0) into the inactive slot.
         "rauc install /data/bundle.raucb >/tmp/ri 2>&1; RC=$?; echo \"install-rc=$RC\"",
         'echo "install-tail=$(tail -n1 /tmp/ri)"',
         '[ "$RC" = 0 ] || sed "s/^/install-log: /" /tmp/ri',  # on FAILURE only, dump the full log
@@ -85,6 +95,9 @@ PROBE_BOOT2 = [
     "echo '<<<BOOT2'",
     *ROOTDEV,
     'echo "broker-active=$(systemctl is-active bulkhead-broker)"',
+    # rollback-gate fix: rauc-mark-good must be coupled to the bulkhead security gates (so a
+    # gate-failing slot is NOT pinned). Assert the dependency wiring is present.
+    "echo \"markgood-deps=$(systemctl show rauc-mark-good.service -p After -p Requires | tr '\\n' '|')\"",
     # mark the just-booted (B) slot bad so the next reboot rolls back to A.
     "rauc status mark-bad booted >/tmp/mb 2>&1; echo \"markbad-rc=$?\"",
     'echo "markbad-tail=$(tail -n1 /tmp/mb)"',
@@ -207,6 +220,7 @@ def main():
 
     s1, s2, s3 = booted_slot(b1), booted_slot(b2), booted_slot(b3)
 
+    mg = kv(b2, "markgood-deps") or ""
     checks = [
         ("BOOT1 captured", ok1),
         ("boot 1 booted slot A", s1 == "A"),
@@ -214,11 +228,14 @@ def main():
         ("rauc sees the bulkhead-appliance system", kv(b1, "rauc-compatible") == "1"),
         ("bundle disk attached + readable", kv(b1, "bundle-present") == "yes"),
         ("exact bundle bytes copied to /data", kv(b1, "copied-bytes") == str(size)),
-        ("rauc install into the inactive slot succeeded", kv(b1, "install-rc") == "0"),
+        ("downgrade gate configured (min-bundle-version shipped)", kv(b1, "min-version-set") == "1"),
+        ("NEGATIVE: rauc REJECTS a non-bundle (verifies before writing a slot)", kv(b1, "badblob-rc") not in (None, "0")),
+        ("rauc install of the valid bundle (>= min-bundle-version) succeeded", kv(b1, "install-rc") == "0"),
         ("BOOT2 captured (reboot after install)", ok2),
         ("A/B SWITCH: boot 2 booted slot B", s2 == "B"),
         ("the freshly-installed B slot is a working enforced bulkhead (collector active)", kv(b2, "collector-active") == "active"),
         ("broker active on B", kv(b2, "broker-active") == "active"),
+        ("ROLLBACK GATE: rauc-mark-good coupled to bulkhead-selftest + verify-audit", "bulkhead-selftest" in mg and "bulkhead-verify-audit" in mg),
         ("rauc mark-bad (booted B) succeeded", kv(b2, "markbad-rc") == "0"),
         ("BOOT3 captured (reboot after mark-bad)", ok3),
         ("ROLLBACK: boot 3 fell back to slot A", s3 == "A"),

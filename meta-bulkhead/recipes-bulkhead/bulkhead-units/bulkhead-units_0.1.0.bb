@@ -13,7 +13,8 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-verify-audit.service \
            file://bulkhead-selftest-verify.conf \
            file://audit-cred-tpm2.conf \
-           file://seal-tpm2-mode.conf"
+           file://seal-tpm2-mode.conf \
+           file://rauc-mark-good-gate.conf"
 # Pinned to the attestation-audit snapshot (672fcea), in lockstep with the collector/router recipes.
 # The fetched rootfs-overlay is still byte-identical from e3239ef through 672fcea; the only units change
 # is the LOCAL files/bulkhead-seal-audit-key (ADR-0030: refuse to mint a fresh seed over surviving
@@ -135,6 +136,12 @@ do_install() {
 				${D}${systemd_system_unitdir}/$svc.service.d/20-audit-cred-tpm2.conf
 		done
 	fi
+
+	# RAUC-audit fix: gate rauc-mark-good on the bulkhead security gates so a slot that fails
+	# selftest/verify-audit is NOT pinned (rolls back). Drop-in over the meta-rauc unit.
+	install -d ${D}${systemd_system_unitdir}/rauc-mark-good.service.d
+	install -m0644 ${WORKDIR}/rauc-mark-good-gate.conf \
+		${D}${systemd_system_unitdir}/rauc-mark-good.service.d/10-bulkhead-gate.conf
 
 	# nftables default-deny egress floor
 	install -Dm0644 ${OV}/etc/nftables.conf ${D}${sysconfdir}/nftables.conf

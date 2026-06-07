@@ -80,4 +80,15 @@ python () {
         bb.fatal("BULKHEAD_PRODUCTION=1 but insecure/dev image feature(s) present: %s. "
                  "Build with yocto/conf/local.conf.production.sample, not the dev/test "
                  "local.conf." % ", ".join(leaked))
+    # RAUC-audit fix: a production build MUST ship a real RAUC device keyring (the off-repo CA), not
+    # meta-rauc's dummy stub — otherwise the appliance trusts the wrong anchor / cannot verify any update
+    # (fail-closed brick), and the production gate would have rubber-stamped it. The runtime keyring is
+    # rauc-conf's ${BULKHEAD_RAUC_KEYDIR}/ca.cert.pem (bbwarn-only upstream); require it here.
+    keydir = d.getVar('BULKHEAD_RAUC_KEYDIR')
+    capath = os.path.join(keydir, 'ca.cert.pem') if keydir else ''
+    if not capath or not os.path.exists(capath) or 'BEGIN CERTIFICATE' not in open(capath).read():
+        bb.fatal("BULKHEAD_PRODUCTION=1 but the RAUC device keyring is not a real CA. Set "
+                 "BULKHEAD_RAUC_KEYDIR to an off-repo directory containing a valid ca.cert.pem (the "
+                 "update trust anchor); without it the build silently ships meta-rauc's dummy stub and "
+                 "the appliance can verify NO bundle. (BULKHEAD_RAUC_KEYDIR=%r)" % keydir)
 }
