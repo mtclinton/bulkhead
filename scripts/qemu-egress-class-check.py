@@ -44,6 +44,11 @@ try:
         denied = ("DENIED" in o) and bool(re.search(r"RC=1\b", o))
         allowed = ("ALLOWED by E2" in o) and bool(re.search(r"RC=0\b", o))
         return denied, allowed, o
+    def probe4(addr, port=80):  # AF_INET counterpart (f729c44) — exercises classify_v4 directly
+        o = run(f"bulkhead-collector probe connect4 {addr} {port} 2>&1; echo RC=$?")
+        denied = ("DENIED" in o) and bool(re.search(r"RC=1\b", o))
+        allowed = ("ALLOWED by E2" in o) and bool(re.search(r"RC=0\b", o))
+        return denied, allowed, o
 
     check("active" in run("systemctl is-active bulkhead-collector 2>&1"), "collector active")
 
@@ -82,6 +87,18 @@ try:
     # 4d. native ::1 loopback DENIED (regression guard on the pre-existing ::1 path).
     d, a, o = probe("::1"); out("\n[probe ::1 (native loopback)]\n" + o)
     check(d and not a, "::1 DENIED — native IPv6 loopback still classified LOOPBACK (no regression)")
+
+    # 4e. UNSPECIFIED address (f729c44): 0.0.0.0 / :: / ::ffff:0.0.0.0 all rewrite to loopback inside
+    #     ops->connect AFTER the LSM hook, so a public-but-not-loopback agent must NOT reach them. Each
+    #     now classifies DST_LOOPBACK (was DST_PUBLIC -> ALLOWED pre-fix): failing-then-passing for f729c44.
+    d, a, o = probe("::ffff:0.0.0.0"); out("\n[probe ::ffff:0.0.0.0 (v4-mapped unspecified)]\n" + o)
+    check(d and not a, "::ffff:0.0.0.0 DENIED — v4-mapped INADDR_ANY => classify_v4(0)=LOOPBACK, not PUBLIC")
+
+    d, a, o = probe("::"); out("\n[probe :: (IN6ADDR_ANY)]\n" + o)
+    check(d and not a, ":: DENIED — bare IN6ADDR_ANY classified LOOPBACK, not PUBLIC")
+
+    d, a, o = probe4("0.0.0.0"); out("\n[probe4 0.0.0.0 (AF_INET INADDR_ANY)]\n" + o)
+    check(d and not a, "0.0.0.0 DENIED — AF_INET INADDR_ANY => classify_v4(0)=LOOPBACK, not PUBLIC")
 
     # cleanup
     run("systemctl stop bulkhead-enforce-egress.service 2>&1")
