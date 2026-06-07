@@ -353,19 +353,27 @@ int BPF_PROG(enforce_setuid, struct cred *new, const struct cred *old, int flags
 	return enforce_gain(HOOK_SETUID, ret, gain);
 }
 
-// E3: deny an agent cgroup GAINING capabilities (effective or permitted) via capset;
-// allow drops. Raising effective within an already-held permitted set is kernel-
-// permitted, so this adds a denial. kernel_cap_t is a single u64 on 6.6.
+// E3: deny an agent cgroup GAINING capabilities (effective, permitted, or inheritable)
+// via capset; allow drops. Raising effective within an already-held permitted set is
+// kernel-permitted, so this adds a denial. The inheritable set matters too: an
+// inheritable capability the task did not already hold can be promoted to
+// permitted+effective on exec of a file carrying matching inheritable fcaps (when
+// NoNewPrivileges is unset) — the classic inheritable+fcaps escalation — so a raise
+// there is a gain just like effective/permitted. kernel_cap_t is a single u64 on 6.6.
 SEC("lsm/capset")
 int BPF_PROG(enforce_capset, struct cred *new, const struct cred *old,
 	     const kernel_cap_t *effective, const kernel_cap_t *inheritable,
 	     const kernel_cap_t *permitted, int ret)
 {
-	__u64 ne = 0, oe = 0, np = 0, op = 0;
+	__u64 ne = 0, oe = 0, np = 0, op = 0, ni = 0, oi = 0;
 	bpf_probe_read_kernel(&ne, sizeof(ne), effective);            // requested effective
 	bpf_probe_read_kernel(&oe, sizeof(oe), &old->cap_effective.val);
 	bpf_probe_read_kernel(&np, sizeof(np), permitted);           // requested permitted
 	bpf_probe_read_kernel(&op, sizeof(op), &old->cap_permitted.val);
-	int gain = ((ne & ~oe) != 0) || ((np & ~op) != 0);
+	bpf_probe_read_kernel(&ni, sizeof(ni), inheritable);         // requested inheritable
+	bpf_probe_read_kernel(&oi, sizeof(oi), &old->cap_inheritable.val);
+	// A raise in ANY set the task did not already hold is a gain; a drop/no-op yields 0
+	// (failed reads default to 0 -> no gain -> fail-open, matching the other hooks).
+	int gain = ((ne & ~oe) != 0) || ((np & ~op) != 0) || ((ni & ~oi) != 0);
 	return enforce_gain(HOOK_CAPSET, ret, gain);
 }
