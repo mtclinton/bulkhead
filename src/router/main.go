@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -231,6 +232,28 @@ func main() {
 			log.Fatalf("listen: %v", err)
 		}
 	}()
+
+	// ADR-0034: also serve the same handler on a unix socket for jailed agents. An agent
+	// runs in a no-route netns and reaches the router ONLY over this bind-mounted UDS; its
+	// untrusted web egress goes through the separate egress proxy, never here.
+	if udsPath := os.Getenv("BULKHEAD_ROUTER_UDS"); udsPath != "" {
+		if err := os.Remove(udsPath); err != nil && !os.IsNotExist(err) {
+			log.Fatalf("router uds: stale socket %q: %v", udsPath, err)
+		}
+		udsLn, err := net.Listen("unix", udsPath)
+		if err != nil {
+			log.Fatalf("router uds: listen %q: %v", udsPath, err)
+		}
+		if err := os.Chmod(udsPath, 0o660); err != nil {
+			log.Fatalf("router uds: chmod %q: %v", udsPath, err)
+		}
+		go func() {
+			log.Printf("bulkhead-router also listening on %s (uds)", udsPath)
+			if err := hs.Serve(udsLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("router uds serve: %v", err)
+			}
+		}()
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

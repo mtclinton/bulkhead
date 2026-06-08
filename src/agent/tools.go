@@ -70,14 +70,12 @@ func toolRegistry() map[string]Tool {
 				if err != nil {
 					return "", err
 				}
-				hc := &http.Client{
-					Timeout:       8 * time.Second,
-					CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-				}
+				hc := egressClient(8 * time.Second) // tunnels via the host egress proxy in the jail
 				resp, err := hc.Do(req)
 				if err != nil {
-					if errors.Is(err, syscall.EPERM) {
-						return fmt.Sprintf("DENIED: egress to %s blocked by the kernel egress policy (EPERM); you may request_egress public to ask the operator", hostOf(arg)), nil
+					// EPERM = the in-kernel E2 class gate; errEgressDenied = the host egress proxy.
+					if errors.Is(err, syscall.EPERM) || errors.Is(err, errEgressDenied) {
+						return fmt.Sprintf("DENIED: egress to %s blocked by the egress policy; you may request_egress public to ask the operator", hostOf(arg)), nil
 					}
 					return fmt.Sprintf("ERROR: fetch %s failed: %v", hostOf(arg), err), nil
 				}

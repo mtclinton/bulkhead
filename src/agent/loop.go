@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 const observationCap = 2 << 10 // re-appended observations are truncated so a large body can't blow the next prompt
@@ -106,7 +105,7 @@ func chat(ctx context.Context, routerURL string, msgs []ChatMessage) (string, er
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	hc := &http.Client{Timeout: 60 * time.Second}
+	hc := routerClient() // dials the router UDS in the jail; TCP routerURL in dev
 	resp, err := hc.Do(req)
 	if err != nil {
 		return "", err
