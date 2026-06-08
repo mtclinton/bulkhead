@@ -81,6 +81,16 @@ func main() {
 		log.Printf("egress-proxy: internal destinations permitted: %v", internalCIDRs)
 	}
 
+	// The signed egress-decision chain (ADR-0017/0034): every allow/deny is recorded, and the
+	// allow path fails closed if it can't be. Opening it is mandatory — refuse to run an
+	// unauditable egress boundary (a missing sealed seed under BULKHEAD_REQUIRE_SEALED_KEY=1
+	// fails here, as it does for the collector/router).
+	audit, err := openAuditLog("egress-proxy", "provenance.jsonl")
+	if err != nil {
+		log.Fatalf("egress-proxy: audit chain: %v", err)
+	}
+	defer audit.Close()
+
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		log.Fatalf("egress-proxy: mkdir %q: %v", filepath.Dir(sockPath), err)
 	}
@@ -100,7 +110,7 @@ func main() {
 		log.Fatalf("egress-proxy: chmod %q: %v", sockPath, err)
 	}
 
-	p := NewProxy(allow, internalCIDRs)
+	p := NewProxy(allow, internalCIDRs, audit)
 
 	// Graceful shutdown: stop accepting; in-flight splices drain on their idle/total deadlines.
 	sig := make(chan os.Signal, 1)

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -207,7 +208,7 @@ func TestSpliceIdleReclaim(t *testing.T) {
 	dir := t.TempDir()
 	al, _ := LoadAllowlist(writeFile(t, dir, "127.0.0.1\n"))
 	_, loop, _ := net.ParseCIDR("127.0.0.0/8")
-	p := NewProxy(al, []*net.IPNet{loop})
+	p := NewProxy(al, []*net.IPNet{loop}, nil)
 	p.idleTimeout = 200 * time.Millisecond // shrink the idle bound for the test
 
 	sock := filepath.Join(dir, "egress.sock")
@@ -239,6 +240,74 @@ func TestSpliceIdleReclaim(t *testing.T) {
 		t.Fatal("expected EOF/timeout after idle reclaim, got a byte")
 	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		t.Fatal("tunnel was NOT reclaimed within 2s (idle deadline not enforced)")
+	}
+}
+
+// handleConn records both an allow and a deny into the signed chain (record-before-act on allow).
+func TestHandleConnRecordsToChain(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			c, e := echo.Accept()
+			if e != nil {
+				return
+			}
+			go func() { io.Copy(c, c); c.Close() }()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(echo.Addr().String())
+
+	dir := t.TempDir()
+	al, _ := LoadAllowlist(writeFile(t, dir, "127.0.0.1\n"))
+	_, loop, _ := net.ParseCIDR("127.0.0.0/8")
+	audit := newTestAuditLog(t, filepath.Join(dir, "provenance.jsonl"))
+	p := NewProxy(al, []*net.IPNet{loop}, audit)
+
+	sock := filepath.Join(dir, "egress.sock")
+	ln, _ := net.Listen("unix", sock)
+	defer ln.Close()
+	go func() {
+		for {
+			c, e := ln.Accept()
+			if e != nil {
+				return
+			}
+			go p.handleConn(c)
+		}
+	}()
+
+	c, _ := net.Dial("unix", sock) // ALLOW
+	fmt.Fprintf(c, "CONNECT 127.0.0.1:%s\n", port)
+	if reply, _ := bufio.NewReader(c).ReadString('\n'); strings.TrimSpace(reply) != "OK" {
+		t.Fatalf("allow: want OK, got %q", reply)
+	}
+	c.Close()
+
+	c2, _ := net.Dial("unix", sock) // DENY (8.8.8.8 not in the 127.0.0.1-only allowlist)
+	fmt.Fprintf(c2, "CONNECT 8.8.8.8:80\n")
+	if r2, _ := bufio.NewReader(c2).ReadString('\n'); !strings.HasPrefix(r2, "ERR denied") {
+		t.Fatalf("deny: want ERR denied, got %q", r2)
+	}
+	c2.Close()
+	audit.Close()
+
+	data, _ := os.ReadFile(filepath.Join(dir, "provenance.jsonl"))
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 chain records, got %d: %s", len(lines), data)
+	}
+	var allow, deny auditRecord
+	json.Unmarshal([]byte(lines[0]), &allow)
+	json.Unmarshal([]byte(lines[1]), &deny)
+	if allow.Decision != "allow" || !strings.Contains(allow.Mode, fmt.Sprintf("dst=127.0.0.1:%s", port)) {
+		t.Fatalf("allow record wrong: %+v", allow)
+	}
+	if deny.Decision != "deny" || !strings.Contains(deny.Mode, "dst=8.8.8.8:80") || !strings.Contains(deny.Mode, "allowlist") {
+		t.Fatalf("deny record wrong: %+v", deny)
 	}
 }
 
@@ -279,7 +348,7 @@ func TestProxyEndToEnd(t *testing.T) {
 	// in explicitly (as an operator would for an internal endpoint) so this exercises the
 	// allow path rather than the SSRF guard.
 	_, loop, _ := net.ParseCIDR("127.0.0.0/8")
-	p := NewProxy(al, []*net.IPNet{loop})
+	p := NewProxy(al, []*net.IPNet{loop}, nil)
 	go func() {
 		for {
 			c, err := ln.Accept()

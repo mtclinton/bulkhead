@@ -36,6 +36,7 @@ type Proxy struct {
 	sem         chan struct{} // bounds concurrent upstream connections
 	idleTimeout time.Duration
 	tunnelMax   time.Duration
+	audit       *auditLog // signed egress-decision chain (nil in unit tests that don't exercise it)
 }
 
 // NewProxy builds the proxy. internalCIDRs are the ONLY internal (loopback / private /
@@ -44,7 +45,8 @@ type Proxy struct {
 // an allowlisted NAME that resolves (or is DNS-rebound) to 127.0.0.1, the 169.254.169.254
 // metadata endpoint, or an RFC-1918 host cannot be reached through the mediated path.
 // An empty list (the default) denies all internal classes: only global-unicast egress.
-func NewProxy(a *Allowlist, internalCIDRs []*net.IPNet) *Proxy {
+// audit, when non-nil, is the signed chain every decision is recorded into.
+func NewProxy(a *Allowlist, internalCIDRs []*net.IPNet, audit *auditLog) *Proxy {
 	d := &net.Dialer{Timeout: dialTimeout}
 	d.Control = func(_, address string, _ syscall.RawConn) error {
 		return checkDialAddr(address, internalCIDRs)
@@ -55,6 +57,18 @@ func NewProxy(a *Allowlist, internalCIDRs []*net.IPNet) *Proxy {
 		sem:         make(chan struct{}, maxConcurrent),
 		idleTimeout: idleTimeout,
 		tunnelMax:   tunnelMax,
+		audit:       audit,
+	}
+}
+
+// record appends one egress decision to the signed chain, best-effort (a failed append is
+// logged, not fatal). The ALLOW path does NOT use this — it records inline and fails closed.
+func (p *Proxy) record(host, port, decision, reason string) {
+	if p.audit == nil {
+		return
+	}
+	if err := p.audit.recordEgress(host, port, decision, reason); err != nil {
+		logd("AUDIT-ERR", host, port, err.Error())
 	}
 }
 
@@ -118,6 +132,7 @@ func (p *Proxy) handleConn(c net.Conn) {
 	}
 	if !p.allow.Allows(host) {
 		logd("DENY", host, port, "not in allowlist")
+		p.record(host, port, "deny", "allowlist")
 		writeReply(c, "ERR denied")
 		return
 	}
@@ -127,12 +142,26 @@ func (p *Proxy) handleConn(c net.Conn) {
 	_ = c.SetReadDeadline(time.Time{})
 	up, err := p.dialer.Dial("tcp", net.JoinHostPort(host, port))
 	if err != nil {
+		reason := "upstream-unreachable"
+		if strings.Contains(err.Error(), "internal address") {
+			reason = "internal-denied" // the dialer.Control SSRF/metadata guard fired
+		}
 		logd("DIALFAIL", host, port, err.Error())
+		p.record(host, port, "deny", reason)
 		writeReply(c, "ERR upstream")
 		return
 	}
 	defer up.Close()
 
+	// Record-before-act: the confirmed egress is SIGNED into the chain before any byte flows.
+	// A failed append fails the egress CLOSED, so no destination is ever reached un-audited.
+	if p.audit != nil {
+		if err := p.audit.recordEgress(host, port, "allow", ""); err != nil {
+			logd("AUDIT-FAIL", host, port, err.Error())
+			writeReply(c, "ERR audit")
+			return
+		}
+	}
 	logd("ALLOW", host, port, up.RemoteAddr().String())
 	if err := writeReply(c, "OK"); err != nil {
 		return

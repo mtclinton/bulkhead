@@ -294,6 +294,8 @@ func chainDomain(chain string) string {
 		return "router"
 	case strings.Contains(chain, "audit-broker"):
 		return "broker"
+	case strings.Contains(chain, "audit-egress"): // ADR-0034: the egress-proxy decision chain
+		return "egress-proxy"
 	case strings.Contains(filepath.Base(chain), "control"): // ADR-0017: the control-write chain
 		return "control"
 	default:
