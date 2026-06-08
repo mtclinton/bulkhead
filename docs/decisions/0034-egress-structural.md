@@ -1,7 +1,32 @@
 # ADR-0034: Network egress: structural confinement + mediating proxy, not allowlist-as-boundary
 
-Status: Proposed
+Status: Accepted — increment 1 (structural confinement) shipped + live-verified; increment 2 (TLS-termination + content inspection) pending
 Date: 2026-06-07
+
+## Implementation status
+
+**Increment 1 — structural confinement — SHIPPED + LIVE-VERIFIED (2026-06-07).** A new
+`bulkhead-egress-proxy` (`src/proxy/`) is the single host-mediated egress path: one canonical
+`CONNECT host:port` parse over a unix socket (closing the parser-differential class), host-side
+DNS, an advisory allowlist, a post-resolution internal-IP deny (loopback/private/link-local/
+metadata SSRF guard), and a bounded splice — adversarially reviewed and hardened (4 findings).
+A new confined jail class `bulkhead-agent-confined@` runs the agent in a `PrivateNetwork=yes`
+no-route netns whose only exits are the bind-mounted egress-proxy and router unix sockets;
+the agent's web-fetch leg tunnels through the proxy and the model leg dials the router UDS.
+`make verify-egress-proxy` boots the wic and asserts, from inside the jail, that direct egress
+is impossible (no route / isolated loopback) and the proxy is the only — and a working —
+path out, with non-allowlisted destinations refused. The shipped E2-gated `bulkhead-agent@`
+class (ADR-0004) is unchanged; this lands the structural model alongside it, not as a rip-out.
+
+**Increment 2 — content — PENDING:** TLS-termination + content inspection + the re-signing CA
+injected into the guest trust store, plus the audited pinned-cert/mTLS passthrough exception
+list (the open question below). The inc1 proxy passes TLS through opaque.
+
+Decided/known inc1 simplifications to revisit: the proxy & router UDS are `0666` (the agent
+is a distinct DynamicUser; group-gating to a static `bulkhead-egress` group is a hardening
+follow-up — the boundary is the netns, not the socket mode); proxy egress decisions are logged
+to the journal, not yet folded into the signed provenance chain.
+
 Pillar: egress (cross-cutting)
 Relates to: ADR-0031 (substrate gives isolation, not egress), ADR-0033 (the same broker-don't-expose mediator pattern), ADR-0035 (egress is the network half of action authorization), ADR-0036 (routing relies on this egress boundary).
 Supersedes-in-part: the shipped ADR-0006/0009/0010 egress line — its dnsmasq→nftset domain allowlist is exactly the name-matching policy this ADR classes as advisory, not a boundary; this ADR replaces it as the egress *guarantee* (the allowlist is retained only as an advisory hint).
