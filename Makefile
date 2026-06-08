@@ -65,6 +65,9 @@ verify-egress:
 verify-egress-class:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-class-check.py
 
+verify-egress-proxy:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-proxy-check.py
+
 verify-m5:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-m5-check.py
 

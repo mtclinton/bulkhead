@@ -15,12 +15,11 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://audit-cred-tpm2.conf \
            file://seal-tpm2-mode.conf \
            file://rauc-mark-good-gate.conf"
-# Pinned to the attestation-audit snapshot (672fcea), in lockstep with the collector/router recipes.
-# The fetched rootfs-overlay is still byte-identical from e3239ef through 672fcea; the only units change
-# is the LOCAL files/bulkhead-seal-audit-key (ADR-0030: refuse to mint a fresh seed over surviving
-# chains, shipped at 3618d59) — that file:// is part of SRC_URI, so do_unpack/do_install re-run and
-# re-install it regardless of SRCREV. The overlay still carries the router's 11-audit.conf base drop-in.
-SRCREV = "672fcea64bf142a07207b5ec900c1991826aea08"
+# Pinned to 42ac280 (ADR-0034 inc1): the overlay now carries the structural-egress units —
+# bulkhead-egress-proxy.service, the bulkhead-agent-confined@ jail template (PrivateNetwork no-route
+# netns), the router's UDS RuntimeDirectory, and etc/bulkhead/egress-allow.conf. The shipped E2-gated
+# bulkhead-agent@ units are unchanged. (Was 672fcea, the attestation-audit snapshot.)
+SRCREV = "42ac2803bebba8e74cbaa1c328c614957c704e6a"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
@@ -43,7 +42,7 @@ do_configure[noexec] = "1"
 OV = "${S}/external/board/bulkhead/rootfs-overlay"
 
 # The units ExecStart these; pull them into any image that installs the topology.
-RDEPENDS:${PN} = "bulkhead-router bulkhead-agent bulkhead-collector llama-cpp tailscale nftables"
+RDEPENDS:${PN} = "bulkhead-router bulkhead-agent bulkhead-collector bulkhead-egress-proxy llama-cpp tailscale nftables"
 
 # Boot order is encoded in the units themselves (firewall -> selftest gate ->
 # collector/llama/router; tailscale-up + mounts are ConditionPathExists-guarded).
@@ -52,6 +51,7 @@ SYSTEMD_SERVICE:${PN} = "\
     bulkhead-firewall.service \
     bulkhead-selftest.service \
     bulkhead-collector.service \
+    bulkhead-egress-proxy.service \
     llama-server.service \
     bulkhead-router.service \
     bulkhead-router-bind.service \
@@ -146,6 +146,9 @@ do_install() {
 	# nftables default-deny egress floor
 	install -Dm0644 ${OV}/etc/nftables.conf ${D}${sysconfdir}/nftables.conf
 
+	# ADR-0034: the egress-proxy allowlist (governs the bulkhead-agent-confined@ class only)
+	install -Dm0644 ${OV}/etc/bulkhead/egress-allow.conf ${D}${sysconfdir}/bulkhead/egress-allow.conf
+
 	# model mount point (filled from the persistent data partition at boot)
 	install -d ${D}${localstatedir}/lib/bulkhead/models
 }
@@ -155,5 +158,6 @@ FILES:${PN} = "\
     ${bindir}/bulkhead-agent-run \
     ${bindir}/bulkhead-seal-audit-key \
     ${sysconfdir}/nftables.conf \
+    ${sysconfdir}/bulkhead \
     ${localstatedir}/lib/bulkhead \
 "

@@ -5,11 +5,11 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-# Pinned to the attestation-audit snapshot (672fcea, lockstep with the collector). The router's signed
-# routing-decision chain (src/router/audit.go) is UNCHANGED since d09f0db (ADR-0030 + the posture-gate
-# fix are collector/units only); bumped purely to keep all three bulkhead-repo recipes on one snapshot.
-# It still carries the 7b545ea transactional append + the intent-not-delivery clarification + 015ef04.
-SRCREV = "672fcea64bf142a07207b5ec900c1991826aea08"
+# Pinned to 42ac280 (ADR-0034 inc1): src/router now also serves its handler on a unix socket
+# (BULKHEAD_ROUTER_UDS) so a confined agent in a no-route netns can reach the model leg with no
+# network. The signed routing-decision chain (src/router/audit.go) and the TCP listener are unchanged.
+# (Was 672fcea, the attestation-audit snapshot.)
+SRCREV = "42ac2803bebba8e74cbaa1c328c614957c704e6a"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"

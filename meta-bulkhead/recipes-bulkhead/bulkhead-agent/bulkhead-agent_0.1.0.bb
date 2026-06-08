@@ -5,7 +5,9 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-SRCREV = "06c35155e0d2a46250e8d3a9d083eb6d510a1048"
+# Pinned to 42ac280 (ADR-0034 inc1): adds the mediated egress client (src/agent/egress.go — router
+# UDS + CONNECT-tunnel through the egress proxy) and `probe-egress`, the confined-jail live check.
+SRCREV = "42ac2803bebba8e74cbaa1c328c614957c704e6a"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
