@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -21,21 +22,77 @@ const (
 	requestTimeout = 5 * time.Second // budget to send the one request line / read the reply
 	dialTimeout    = 10 * time.Second
 	maxConcurrent  = 256
+	// A spliced tunnel idle (no bytes either direction) this long is reclaimed; tunnelMax
+	// is the absolute per-tunnel cap (backstop against a slow-drip that refreshes the idle
+	// timer forever). Together they bound how long one flow can pin a concurrency slot.
+	idleTimeout = 120 * time.Second
+	tunnelMax   = time.Hour
 )
 
 // Proxy mediates every agent egress flow. One instance serves all agents on the socket.
 type Proxy struct {
-	allow  *Allowlist
-	dialer *net.Dialer
-	sem    chan struct{} // bounds concurrent upstream connections
+	allow       *Allowlist
+	dialer      *net.Dialer
+	sem         chan struct{} // bounds concurrent upstream connections
+	idleTimeout time.Duration
+	tunnelMax   time.Duration
 }
 
-func NewProxy(a *Allowlist) *Proxy {
-	return &Proxy{
-		allow:  a,
-		dialer: &net.Dialer{Timeout: dialTimeout},
-		sem:    make(chan struct{}, maxConcurrent),
+// NewProxy builds the proxy. internalCIDRs are the ONLY internal (loopback / private /
+// link-local / CGNAT / ...) destinations permitted; every other internal address is
+// denied at dial time via dialer.Control — enforced on the ACTUAL resolved address, so
+// an allowlisted NAME that resolves (or is DNS-rebound) to 127.0.0.1, the 169.254.169.254
+// metadata endpoint, or an RFC-1918 host cannot be reached through the mediated path.
+// An empty list (the default) denies all internal classes: only global-unicast egress.
+func NewProxy(a *Allowlist, internalCIDRs []*net.IPNet) *Proxy {
+	d := &net.Dialer{Timeout: dialTimeout}
+	d.Control = func(_, address string, _ syscall.RawConn) error {
+		return checkDialAddr(address, internalCIDRs)
 	}
+	return &Proxy{
+		allow:       a,
+		dialer:      d,
+		sem:         make(chan struct{}, maxConcurrent),
+		idleTimeout: idleTimeout,
+		tunnelMax:   tunnelMax,
+	}
+}
+
+// checkDialAddr runs in dialer.Control on the resolved remote address (covering the
+// resolve-at-dial / rebinding window). It denies internal address classes unless the
+// operator opted that CIDR in — the SSRF / metadata guard for the mediated egress path.
+func checkDialAddr(address string, allow []*net.IPNet) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("egress: unparseable dial address %q", address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("egress: non-IP dial address %q", host)
+	}
+	for _, n := range allow {
+		if n.Contains(ip) {
+			return nil // operator-permitted internal destination
+		}
+	}
+	if isInternalIP(ip) {
+		return fmt.Errorf("egress: destination %s is an internal address (denied)", ip)
+	}
+	return nil
+}
+
+// isInternalIP reports whether ip is in a class the agent must not reach by default.
+// The stdlib predicates consult To4(), so v4-mapped IPv6 (::ffff:127.0.0.1) is covered;
+// 100.64/10 CGNAT is not an IsPrivate range, so it is checked explicitly.
+func isInternalIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1]&0xc0 == 64 {
+		return true // 100.64.0.0/10 (CGNAT / tailnet)
+	}
+	return false
 }
 
 // handleConn services one agent connection: read the single CONNECT request, check the
@@ -80,7 +137,7 @@ func (p *Proxy) handleConn(c net.Conn) {
 	if err := writeReply(c, "OK"); err != nil {
 		return
 	}
-	splice(c, up)
+	p.splice(c, up)
 }
 
 // readRequest reads exactly one line — "CONNECT host:port\n" — directly off the
@@ -145,7 +202,14 @@ func validateHost(h string) error {
 		return errors.New("empty host")
 	}
 	if net.ParseIP(h) != nil {
-		return nil // IP literal
+		return nil // canonical IP literal
+	}
+	// Reject ambiguous numeric IPv4 aliases that net.ParseIP rejects but a libc resolver
+	// (getaddrinfo) would coerce to an address — 2130706433, 0x7f000001, 0177.0.0.1, 127.1,
+	// 127.0.0.01 all collapse to 127.0.0.1. Classifying these as DNS names would reintroduce
+	// the policy-vs-resolver differential this proxy exists to foreclose, so they are refused.
+	if isNumericAlias(h) {
+		return fmt.Errorf("ambiguous numeric host %q", h)
 	}
 	if len(h) > 253 {
 		return errors.New("host too long")
@@ -186,14 +250,53 @@ func writeReply(c net.Conn, msg string) error {
 	return err
 }
 
-// splice copies bytes both ways until both halves hit EOF, half-closing each write end
-// so a one-way shutdown (e.g. TLS close-notify) propagates instead of wedging the peer.
-func splice(a, b net.Conn) {
+// isNumericAlias reports whether h looks like a non-canonical numeric IPv4 address
+// (which it must, since net.ParseIP already rejected it) rather than a real DNS name:
+// composed solely of digits and dots, or a hex literal (0x...).
+func isNumericAlias(h string) bool {
+	if strings.HasPrefix(h, "0x") || strings.HasPrefix(h, "0X") {
+		return true
+	}
+	for i := 0; i < len(h); i++ {
+		if (h[i] < '0' || h[i] > '9') && h[i] != '.' {
+			return false
+		}
+	}
+	return true // all digits and dots, yet not a canonical IP
+}
+
+// splice copies bytes both ways until EOF, error, a per-direction idle timeout, or the
+// absolute tunnel cap — bounding how long one flow can pin a concurrency slot (a silent
+// or stuck tunnel is reclaimed within idleTimeout; a slow-drip within tunnelMax). The
+// write half is closed on each direction's EOF so a legitimate half-close (request sent,
+// response still pending) is preserved — the other direction keeps its own idle bound.
+func (p *Proxy) splice(a, b net.Conn) {
+	deadline := time.Now().Add(p.tunnelMax)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	cp := func(dst, src net.Conn) {
 		defer wg.Done()
-		io.Copy(dst, src)
+		buf := make([]byte, 32*1024)
+		for {
+			now := time.Now()
+			if !now.Before(deadline) {
+				break // absolute tunnel cap
+			}
+			rd := now.Add(p.idleTimeout)
+			if rd.After(deadline) {
+				rd = deadline
+			}
+			_ = src.SetReadDeadline(rd)
+			n, err := src.Read(buf)
+			if n > 0 {
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					break
+				}
+			}
+			if err != nil {
+				break // EOF, idle-timeout, or hard error
+			}
+		}
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite() // both *net.UnixConn and *net.TCPConn implement this
 		}

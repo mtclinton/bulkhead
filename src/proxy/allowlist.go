@@ -13,15 +13,12 @@ import (
 // Allowlist is the ADVISORY destination policy (ADR-0034). With no content inspection
 // yet (increment 1), the proxy enforces it as the destination allow rule, but the
 // BOUNDARY is structural (the no-route netns) — this list only decides which destinations
-// the single mediated path will dial. Patterns, one per line:
-//
-//	*               allow every destination (explicit opt-out of allowlisting)
-//	api.host.com    exact host match
-//	.example.com    example.com and any subdomain
-//	10.0.0.0/8      CIDR (matched when the request is an IP literal)
-//	1.2.3.4         exact IP literal
-//
-// '#' starts a comment. An empty or missing list is fail-closed (deny all).
+// the single mediated path will dial. One pattern per line, where a bare "*" permits every
+// name, "api.host.com" matches that exact host, ".example.com" matches example.com and any
+// subdomain, "10.0.0.0/8" is a CIDR (matched when the request is an IP literal), and
+// "1.2.3.4" is an exact IP. '#' starts a comment; an empty or missing list is fail-closed
+// (deny all). Note: internal address classes (loopback/private/link-local/metadata) are
+// denied at dial regardless of this list — see checkDialAddr.
 type Allowlist struct {
 	all    bool
 	exact  map[string]bool
@@ -95,7 +92,7 @@ func (a *Allowlist) Allows(host string) bool {
 
 func (a *Allowlist) describe() string {
 	if a.all {
-		return "allowlist: * (all destinations permitted — structural confinement is the boundary)"
+		return "allowlist: * (all NAMES permitted; internal loopback/link-local/private/metadata still denied at dial)"
 	}
 	if len(a.exact)+len(a.suffix)+len(a.cidrs) == 0 {
 		return "allowlist: EMPTY — fail-closed, all egress denied"
