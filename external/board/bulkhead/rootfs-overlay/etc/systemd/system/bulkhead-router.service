@@ -11,6 +11,12 @@ Requires=bulkhead-selftest.service
 [Service]
 Type=exec
 DynamicUser=yes
+# ADR-0034: also expose the router on a unix socket so a confined agent (PrivateNetwork,
+# no route) can reach the model leg. RuntimeDirectory gives this DynamicUser its own
+# /run/bulkhead-router; the router creates router.sock (0666) there for the jail to dial.
+RuntimeDirectory=bulkhead-router
+RuntimeDirectoryMode=0755
+Environment=BULKHEAD_ROUTER_UDS=/run/bulkhead-router/router.sock
 ExecStart=/usr/bin/bulkhead-router
 Restart=on-failure
 RestartSec=2

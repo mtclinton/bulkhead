@@ -244,7 +244,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("router uds: listen %q: %v", udsPath, err)
 		}
-		if err := os.Chmod(udsPath, 0o660); err != nil {
+		// 0666 (inc1): the jailed agent is a distinct DynamicUser; group-gating is a
+		// hardening follow-up. Only jailed agents (via the bind-mounted path) use this.
+		if err := os.Chmod(udsPath, 0o666); err != nil {
 			log.Fatalf("router uds: chmod %q: %v", udsPath, err)
 		}
 		go func() {

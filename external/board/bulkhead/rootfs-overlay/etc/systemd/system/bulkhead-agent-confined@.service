@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead CONFINED agent jail (ADR-0034 inc1). Unlike bulkhead-agent@ (whose network is
+# gated per-destination-class by the in-kernel BPF E2 manifest), this template gives the
+# agent NO network at all: PrivateNetwork=yes puts it in a fresh netns with only loopback —
+# no default route, no resolver, and (empty caps) no raw socket. Its ONLY paths out of the
+# netns are two bind-mounted unix sockets: the host egress proxy (untrusted web) and the
+# router (trusted model calls). This is the structural boundary ADR-0034 specifies; for
+# inc1 the payload is the egress probe that proves it (started on demand, no [Install]).
+[Unit]
+Description=bulkhead confined agent jail (%i)
+Documentation=https://github.com/mtclinton/bulkhead
+After=bulkhead-egress-proxy.service bulkhead-router.service
+Requires=bulkhead-egress-proxy.service
+
+[Service]
+Type=exec
+Slice=bulkhead-agent.slice
+
+# --- the structural egress boundary: a private network namespace with no route out ---
+PrivateNetwork=yes
+
+# The two bind-mounted sockets in /run are the agent's only channels out of the netns
+# (a UNIX connect() works across the netns and across read-only /run).
+Environment=BULKHEAD_EGRESS_SOCK=/run/bulkhead-egress/egress.sock
+Environment=BULKHEAD_ROUTER_UDS=/run/bulkhead-router/router.sock
+
+# inc1 payload: prove direct egress is impossible and the proxy is the only working path.
+ExecStart=/usr/bin/bulkhead-agent probe-egress
+
+# --- fail-closed hardening floor (same profile as bulkhead-agent@) ---
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=

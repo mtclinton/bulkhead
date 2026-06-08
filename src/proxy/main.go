@@ -92,10 +92,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("egress-proxy: listen %q: %v", sockPath, err)
 	}
-	// 0660: the agent's DynamicUser reaches the socket via the shared bulkhead-egress
-	// group. The no-route netns already makes this the only egress path, so the bytes
-	// are mediated regardless of mode; the tight mode just keeps unrelated host users off.
-	if err := os.Chmod(sockPath, 0o660); err != nil {
+	// 0666 (inc1): the agent is a DynamicUser distinct from this proxy's DynamicUser, so a
+	// group-gated 0660 needs a shared static group — deferred as a hardening follow-up. The
+	// no-route netns already makes this the ONLY egress path and the proxy mediates every
+	// byte regardless of who connects, so the mode is not the boundary here.
+	if err := os.Chmod(sockPath, 0o666); err != nil {
 		log.Fatalf("egress-proxy: chmod %q: %v", sockPath, err)
 	}
 

@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead-egress-proxy — host-mediated egress boundary (ADR-0034, increment 1).
+# A confined agent (bulkhead-agent-confined@) runs in a no-route netns and reaches the
+# outside ONLY through this proxy's unix socket: the proxy resolves on the host, checks the
+# advisory allowlist against a single canonical parse, denies internal IP classes (SSRF/
+# metadata), and splices. TLS rides through opaque (content inspection is increment 2).
+[Unit]
+Description=bulkhead host-mediated egress proxy (ADR-0034)
+Documentation=https://github.com/mtclinton/bulkhead
+After=bulkhead-firewall.service
+Wants=bulkhead-firewall.service
+
+[Service]
+Type=exec
+DynamicUser=yes
+RuntimeDirectory=bulkhead-egress
+RuntimeDirectoryMode=0755
+Environment=BULKHEAD_EGRESS_SOCK=/run/bulkhead-egress/egress.sock
+Environment=BULKHEAD_EGRESS_ALLOWLIST=/etc/bulkhead/egress-allow.conf
+# Default-deny internal destinations; an operator opts specific CIDRs in here.
+Environment=BULKHEAD_EGRESS_ALLOW_INTERNAL_CIDRS=
+ExecStart=/usr/bin/bulkhead-egress-proxy
+Restart=on-failure
+RestartSec=2
+
+# --- hardening floor (the router/llama profile; the proxy needs INET egress upstream) ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
