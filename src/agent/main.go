@@ -32,6 +32,13 @@ func main() {
 		return
 	}
 
+	// `bulkhead-agentd probe-egress` is the ADR-0034 inc1 live vehicle: from inside the
+	// jail's no-route netns it proves direct egress is impossible and the host proxy is the
+	// only (and a working) way out. Exits 0 iff all checks pass. Test/diagnostic only.
+	if len(os.Args) >= 2 && os.Args[1] == "probe-egress" {
+		os.Exit(runEgressProbe())
+	}
+
 	inst := "?"
 	if len(os.Args) >= 2 {
 		inst = os.Args[1]
