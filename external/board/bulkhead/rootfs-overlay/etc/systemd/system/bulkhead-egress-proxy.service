@@ -23,6 +23,15 @@ ExecStart=/usr/bin/bulkhead-egress-proxy
 Restart=on-failure
 RestartSec=2
 
+# --- signed egress-decision chain (ADR-0017/0034). StateDirectory gives this DynamicUser a
+#     persistent, correctly-owned dir under ProtectSystem=strict; it joins the fixed bulkhead-audit
+#     group so a Yocto /data drop-in can group-share the chain across boots (same pattern as the
+#     router). On Yocto the data drop-in redirects BULKHEAD_AUDIT_DIR to /data + delivers the
+#     TPM-sealed seed; in dev the chain lives here and self-verifies via the exported audit-pub.txt. ---
+StateDirectory=bulkhead/audit-egress
+Environment=BULKHEAD_AUDIT_DIR=/var/lib/bulkhead/audit-egress
+SupplementaryGroups=bulkhead-audit
+
 # --- hardening floor (the router/llama profile; the proxy needs INET egress upstream) ---
 NoNewPrivileges=yes
 ProtectSystem=strict
