@@ -8,6 +8,7 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-collector-data.conf \
            file://bulkhead-broker-data.conf \
            file://bulkhead-router-data.conf \
+           file://bulkhead-egress-proxy-data.conf \
            file://bulkhead-seal-audit-key.service \
            file://bulkhead-seal-audit-key \
            file://bulkhead-verify-audit.service \
@@ -15,11 +16,12 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://audit-cred-tpm2.conf \
            file://seal-tpm2-mode.conf \
            file://rauc-mark-good-gate.conf"
-# Pinned to 42ac280 (ADR-0034 inc1): the overlay now carries the structural-egress units —
-# bulkhead-egress-proxy.service, the bulkhead-agent-confined@ jail template (PrivateNetwork no-route
-# netns), the router's UDS RuntimeDirectory, and etc/bulkhead/egress-allow.conf. The shipped E2-gated
-# bulkhead-agent@ units are unchanged. (Was 672fcea, the attestation-audit snapshot.)
-SRCREV = "42ac2803bebba8e74cbaa1c328c614957c704e6a"
+# Pinned to 19505b6 (ADR-0034 inc1 + signed egress provenance): the overlay carries the structural-egress
+# units (bulkhead-egress-proxy.service incl. its StateDirectory/audit base config, the
+# bulkhead-agent-confined@ PrivateNetwork jail template, the router UDS, egress-allow.conf). The new
+# bulkhead-egress-proxy-data.conf drop-in (files/) persists the proxy's signed chain on /data + the sealed
+# seed, and verify-audit now gates the egress chain. The E2-gated bulkhead-agent@ units are unchanged.
+SRCREV = "19505b60330fe79f4689077a2917f1e79ca7f5d3"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
@@ -109,6 +111,11 @@ do_install() {
 	install -m0644 ${WORKDIR}/bulkhead-router-data.conf \
 		${D}${systemd_system_unitdir}/bulkhead-router.service.d/12-data-persistence.conf
 
+	# Yocto-only: persist the egress proxy's signed egress-decision chain on /data (ADR-0034)
+	install -d ${D}${systemd_system_unitdir}/bulkhead-egress-proxy.service.d
+	install -m0644 ${WORKDIR}/bulkhead-egress-proxy-data.conf \
+		${D}${systemd_system_unitdir}/bulkhead-egress-proxy.service.d/10-data-persistence.conf
+
 	# Yocto-only: first-boot TPM sealing of the audit signing seed (ADR-0008)
 	install -m0644 ${WORKDIR}/bulkhead-seal-audit-key.service ${D}${systemd_system_unitdir}/
 	install -Dm0755 ${WORKDIR}/bulkhead-seal-audit-key ${D}${bindir}/bulkhead-seal-audit-key
@@ -130,7 +137,7 @@ do_install() {
 			${D}${systemd_system_unitdir}/bulkhead-seal-audit-key.service.d/20-tpm2.conf
 		# Same cred override for each consumer; 20- sorts after their base drop-in (10-/12-). The
 		# .d dirs for collector/broker/router exist from above; install -d is idempotent for them.
-		for svc in bulkhead-collector bulkhead-broker bulkhead-router bulkhead-verify-audit; do
+		for svc in bulkhead-collector bulkhead-broker bulkhead-router bulkhead-egress-proxy bulkhead-verify-audit; do
 			install -d ${D}${systemd_system_unitdir}/$svc.service.d
 			install -m0644 ${WORKDIR}/audit-cred-tpm2.conf \
 				${D}${systemd_system_unitdir}/$svc.service.d/20-audit-cred-tpm2.conf

@@ -38,7 +38,7 @@ mkdir -p "$DATADIR"
 # (this script then finds it valid and leaves it -> the box boots), OR, having genuinely lost the
 # seed and accepting the loss of prior audit history, sets BULKHEAD_SEAL_FORCE_NEW=1 to authorize
 # a fresh identity. First boot / a fully-wiped /data has no chains, so this never blocks it.
-CHAINS="$DATADIR/audit/provenance.jsonl $DATADIR/audit-broker/provenance.jsonl $DATADIR/audit/control.jsonl $DATADIR/audit-router/provenance.jsonl"
+CHAINS="$DATADIR/audit/provenance.jsonl $DATADIR/audit-broker/provenance.jsonl $DATADIR/audit/control.jsonl $DATADIR/audit-router/provenance.jsonl $DATADIR/audit-egress/provenance.jsonl"
 refuse_if_chains_present() {
 	[ "${BULKHEAD_SEAL_FORCE_NEW:-0}" = 1 ] && return 0
 	for c in $CHAINS; do

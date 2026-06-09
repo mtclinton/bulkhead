@@ -62,6 +62,17 @@ try:
     for name in ["NOROUTE", "ISOLATED", "PROXY-OK", "PROXY-DENY"]:
         check(bool(re.search(rf"PROBE {name}: PASS", jr)), f"probe {name} PASS")
 
+    # Signed-chain assertion (ADR-0034/0017): the proxy recorded the probe's allow+deny decisions
+    # into its Ed25519-signed, hash-chained egress log on /data; verify it (domain resolves to
+    # egress-proxy from the audit-egress path; key from the sibling exported pub).
+    chain = "/data/bulkhead/audit-egress/provenance.jsonl"
+    va = run(f"bulkhead-collector verify-audit {chain} 2>&1; echo VA_RC=$?", t=30)
+    out("\n[verify-audit egress chain]\n" + va)
+    m = re.search(r"(\d+) record\(s\) verified", va)
+    nrec = int(m.group(1)) if m else 0
+    check("VA_RC=0" in va and "domain: egress-proxy" in va, "egress chain verifies signed (domain=egress-proxy)")
+    check(nrec >= 2, f"proxy signed the probe's egress decisions into the chain ({nrec} record(s))")
+
     run("systemctl stop bulkhead-mockchat.service 2>&1")
     run("poweroff", t=20)
 except Exception as e:

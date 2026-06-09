@@ -28,7 +28,7 @@ RequiresMountsFor=/data
 ConditionPathIsMountPoint=/data
 After=bulkhead-seal-audit-key.service
 Requires=bulkhead-seal-audit-key.service
-Before=bulkhead-collector.service bulkhead-broker.service bulkhead-router.service
+Before=bulkhead-collector.service bulkhead-broker.service bulkhead-router.service bulkhead-egress-proxy.service
 
 [Service]
 Type=oneshot
@@ -45,6 +45,10 @@ ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit/control.
 # sealed seed (domain="router", resolved from the audit-router/ path). A missing file (no routing yet,
 # e.g. first boot) verifies as OK; a present-but-tampered router chain fails the boot like the others.
 ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit-router/provenance.jsonl
+# ADR-0034: the egress PROXY's signed egress-decision chain, persisted on /data and signed with the
+# same sealed seed (domain="egress-proxy", resolved from the audit-egress/ path). A missing file (no
+# confined-agent egress yet) verifies as OK; a present-but-tampered chain fails the boot like the others.
+ExecStart=/usr/bin/bulkhead-collector verify-audit /data/bulkhead/audit-egress/provenance.jsonl
 User=root
 # Read-only DAC bypass: needed to read the router's DynamicUser-owned 0600 chain (see header).
 # NOT CAP_DAC_OVERRIDE — the gate must never be able to modify a chain, only read it.
