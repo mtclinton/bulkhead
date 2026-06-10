@@ -16,13 +16,14 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://audit-cred-tpm2.conf \
            file://seal-tpm2-mode.conf \
            file://rauc-mark-good-gate.conf"
-# Pinned to 62e8e02 (ADR-0033 + ADR-0034 inc1 + signed egress provenance): the overlay carries the
+# Pinned to 13db85c (ADR-0033 io_uring deny + ADR-0034 router-UDS AF_UNIX fix): the overlay carries the
 # structural-egress units (bulkhead-egress-proxy.service incl. its StateDirectory/audit base config, the
 # bulkhead-agent-confined@ PrivateNetwork jail template, the router UDS, egress-allow.conf). Both agent
-# jail templates (bulkhead-agent@ and bulkhead-agent-confined@) now subtract io_uring_setup/enter/register
-# from their SystemCallFilter (ADR-0033). The bulkhead-egress-proxy-data.conf drop-in (files/) persists the
-# proxy's signed chain on /data + the sealed seed, and verify-audit gates the egress chain.
-SRCREV = "62e8e028fd7fd117a3ae9bed721f646fc8edea76"
+# jail templates subtract io_uring_setup/enter/register from their SystemCallFilter (ADR-0033), and the
+# router now lists AF_UNIX in RestrictAddressFamilies so it can create its UDS instead of crash-looping
+# (without it the confined agent's model leg never existed). The bulkhead-egress-proxy-data.conf drop-in
+# (files/) persists the proxy's signed chain on /data + the sealed seed; verify-audit gates the egress chain.
+SRCREV = "13db85c3572ee58f91f4505344f495711dc21788"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
