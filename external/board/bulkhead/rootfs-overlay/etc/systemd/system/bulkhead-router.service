@@ -46,7 +46,12 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
 SystemCallErrorNumber=EPERM
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX is REQUIRED, not optional: the router serves BULKHEAD_ROUTER_UDS (the confined agent's
+# model leg, ADR-0034) via net.Listen("unix", …). Without AF_UNIX here, socket(AF_UNIX) returns
+# EAFNOSUPPORT, the UDS listen fails fatally, and the router CRASH-LOOPS (Restart=on-failure) —
+# leaving every confined jail with no model path. The egress proxy already lists AF_UNIX for the
+# same reason; this line was the one that forgot it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 
 [Install]
