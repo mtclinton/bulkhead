@@ -5,9 +5,10 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-# Pinned to 42ac280 (ADR-0034 inc1): adds the mediated egress client (src/agent/egress.go — router
-# UDS + CONNECT-tunnel through the egress proxy) and `probe-egress`, the confined-jail live check.
-SRCREV = "42ac2803bebba8e74cbaa1c328c614957c704e6a"
+# Pinned to 62e8e02 (ADR-0033): the confined probe-egress now also asserts io_uring_setup is
+# seccomp-denied from inside the jail (the IOURING check), on top of the ADR-0034 inc1 mediated
+# egress client (src/agent/egress.go — router UDS + CONNECT-tunnel through the egress proxy).
+SRCREV = "62e8e028fd7fd117a3ae9bed721f646fc8edea76"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
