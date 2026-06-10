@@ -107,9 +107,13 @@ PROBE_BOOT1 = SETUP + [
 
 PROBE_BOOT2 = [
     "EC=/data/bulkhead/audit-egress/provenance.jsonl",
+    # Open the BOOT2 marker BEFORE the probe re-runs, then capture records-before INSIDE it: that
+    # persisted count is what proves the boot-1 chain survived the reboot, so it must be read both
+    # (a) before SETUP's probe appends boot-2 records, and (b) inside the markers so the parser
+    # (which only reads text between <<<BOOT2 and BOOT2END>>>) actually sees it.
+    "echo '<<<BOOT2'",
     "echo \"records-before=$(grep -c . $EC 2>/dev/null || echo 0)\"",
 ] + SETUP[1:] + [
-    "echo '<<<BOOT2'",
     'echo "probe-rc=$PRC"',
 ] + PROBE_FACTS + [
     'echo "records-after=$(grep -c . $EC 2>/dev/null || echo 0)"',
