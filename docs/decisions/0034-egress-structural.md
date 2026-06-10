@@ -24,8 +24,13 @@ list (the open question below). The inc1 proxy passes TLS through opaque.
 
 Decided/known inc1 simplifications to revisit: the proxy & router UDS are `0666` (the agent
 is a distinct DynamicUser; group-gating to a static `bulkhead-egress` group is a hardening
-follow-up — the boundary is the netns, not the socket mode); proxy egress decisions are logged
-to the journal, not yet folded into the signed provenance chain.
+follow-up — the boundary is the netns, not the socket mode). Shipped since this ADR was first
+written: proxy egress decisions are now folded into an Ed25519-signed, hash-chained provenance
+log on `/data` under the `egress-proxy` audit domain (ADR-0017), verified at boot by the
+collector's verify-audit gate and across an in-guest reboot by `make verify-egress-reboot`; and
+`io_uring_setup` is now seccomp-denied in both agent jails per ADR-0033 (the confined probe's
+`IOURING` check asserts the EPERM), closing a syscall-invisible I/O channel the inc1 jail
+otherwise left reachable.
 
 Pillar: egress (cross-cutting)
 Relates to: ADR-0031 (substrate gives isolation, not egress), ADR-0033 (the same broker-don't-expose mediator pattern), ADR-0035 (egress is the network half of action authorization), ADR-0036 (routing relies on this egress boundary).

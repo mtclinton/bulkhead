@@ -1,9 +1,31 @@
 # ADR-0033: io_uring: disable inside the sandbox, broker async I/O
 
-Status: Proposed
+Status: Accepted — the agent-side io_uring denial (per-sandbox seccomp) is SHIPPED + live-verified; the async-I/O broker and the default-tier (Sentry) enforcement point are pending
 Date: 2026-06-07
 Pillar: agent-isolation
 Relates to: ADR-0031/0032 (substrate & interception whose observability this preserves), ADR-0034 (same broker-don't-expose pattern), ADR-0035 (brokered I/O rides the resource-auth layer).
+
+## Implementation status
+
+**Agent-side denial — SHIPPED + LIVE-VERIFIED (2026-06-09).** Both agent jail templates —
+`bulkhead-agent@` (E2-gated) and the confined `bulkhead-agent-confined@` (ADR-0034 no-route
+netns) — subtract `io_uring_setup io_uring_enter io_uring_register` from their
+`SystemCallFilter`. This is load-bearing, not cosmetic: systemd's `@system-service` base
+*allows* the io_uring family (it is a member of the `@aio` set), and there is no `@io_uring`
+systemd set, so the three syscalls are denied by name. The confined egress probe asserts
+`io_uring_setup` returns EPERM from inside the jail (the `IOURING` check, run by both
+`make verify-egress-proxy` and `make verify-egress-reboot`).
+
+Enforcement is **per-sandbox seccomp, deliberately not a global `kernel.io_uring_disabled`
+kernel kill**: open question (2) below leaves room for the trusted broker to use io_uring
+*internally* (gaining its performance while keeping rings out of the agent), which a system-wide
+disable would foreclose. Denying at the sandbox boundary keeps that design space open.
+
+**Pending:** the async-I/O **broker** that services agent I/O via discrete, observable syscalls
+(the "broker, don't expose" half of the decision); and the **default-tier (Sentry) enforcement
+point** (ADR-0031/0032), which is unbuilt — until the Sentry ships, the namespace-tier seccomp
+denial above is the live control. The hostile-tier guest-kernel `io_uring`-off build is also a
+later guest-image hardening item.
 
 ## Context and problem statement
 
