@@ -31,6 +31,7 @@ help:
 	@echo "  make verify-tailnet boot with the key volume and assert the node joins"
 	@echo "  make verify-yocto-router  (Yocto wic + swtpm) assert the router /data signed chain survives a reboot"
 	@echo "  make verify-egress-reboot (Yocto wic + swtpm) assert the egress /data chain survives a reboot (fail-closed seed)"
+	@echo "  make verify-confined-agent (Yocto wic) assert a REAL agent runs in the confined jail (model via router UDS, web via egress proxy)"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -102,6 +103,14 @@ verify-yocto-router:
 # (BULKHEAD_REQUIRE_SEALED_KEY=1) — a path the router test does not exercise. Needs a built wic.
 verify-egress-reboot:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-reboot-check.py
+
+# Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
+# replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
+# router's local backend + the proxy allowlist at a loopback mockchat, runs the confined agent on
+# a FETCH-ONLY task, and asserts it reached FINAL with its model leg over the router UDS and its
+# web fetch through the egress proxy (signed into the /data chain). Needs a built wic.
+verify-confined-agent:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-confined-agent-check.py
 
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and

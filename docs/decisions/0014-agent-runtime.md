@@ -114,3 +114,17 @@ adherence at the source (the router currently passes bodies untouched); consumin
 requesting) an E1/E3 grant inside an agent, which needs a narrowed per-instance seccomp relaxation
 and is its own ADR; a native in-process broker client sharing a wire package with the collector,
 replacing the os/exec coupling once the verbs stabilize.
+
+## Confined-jail runtime (ADR-0034, live-verified 2026-06-10)
+
+The same runtime now also runs inside the ADR-0034 **confined** jail (`bulkhead-agent-confined@`,
+a no-route netns), not only the E2-gated `bulkhead-agent@`. There both of the agent's legs are
+*structurally* mediated rather than policy-gated: the model leg dials the bind-mounted router UDS
+(the netns has no other path to a model at all), and the web `fetch` tunnels through the host
+egress proxy, which signs the ALLOW into its /data chain. `make verify-confined-agent` boots the
+wic, points the router's local backend and the proxy allowlist at a loopback mockchat, runs the
+confined agent on a `FETCH-ONLY` task, and asserts it reached FINAL with the fetch delivered HTTP
+200 through the proxy and recorded as a fresh signed egress record. This closes the ADR-0034 inc1
+follow-up that had the confined jail running only the `probe-egress` vehicle. No Go change: the
+runtime, the router-UDS model leg, and the egress-proxy fetch leg (egress.go) already existed —
+the jail just launches the real loop with a task instead of the probe.
