@@ -4,11 +4,12 @@
 # (bulkhead-agent-confined@, PrivateNetwork => no-route netns) must reach the outside ONLY
 # through the host egress proxy. Boots the wic, points the proxy's allowlist at the loopback
 # test target (mockchat on 127.0.0.1:8088, opting 127.0.0.0/8 in), starts the confined probe
-# instance, and asserts its four checks pass + the unit exits 0:
+# instance, and asserts its five checks pass + the unit exits 0:
 #   NOROUTE    direct dial to a public IP fails (no route in the netns)
 #   ISOLATED   direct dial to the host-loopback target fails (the agent's own loopback)
 #   PROXY-OK   the SAME target IS reachable through the egress proxy (mediated path works)
 #   PROXY-DENY a non-allowlisted destination through the proxy is refused
+#   IOURING    io_uring_setup is seccomp-denied inside the jail (ADR-0033, no invisible I/O)
 # This needs no internet: the proxy reaches the host loopback; the agent cannot. Stdlib + pexpect.
 import pexpect, sys, os, re
 BUILD = "/home/work/ideas/bulkhead/yocto/build"
@@ -59,7 +60,7 @@ try:
     out("\n[probe journal]\n" + jr)
 
     check("START_RC=0" in startout, "confined probe unit ran to success (all checks passed -> exit 0)")
-    for name in ["NOROUTE", "ISOLATED", "PROXY-OK", "PROXY-DENY"]:
+    for name in ["NOROUTE", "ISOLATED", "PROXY-OK", "PROXY-DENY", "IOURING"]:
         check(bool(re.search(rf"PROBE {name}: PASS", jr)), f"probe {name} PASS")
 
     # Signed-chain assertion (ADR-0034/0017): the proxy recorded the probe's allow+deny decisions

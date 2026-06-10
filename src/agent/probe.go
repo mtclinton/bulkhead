@@ -6,8 +6,14 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"syscall"
 	"time"
+	"unsafe"
 )
+
+// sysIoUringSetup is the io_uring_setup(2) syscall number on x86_64 (the appliance is
+// qemux86-64 / core2-64; the stdlib syscall package doesn't export SYS_IO_URING_SETUP).
+const sysIoUringSetup = 425
 
 // runEgressProbe is the ADR-0034 increment-1 live check (dispatched from main). It runs
 // inside the jailed agent's no-route netns and verifies, in order:
@@ -18,6 +24,8 @@ import (
 //  3. PROXY-OK   — the SAME host-loopback service IS reachable through the egress-proxy UDS
 //     (the single mediated path works and bridges the namespace boundary);
 //  4. PROXY-DENY — a non-allowlisted destination through the proxy is refused.
+//  5. IOURING    — io_uring_setup is seccomp-denied (ADR-0033): an io_uring ring would be a
+//     syscall-invisible I/O channel that escapes the jail's mediation, so it must EPERM.
 //
 // It prints one "PROBE <name>: PASS|FAIL" line per check and returns 0 iff all pass.
 func runEgressProbe() int {
@@ -80,6 +88,22 @@ func runEgressProbe() int {
 	default:
 		c2.Close()
 		report("PROXY-DENY", false, fmt.Sprintf("%s was ALLOWED through the proxy (allowlist bypass!)", denied))
+	}
+
+	// 5. IOURING — io_uring_setup must be denied (ADR-0033). systemd's @system-service allows
+	//    the io_uring family (it's in @aio), so the jail's SystemCallFilter subtracts io_uring_*
+	//    by name; the call must hit the unit's SystemCallErrorNumber (EPERM) — never hand back a
+	//    ring fd, which would be an I/O channel invisible to the tier's seccomp/ptrace mediation.
+	var params [120]byte // sizeof(struct io_uring_params) on x86_64
+	fd, _, errno := syscall.Syscall(sysIoUringSetup, 1, uintptr(unsafe.Pointer(&params)), 0)
+	switch {
+	case errno == syscall.EPERM || errno == syscall.ENOSYS:
+		report("IOURING", true, fmt.Sprintf("io_uring_setup denied as expected (%v)", errno))
+	case errno == 0:
+		syscall.Close(int(fd))
+		report("IOURING", false, "io_uring_setup SUCCEEDED — a syscall-invisible I/O channel is reachable!")
+	default:
+		report("IOURING", false, fmt.Sprintf("io_uring_setup not seccomp-denied (errno %v)", errno))
 	}
 
 	return exitCode(ok)

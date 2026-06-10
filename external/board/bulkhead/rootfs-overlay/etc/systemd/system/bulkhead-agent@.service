@@ -78,7 +78,11 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
+# ADR-0033: deny io_uring inside the agent (across tiers, not confined-only). @system-service
+# ALLOWS the io_uring family via the @aio set; an io_uring ring is a syscall-invisible I/O
+# channel that escapes the seccomp/ptrace/EDR mediation this jail relies on, so the three
+# syscalls are subtracted by name (no @io_uring set exists). Broker half of ADR-0033 pending.
+SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module io_uring_setup io_uring_enter io_uring_register
 SystemCallErrorNumber=EPERM
 # AF_UNIX kept so the `other` class (local IPC) is exercisable; AF_INET/6 for egress
 # that the BPF E2 manifest then gates per destination class.

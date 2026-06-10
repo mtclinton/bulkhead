@@ -44,7 +44,13 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
+# ADR-0033: deny io_uring inside the agent. systemd's @system-service ALLOWS the io_uring
+# family — it is a member of the @aio set (seccomp-util.c) — and an io_uring ring is a
+# syscall-invisible I/O channel (SQ/CQ shared rings, not discrete syscalls) that would bypass
+# the tier's seccomp/ptrace/EDR mediation, the very observability the isolation pillar sells.
+# There is no @io_uring systemd set, so the three syscalls are subtracted by name. (The broker
+# half of ADR-0033 — servicing async I/O via observable syscalls — remains pending.)
+SystemCallFilter=~@resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module io_uring_setup io_uring_enter io_uring_register
 SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
