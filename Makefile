@@ -30,6 +30,7 @@ help:
 	@echo "  make tsauth-disk    build the Tailscale auth-key provisioning volume"
 	@echo "  make verify-tailnet boot with the key volume and assert the node joins"
 	@echo "  make verify-yocto-router  (Yocto wic + swtpm) assert the router /data signed chain survives a reboot"
+	@echo "  make verify-egress-reboot (Yocto wic + swtpm) assert the egress /data chain survives a reboot (fail-closed seed)"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -94,6 +95,13 @@ verify-tailnet:
 # across an in-guest reboot (ADR-0027/0028). Needs a built wic (bitbake bulkhead-image).
 verify-yocto-router:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-yocto-router-check.py
+
+# Yocto (not Buildroot): the egress sibling of verify-yocto-router. Boots the wic under swtpm via
+# run-qemu-tpm.sh and asserts the EGRESS PROXY's signed egress-decision chain (ADR-0034/0017)
+# survives an in-guest reboot AND the proxy comes back fail-closed under its OWN sealed seed
+# (BULKHEAD_REQUIRE_SEALED_KEY=1) — a path the router test does not exercise. Needs a built wic.
+verify-egress-reboot:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-reboot-check.py
 
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
