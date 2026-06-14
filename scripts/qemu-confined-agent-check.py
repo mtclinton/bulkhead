@@ -12,8 +12,11 @@
 #   - Its WEB leg has only one path: the host egress proxy. The model tells it to fetch a
 #     loopback URL; the fetch tunnels through the proxy (allowlisted), which signs the ALLOW
 #     into its Ed25519 hash-chained /data egress log.
-#   - We assert: the loop reached FINAL (exit 0), the fetch returned HTTP 200 THROUGH the proxy,
-#     and the proxy appended a freshly-signed record to the egress chain (domain=egress-proxy).
+#   - ARM 1 (ALLOW): we assert the loop reached FINAL (exit 0), the fetch returned HTTP 200 THROUGH
+#     the proxy, and the proxy appended a freshly-signed record to the egress chain.
+#   - ARM 2 (DENY): re-point the allowlist so the SAME fetch is non-allowlisted; assert the real
+#     agent is REFUSED by the proxy, still reaches FINAL reporting the denial, NEVER reaches the
+#     target, and the proxy signs the DENY — the structural boundary holds against a real agent.
 #
 # i.e. a real agent whose ONLY ways out — model and web — are the mediated, audited channels.
 # No internet, no LLM, no API key needed: mockchat is the canned upstream; the agent binary is
@@ -105,6 +108,35 @@ try:
     out("\n[verify-audit egress chain]\n" + va)
     check("VA_RC=0" in va and "domain: egress-proxy" in va, "egress chain verifies signed (domain=egress-proxy)")
     check(nbefore >= 0 and nafter > nbefore, f"agent's fetch was signed into the egress chain ({nbefore} -> {nafter} record(s))")
+
+    # --- Arm 2 (adversarial): the confined boundary HOLDS against the REAL agent, not just the probe.
+    # Re-point the proxy allowlist at a host that does NOT match the fetch target, so the SAME loopback
+    # fetch is now refused. A real agent told to fetch it must be DENIED by the proxy, still reach FINAL
+    # (reporting the denial), NEVER reach the target, and the proxy must sign the DENY into the chain. ---
+    run("printf 'example.invalid\\n' > /run/egress-allow-test.conf")
+    run("systemctl restart bulkhead-egress-proxy.service 2>&1"); run("sleep 1 2>/dev/null; true")
+    check("active" in run("systemctl is-active bulkhead-egress-proxy.service 2>&1"), "egress proxy restarted with a non-matching (deny) allowlist")
+    ndb = re.search(r"REC_DB=(\d+)", run(f"echo REC_DB=$(grep -c . {chain} 2>/dev/null || echo 0)"))
+    ndbefore = int(ndb.group(1)) if ndb else -1
+
+    run("mkdir -p /run/systemd/system/bulkhead-agent-confined@confagentdeny.service.d")
+    run("printf '[Service]\\nType=oneshot\\nExecStart=\\n"
+        "ExecStart=/usr/bin/bulkhead-agent confagentdeny\\n"
+        "Environment=\"BULKHEAD_AGENT_TASK=FETCH-ONLY run\"\\n'"
+        " > /run/systemd/system/bulkhead-agent-confined@confagentdeny.service.d/10-real.conf")
+    run("systemctl daemon-reload 2>&1")
+    dstart = run("systemctl start bulkhead-agent-confined@confagentdeny.service 2>&1; echo START_RC=$?", t=150)
+    djr = run("journalctl -u bulkhead-agent-confined@confagentdeny.service --no-pager 2>&1 | tail -40")
+    out("\n[deny-arm agent journal]\n" + djr)
+
+    check("START_RC=0" in dstart, "confined agent handled the denial and reached FINAL (exit 0)")
+    check(bool(re.search(r"DENIED: egress to 127\.0\.0\.1:8088", djr)), "real agent's fetch was REFUSED by the egress proxy")
+    check(not re.search(r"OK: fetch 127\.0\.0\.1:8088", djr), "the non-allowlisted target was NEVER reached (no successful fetch)")
+    nda = re.search(r"REC_DA=(\d+)", run(f"echo REC_DA=$(grep -c . {chain} 2>/dev/null || echo 0)"))
+    ndafter = int(nda.group(1)) if nda else -1
+    dva = run(f"bulkhead-collector verify-audit {chain} 2>&1; echo VA_RC=$?", t=30)
+    check("VA_RC=0" in dva, "egress chain still verifies after the signed DENY")
+    check(ndbefore >= 0 and ndafter > ndbefore, f"the proxy signed the DENY into the chain ({ndbefore} -> {ndafter} record(s))")
 
     run("systemctl stop bulkhead-mockchat.service 2>&1")
     run("poweroff", t=20)
