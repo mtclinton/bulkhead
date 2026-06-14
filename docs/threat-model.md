@@ -56,7 +56,11 @@
   or any image; the Anthropic key is TPM-bound and only ever present in a
   unit-private tmpfs credential at runtime.
 - **Default-deny network.** Tailscale-only inbound; egress only to the Anthropic
-  API + tailnet, enforced in the kernel (nftables/cgroup-eBPF).
+  API + tailnet, enforced in the kernel (nftables/cgroup-eBPF). For confined agents
+  this is now a *structural* boundary (ADR-0034): the agent runs in a no-route network
+  namespace whose only exit is a host-mediated proxy over a unix socket, so the
+  default-deny floor is backed by an unroutable-by-construction placement and the
+  domain allowlist is advisory, not the boundary.
 - **Tamper-evident provenance.** Hash-chained, Ed25519-signed, append-only log, with a
   per-chain domain tag and the hash chain continued ACROSS boots (ADR-0013) — so record
   tampering, reordering, and deletion of any interior record OR whole per-boot subchain are
@@ -78,13 +82,19 @@
 
 ## Non-goals (v1)
 
+*(Items tagged "shipped since v1" were original v1 non-goals that have since landed;
+they are kept here, annotated, to show the design's evolution per the living-doc note above.)*
+
 - Defending a daily-driver / general-purpose workload (bulkhead is an appliance).
-- BPF-LSM *enforcement* (deny) — v1 uses eBPF for provenance only; enforcement is
-  the mature floor (seccomp/Landlock/ns/cgroup). The deny layer is a later
-  increment.
+- BPF-LSM *enforcement* (deny) — **shipped since v1** (ADR-0016/0018 harden-by-default):
+  the image now boots with BPF-LSM deny armed by default (the E0 gate + E2 egress class
+  enforcement), on top of the mature floor (seccomp/Landlock/ns/cgroup). v1 originally
+  shipped eBPF for provenance only; the deny layer is no longer a later increment.
 - Protecting against a compromised TPM or a malicious physical attacker with
   arbitrary hardware access.
-- Remote attestation (deferred; the measured-boot PCRs + a TPM AK are the seam — ADR-0008).
-  The audit-log signing key is now TPM-sealed (ADR-0008, sealed to PCR 7, fail-closed); the
+- Remote attestation — **shipped since v1** (ADR-0019/0020/0021): the appliance now
+  produces a TPM-quoted attestation of the enforcing TCB, rooted in an EK-cert-bound AK and
+  gated on posture; `make verify-attest` proves it live and rejects tamper/replay. The
+  audit-log signing key is TPM-sealed (ADR-0008, sealed to PCR 7, fail-closed) and the
   measured-boot infrastructure (OVMF/GRUB/kernel/systemd-pcrphase) is in place, with live
   firmware PCR measurement validated on bare metal (qemu vTPM can't, per ADR-0001 #12).
