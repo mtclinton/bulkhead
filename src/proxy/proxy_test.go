@@ -159,21 +159,32 @@ func TestValidateHostNumericAlias(t *testing.T) {
 func TestCheckDialAddr(t *testing.T) {
 	_, loop, _ := net.ParseCIDR("127.0.0.0/8")
 	deny := []string{
-		"127.0.0.1:80",          // loopback
-		"169.254.169.254:80",    // cloud metadata (link-local)
-		"10.1.2.3:443",          // RFC-1918
-		"192.168.0.5:443",       // RFC-1918
-		"100.64.0.1:443",        // CGNAT
-		"0.0.0.0:80",            // unspecified
-		"[::1]:443",             // IPv6 loopback
-		"[::ffff:127.0.0.1]:80", // v4-mapped loopback
+		"127.0.0.1:80",            // loopback
+		"169.254.169.254:80",      // cloud metadata (link-local)
+		"10.1.2.3:443",            // RFC-1918
+		"192.168.0.5:443",         // RFC-1918
+		"100.64.0.1:443",          // CGNAT
+		"0.0.0.0:80",              // unspecified
+		"[::1]:443",               // IPv6 loopback
+		"[::ffff:127.0.0.1]:80",   // v4-mapped loopback
+		"240.0.0.1:80",            // 240/4 reserved (class E)
+		"255.255.255.255:80",      // limited broadcast (240/4)
+		"198.18.0.1:80",           // 198.18/15 benchmarking
+		"198.19.255.1:80",         // 198.18/15 benchmarking (high half)
+		"192.0.0.1:80",            // 192.0.0.0/24 IETF protocol assignments
+		"[fec0::1]:80",            // IPv6 site-local (deprecated, internal)
+		"[64:ff9b::7f00:1]:80",    // NAT64 of 127.0.0.1
+		"[64:ff9b::a9fe:a9fe]:80", // NAT64 of 169.254.169.254 (metadata)
+		"[2002:7f00:1::]:80",      // 6to4 of 127.0.0.0/8
 	}
 	for _, a := range deny {
 		if err := checkDialAddr(a, nil); err == nil {
 			t.Errorf("checkDialAddr(%q, deny-all) accepted, want deny", a)
 		}
 	}
-	allow := []string{"8.8.8.8:443", "1.1.1.1:80", "[2606:4700::1111]:443"}
+	// public destinations (incl. a NAT64-wrapped PUBLIC v4) must still be allowed — the deny-list
+	// must not over-block normal egress.
+	allow := []string{"8.8.8.8:443", "1.1.1.1:80", "[2606:4700::1111]:443", "[64:ff9b::808:808]:443"}
 	for _, a := range allow {
 		if err := checkDialAddr(a, nil); err != nil {
 			t.Errorf("checkDialAddr(%q) = %v, want allow", a, err)

@@ -97,16 +97,59 @@ func checkDialAddr(address string, allow []*net.IPNet) error {
 
 // isInternalIP reports whether ip is in a class the agent must not reach by default.
 // The stdlib predicates consult To4(), so v4-mapped IPv6 (::ffff:127.0.0.1) is covered;
-// 100.64/10 CGNAT is not an IsPrivate range, so it is checked explicitly.
+// the remaining CGNAT / reserved / site-local / translated ranges the stdlib misses are
+// enumerated explicitly. No legitimate egress targets any of these; an SSRF or a host
+// misconfiguration could, so the deny-list aims to be complete, not minimal.
 func isInternalIP(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1]&0xc0 == 64 {
-		return true // 100.64.0.0/10 (CGNAT / tailnet)
+	if v4 := ip.To4(); v4 != nil {
+		switch {
+		case v4[0] == 100 && v4[1]&0xc0 == 64: // 100.64.0.0/10 (CGNAT / tailnet)
+			return true
+		case v4[0]&0xf0 == 0xf0: // 240.0.0.0/4 reserved (class E) incl. 255.255.255.255 broadcast
+			return true
+		case v4[0] == 198 && v4[1]&0xfe == 18: // 198.18.0.0/15 (benchmarking)
+			return true
+		case v4[0] == 192 && v4[1] == 0 && v4[2] == 0: // 192.0.0.0/24 (IETF protocol assignments)
+			return true
+		}
+		return false
+	}
+	// IPv6 site-local fec0::/10 — deprecated but a genuinely-internal addressing scheme, and NOT
+	// covered by IsLinkLocalUnicast (fe80::/10) or IsPrivate (fc00::/7 ULA).
+	if ip16 := ip.To16(); ip16 != nil && ip16[0] == 0xfe && ip16[1]&0xc0 == 0xc0 {
+		return true
+	}
+	// Translated forms that embed an IPv4 address: re-apply the deny to the embedded v4 so an
+	// internal v4 can't slip in wearing an IPv6 coat (NAT64 64:ff9b::/96, 6to4 2002::/16).
+	// Defense-in-depth — the image ships no NAT64/6to4 translator today, but the guard should be
+	// complete regardless of host network config.
+	if e := embeddedV4(ip); e != nil {
+		return isInternalIP(e)
 	}
 	return false
+}
+
+// embeddedV4 returns the IPv4 address embedded in a NAT64 (64:ff9b::/96) or 6to4 (2002::/16)
+// IPv6 address, or nil if ip is neither (or is already IPv4). v4-mapped ::ffff: is handled by
+// To4() in isInternalIP and never reaches here.
+func embeddedV4(ip net.IP) net.IP {
+	ip16 := ip.To16()
+	if ip16 == nil || ip.To4() != nil {
+		return nil
+	}
+	if ip16[0] == 0x00 && ip16[1] == 0x64 && ip16[2] == 0xff && ip16[3] == 0x9b &&
+		ip16[4] == 0 && ip16[5] == 0 && ip16[6] == 0 && ip16[7] == 0 &&
+		ip16[8] == 0 && ip16[9] == 0 && ip16[10] == 0 && ip16[11] == 0 {
+		return net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15]) // NAT64 64:ff9b::/96
+	}
+	if ip16[0] == 0x20 && ip16[1] == 0x02 {
+		return net.IPv4(ip16[2], ip16[3], ip16[4], ip16[5]) // 6to4 2002:V4:V4::/16
+	}
+	return nil
 }
 
 // handleConn services one agent connection: read the single CONNECT request, check the
