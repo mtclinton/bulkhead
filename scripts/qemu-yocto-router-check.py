@@ -65,6 +65,13 @@ PROBE_BOOT1 = [
     HEALTH,
     "echo '<<<BOOT1'",
     'echo "router-active=$(systemctl is-active bulkhead-router)"',
+    # Router STABILITY guard (ADR-0034): the router serves BULKHEAD_ROUTER_UDS via net.Listen("unix").
+    # If a future change drops AF_UNIX from RestrictAddressFamilies (as inc1 shipped), that listen fails
+    # fatally and the router crash-loops — yet TCP /health still passes on the brief restart up-windows,
+    # so this test would go green on a broken router. Assert NRestarts=0 after the health settle AND that
+    # the UDS socket exists, so the crash-loop class fails LOUDLY instead of hiding.
+    'echo "router-nrestarts=$(systemctl show bulkhead-router -p NRestarts --value)"',
+    'echo "router-uds=$([ -S /run/bulkhead-router/router.sock ] && echo yes || echo no)"',
     'echo "seal-active=$(systemctl is-active bulkhead-seal-audit-key)"',
     'echo "verifyaudit-active=$(systemctl is-active bulkhead-verify-audit)"',
     'echo "selftest-active=$(systemctl is-active bulkhead-selftest)"',
@@ -208,6 +215,8 @@ def main():
         ("BOOT1 captured", bool(m1)),
         ("bulkhead-audit group exists (extrausers)", kv(b1, "group-present") == "1"),
         ("router active", kv(b1, "router-active") == "active"),
+        ("router stable — no UDS crash-loop (NRestarts=0)", kv(b1, "router-nrestarts") == "0"),
+        ("router UDS created for confined agents (ADR-0034)", kv(b1, "router-uds") == "yes"),
         ("seal-audit-key active (seed provisioned)", kv(b1, "seal-active") == "active"),
         ("verify-audit boot gate active (sealed-seed verify passed)", kv(b1, "verifyaudit-active") == "active"),
         ("selftest gate active", kv(b1, "selftest-active") == "active"),
