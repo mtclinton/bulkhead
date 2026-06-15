@@ -121,20 +121,33 @@ func toolRegistry() map[string]Tool {
 				return validClassList(f[1])
 			},
 			Run: func(ctx context.Context, arg string) (string, error) {
-				if os.Getenv("BULKHEAD_AGENT_ALLOW_DELEGATE") == "" {
-					return "ERROR: delegation is disabled for this agent", nil
-				}
-				f := strings.Fields(arg)
-				args := []string{"delegate", f[0], f[1]}
+				f := strings.Fields(arg) // Validate guaranteed >= 2 fields (suffix, classes)
+				task := ""
 				if len(f) > 2 {
-					// Pass the child task as a SINGLE argv element so exec never re-splits it; the
-					// broker validates it and plumbs it through an injection-safe credential channel.
-					args = append(args, strings.Join(f[2:], " "))
+					task = strings.Join(f[2:], " ")
 				}
-				return runCollector(ctx, args...)
+				return runDelegate(ctx, f[0], f[1], task)
 			},
 		},
 	}
+}
+
+// runDelegate spawns a NARROWED child via the broker (child = parent ∩ classes). suffix + classes
+// are CONTROL (the child's identity + kernel-enforced authority); task is DATA, passed as a SINGLE
+// argv element so exec never re-splits it — the broker validates it and plumbs it through an
+// injection-safe credential channel (never unit syntax). Shared by the legacy delegate tool and the
+// ADR-0036 quarantine interpreter (planexec opDelegate): in the quarantine the suffix+classes are
+// PLAN-FIXED by the trusted planner while the task may be a tainted EXTRACT result, so an injection
+// in fetched content can set the child's task (data) but NEVER its authority (control).
+func runDelegate(ctx context.Context, suffix, classes, task string) (string, error) {
+	if os.Getenv("BULKHEAD_AGENT_ALLOW_DELEGATE") == "" {
+		return "ERROR: delegation is disabled for this agent", nil
+	}
+	args := []string{"delegate", suffix, classes}
+	if task != "" {
+		args = append(args, task)
+	}
+	return runCollector(ctx, args...)
 }
 
 // runCollector execs an EXISTING audited broker verb. The agent is non-root + outside the TCB;

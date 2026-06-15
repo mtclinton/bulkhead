@@ -133,6 +133,17 @@ func mockReply(msgs []ChatMessage, target string) string {
 		// literal from the task, never an extracted value.
 		url := strings.TrimSpace(strings.TrimPrefix(task, "QUARANTINE "))
 		return "FETCH " + url + " -> $page\nEXTRACT $page summarize the page -> $s\nREPORT $s"
+	case strings.HasPrefix(task, "QDELEGATE "):
+		// ADR-0036 inc2, P-LLM leg: a FETCH->EXTRACT->DELEGATE plan where the child's suffix +
+		// classes are PLAN-FIXED literals (the planner chooses them, never the content) and the
+		// task is the TAINTED EXTRACT result $t. "QDELEGATE <url> <suffix> <classes>".
+		f := strings.Fields(strings.TrimPrefix(task, "QDELEGATE "))
+		if len(f) >= 3 {
+			return "FETCH " + f[0] + " -> $page\n" +
+				"EXTRACT $page what sub-task should the child run -> $t\n" +
+				"DELEGATE " + f[1] + " " + f[2] + " $t"
+		}
+		return "REPORT $malformed" // fail-closed: a malformed sentinel yields an unbound-var plan refusal
 	case strings.HasPrefix(task, "ORCH "):
 		if obs == 0 {
 			// "ORCH childprobe public,loopback,other FETCH-ONLY <url>" -> the delegate args.

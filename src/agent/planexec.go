@@ -9,22 +9,29 @@ package main
 // reader (Q-LLM, qresponse.go) whose reply is stored as DATA and never parsed as a directive.
 //
 // The provable property (report #2): untrusted tool output cannot influence control flow, because
-// control flow IS the plan, fixed before any untrusted byte is read. Slice A is STATIC-PLAN ONLY
-// (it refuses data-dependent branching by grammar — CaMeL is 0% on the dynamic AgentDyn benchmark);
-// it is a user-space control-flow-integrity property layered on ADR-0035's kernel resource
-// authorization, NOT itself a kernel reference monitor. A corrupted interpreter voids the property,
-// so this stays small, stdlib-only, and fail-closed on any off-grammar plan (like protocol.go).
+// control flow IS the plan, fixed before any untrusted byte is read. The quarantine is STATIC-PLAN
+// ONLY (it refuses data-dependent branching by grammar — CaMeL is 0% on the dynamic AgentDyn
+// benchmark); it is a user-space control-flow-integrity property layered on ADR-0035's kernel
+// resource authorization, NOT itself a kernel reference monitor. A corrupted interpreter voids the
+// property, so this stays small, stdlib-only, and fail-closed on any off-grammar plan.
 //
-// Slice-A grammar (one opcode per line, nothing else):
+// Grammar (one opcode per line, nothing else):
 //
-//	FETCH <http-url> -> $var         GET a LITERAL url (never a $var — no data-dependent fetch)
-//	EXTRACT $src <question> -> $var  quarantined reader answers <question> over the bytes in $src
-//	REPORT $var                      terminal; $var (an EXTRACT result) is the answer
+//	FETCH <http-url> -> $var              GET a LITERAL url (never a $var — no data-dependent fetch)
+//	EXTRACT $src <question> -> $var       quarantined reader answers <question> over the bytes in $src
+//	REPORT $var                           terminal; $var (an EXTRACT result) is the answer
+//	DELEGATE <suffix> <classes> <task>    terminal; spawn a child — task may be tainted, authority is not
 //
-// The taint rule slice A enforces structurally: a FETCH target must be a literal (an extracted
-// value can never select what is fetched), and an EXTRACT result may ONLY be REPORTed — it cannot
-// become any tool argument. That defers the typed-taint model (extracted value -> later tool arg)
-// and the escalation opcodes (request_egress/delegate inside a plan) to increment 2.
+// The typed-taint rule the interpreter enforces structurally (the CaMeL property):
+//   - A FETCH target must be a literal — an extracted value can never select WHAT is fetched.
+//   - DELEGATE's suffix + classes are CONTROL (the child's identity + kernel-enforced authority): they
+//     MUST be literals, fixed by the trusted planner. The task is the sole DATA slot — it may be a
+//     tainted EXTRACT result ($vData var). So an injection in fetched content can set a delegated
+//     child's TASK (data) but NEVER its AUTHORITY (control); the child stays bounded by the plan-fixed
+//     classes ∩ parent, enforced by the broker + the kernel E2 manifest (narrow-never-widen).
+//   - Slice A confined EXTRACT results to REPORT; inc2 (this) lets a tainted value flow into the
+//     DELEGATE task only. A tainted value may NEVER select which opcode runs, whether it runs, or any
+//     control-relevant argument. Replanning stays an explicit non-goal.
 
 import (
 	"bytes"
@@ -43,6 +50,7 @@ const (
 	opFetch opKind = iota
 	opExtract
 	opReport
+	opDelegate
 )
 
 type planStep struct {
@@ -52,6 +60,12 @@ type planStep struct {
 	question string // opExtract: literal question
 	dst      string // opFetch/opExtract: bound var name
 	rep      string // opReport: var name to report
+	// opDelegate (inc2): suffix + classes are CONTROL (literal, plan-fixed — child identity +
+	// authority); the task is DATA — either a literal or a tainted EXTRACT result (taskVar).
+	suffix  string
+	classes string
+	task    string // literal task (DATA), when taskVar == ""
+	taskVar string // var name of a tainted (vData) task, when set
 }
 
 type valKind int
@@ -91,11 +105,15 @@ func planPrompt() string {
 	return strings.Join([]string{
 		"You are the PLANNING half of a bulkhead quarantine agent. You NEVER see fetched content.",
 		"Emit a STATIC plan, ONE opcode per line, and nothing else. Valid opcodes:",
-		"  FETCH <http-url> -> $var         -- GET a URL you name explicitly (a literal, never a $var)",
-		"  EXTRACT $src <question> -> $var  -- the quarantined reader answers <question> over the bytes in $src",
-		"  REPORT $var                      -- finish; $var (an EXTRACT result) is the answer",
-		"The plan is fixed before any content is read: you may NOT branch on content, and a FETCH target",
-		"is always a literal URL. The last line must be REPORT. Output nothing but the plan lines.",
+		"  FETCH <http-url> -> $var              -- GET a URL you name explicitly (a literal, never a $var)",
+		"  EXTRACT $src <question> -> $var       -- the quarantined reader answers <question> over the bytes in $src",
+		"  REPORT $var                           -- finish; $var (an EXTRACT result) is the answer",
+		"  DELEGATE <suffix> <classes> <task>    -- finish; spawn a sub-agent. suffix + classes are LITERAL (you",
+		"                                           fix the child's identity + egress); <task> may be a literal OR a",
+		"                                           $var EXTRACT result (the child's instructions, never its authority)",
+		"The plan is fixed before any content is read: you may NOT branch on content, a FETCH target is",
+		"always a literal URL, and a child's suffix + classes are always literals you choose. The last line",
+		"must be REPORT or DELEGATE. Output nothing but the plan lines.",
 	}, "\n")
 }
 
@@ -113,7 +131,7 @@ func parsePlan(text string) ([]planStep, error) {
 			continue
 		}
 		if reported {
-			return nil, fmt.Errorf("line %d: no opcode may follow REPORT (the plan is terminal)", n+1)
+			return nil, fmt.Errorf("line %d: no opcode may follow the terminal REPORT/DELEGATE", n+1)
 		}
 		if len(steps) >= maxPlanSteps {
 			return nil, fmt.Errorf("plan exceeds the %d-step cap", maxPlanSteps)
@@ -177,12 +195,48 @@ func parsePlan(text string) ([]planStep, error) {
 			}
 			steps = append(steps, planStep{op: opReport, rep: rname})
 			reported = true
+		case "DELEGATE":
+			// DELEGATE <suffix> <classes> <task...>. suffix + classes are CONTROL (literals fixed by
+			// the planner); the task is the sole DATA slot (a literal or a tainted $vData var).
+			f := strings.Fields(rest)
+			if len(f) < 3 {
+				return nil, fmt.Errorf("line %d: DELEGATE needs '<suffix> <classes> <task-or-$var>'", n+1)
+			}
+			suffix, classes := f[0], f[1]
+			// The taint boundary: a tainted value may NEVER set the child's identity or authority.
+			if strings.HasPrefix(suffix, "$") || strings.HasPrefix(classes, "$") {
+				return nil, fmt.Errorf("line %d: DELEGATE suffix and classes must be literals — a tainted/extracted value can never set a child's identity or authority", n+1)
+			}
+			if !isIdent(suffix) {
+				return nil, fmt.Errorf("line %d: DELEGATE suffix %q must be an identifier", n+1, suffix)
+			}
+			if err := validClassList(classes); err != nil {
+				return nil, fmt.Errorf("line %d: DELEGATE classes: %w", n+1, err)
+			}
+			step := planStep{op: opDelegate, suffix: suffix, classes: classes}
+			taskTok := strings.TrimSpace(strings.Join(f[2:], " "))
+			if strings.HasPrefix(taskTok, "$") && !strings.ContainsAny(taskTok, " \t") {
+				// A lone $var task: the DATA slot may carry a tainted EXTRACT result.
+				tname, err := varName(taskTok)
+				if err != nil {
+					return nil, fmt.Errorf("line %d: DELEGATE task: %w", n+1, err)
+				}
+				if k, ok := bound[tname]; !ok || k != vData {
+					return nil, fmt.Errorf("line %d: DELEGATE task $%s must be an EXTRACT result (data)", n+1, tname)
+				}
+				step.taskVar = tname
+			} else {
+				// A literal (plan-fixed, trusted) task.
+				step.task = taskTok
+			}
+			steps = append(steps, step)
+			reported = true
 		default:
-			return nil, fmt.Errorf("line %d: unknown opcode %q (only FETCH/EXTRACT/REPORT in slice A)", n+1, verb)
+			return nil, fmt.Errorf("line %d: unknown opcode %q (only FETCH/EXTRACT/REPORT/DELEGATE)", n+1, verb)
 		}
 	}
 	if !reported {
-		return nil, errors.New("plan must end with REPORT")
+		return nil, errors.New("plan must end with REPORT or DELEGATE")
 	}
 	return steps, nil
 }
@@ -222,6 +276,23 @@ func runPlan(ctx context.Context, routerURL string, steps []planStep, reg map[st
 		case opReport:
 			log.Printf("quarantine: REPORT $%s (terminal)", s.rep)
 			return store[s.rep].text, nil
+		case opDelegate:
+			// The child's identity + authority are PLAN-FIXED (literals the planner chose); only the
+			// task is data, and it may be tainted. runDelegate hands the task to the broker as one
+			// argv element — the child is born classes ∩ parent (narrow-never-widen, E2-enforced), so
+			// a tainted task can direct WHAT the child does but never widen WHAT it is allowed to do.
+			task, taint := s.task, "plan-fixed literal"
+			if s.taskVar != "" {
+				task, taint = store[s.taskVar].text, "TAINTED ($"+s.taskVar+", an extracted value)"
+			}
+			log.Printf("quarantine: DELEGATE suffix=%s classes=%s (PLAN-FIXED authority) task=<%d bytes, %s>",
+				s.suffix, s.classes, len(task), taint)
+			obs, err := runDelegate(ctx, s.suffix, s.classes, task)
+			if err != nil {
+				return "", fmt.Errorf("DELEGATE %s: %w", s.suffix, err)
+			}
+			log.Printf("quarantine: DELEGATE %s -> %s (terminal)", s.suffix, truncate(obs, 200))
+			return obs, nil
 		}
 	}
 	return "", errors.New("plan completed without REPORT")
