@@ -11,6 +11,8 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-egress-proxy-data.conf \
            file://bulkhead-provision-mitm-ca.service \
            file://bulkhead-egress-proxy-mitm.conf \
+           file://provision-mitm-ca-tpm2-mode.conf \
+           file://mitm-cred-tpm2.conf \
            file://bulkhead-seal-audit-key.service \
            file://bulkhead-seal-audit-key \
            file://bulkhead-verify-audit.service \
@@ -152,6 +154,15 @@ do_install() {
 			install -m0644 ${WORKDIR}/audit-cred-tpm2.conf \
 				${D}${systemd_system_unitdir}/$svc.service.d/20-audit-cred-tpm2.conf
 		done
+		# ADR-0034 inc2: tpm2-seal the re-signing CA key too. Provision in tpm2 mode (20-tpm2.conf sets
+		# BULKHEAD_SEAL_KEY=tpm2 so the CA key is sealed to ca.key.cred, no plaintext), and flip the
+		# proxy's CA-KEY credential to the sealed cred (30- sorts after 20-mitm.conf + 20-audit-cred-tpm2.conf;
+		# the public ca.crt stays plaintext).
+		install -d ${D}${systemd_system_unitdir}/bulkhead-provision-mitm-ca.service.d
+		install -m0644 ${WORKDIR}/provision-mitm-ca-tpm2-mode.conf \
+			${D}${systemd_system_unitdir}/bulkhead-provision-mitm-ca.service.d/20-tpm2.conf
+		install -m0644 ${WORKDIR}/mitm-cred-tpm2.conf \
+			${D}${systemd_system_unitdir}/bulkhead-egress-proxy.service.d/30-mitm-cred-tpm2.conf
 	fi
 
 	# RAUC-audit fix: gate rauc-mark-good on the bulkhead security gates so a slot that fails

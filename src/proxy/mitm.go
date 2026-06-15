@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -374,11 +375,16 @@ func provisionCA(dir string) error {
 	// explicitly. ca.key stays 0600 below — the secret is protected by the FILE mode, not the dir.
 	_ = os.Chmod(filepath.Dir(dir), 0o755) // /data/bulkhead
 	_ = os.Chmod(dir, 0o755)               // /data/bulkhead/mitm-ca
+	sealMode := envOr("BULKHEAD_SEAL_KEY", "plain")
 	keyPath := filepath.Join(dir, "ca.key")
+	credPath := filepath.Join(dir, "ca.key.cred")
 	crtPath := filepath.Join(dir, "ca.crt")
 	trustPath := filepath.Join(dir, "agent-trust.crt")
-	if caPresentValid(crtPath, keyPath) {
-		return writeAgentTrust(crtPath, trustPath) // refresh the bundle; keep the CA
+	// Idempotent: a present+valid CA is kept (rotating it would invalidate live agent trust + any
+	// minted leaves). "Valid" = the cert is unexpired AND its private key is available in the mode's
+	// storage form: plaintext ca.key (plain) or a decryptable ca.key.cred (tpm2).
+	if certValid(crtPath) && keyAvailable(sealMode, keyPath, credPath) {
+		return writeAgentTrust(crtPath, trustPath)
 	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -407,13 +413,96 @@ func provisionCA(dir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}), 0o600); err != nil {
-		return err
-	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})
 	if err := os.WriteFile(crtPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
 		return err
 	}
+	// Deliver the private key per mode. tpm2 (bare metal): TPM2-seal it to ca.key.cred (PCR-bound,
+	// decryptable only on the expected boot) and NEVER persist plaintext — the proxy loads it via
+	// LoadCredentialEncrypted. plain (VM/dev): plaintext 0600 ca.key via LoadCredential. Same
+	// pattern as the audit seed (bulkhead-seal-audit-key); qemu vTPM sealing is unreliable, so plain
+	// is the VM default and tpm2 is the bare-metal posture.
+	if sealMode == "tpm2" {
+		_ = os.Remove(keyPath)
+		if err := sealKeyTPM2(keyPEM, credPath); err != nil {
+			return fmt.Errorf("tpm2-seal CA key: %w", err)
+		}
+	} else {
+		_ = os.Remove(credPath)
+		if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+			return err
+		}
+	}
 	return writeAgentTrust(crtPath, trustPath)
+}
+
+// certValid reports whether crtPath holds an unexpired certificate.
+func certValid(crtPath string) bool {
+	crtPEM, err := os.ReadFile(crtPath)
+	if err != nil {
+		return false
+	}
+	cb, _ := pem.Decode(crtPEM)
+	if cb == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(cb.Bytes)
+	if err != nil {
+		return false
+	}
+	return time.Now().Before(cert.NotAfter)
+}
+
+// keyAvailable reports whether the CA private key is present in the storage form for sealMode:
+// a decryptable ca.key.cred (tpm2) or a plaintext ca.key (plain).
+func keyAvailable(sealMode, keyPath, credPath string) bool {
+	if sealMode == "tpm2" {
+		return sealedKeyDecrypts(credPath)
+	}
+	_, err := os.Stat(keyPath)
+	return err == nil
+}
+
+// sealedKeyDecrypts reports whether credPath is a TPM2-sealed cred that unseals to a parseable
+// Ed25519 PKCS#8 key on THIS boot (the idempotence + post-seal integrity check).
+func sealedKeyDecrypts(credPath string) bool {
+	if _, err := os.Stat(credPath); err != nil {
+		return false
+	}
+	out, err := exec.Command("systemd-creds", "decrypt", "--name=mitm-ca-key", credPath, "-").Output()
+	if err != nil {
+		return false
+	}
+	cb, _ := pem.Decode(out)
+	if cb == nil {
+		return false
+	}
+	k, err := x509.ParsePKCS8PrivateKey(cb.Bytes)
+	if err != nil {
+		return false
+	}
+	_, ok := k.(ed25519.PrivateKey)
+	return ok
+}
+
+// sealKeyTPM2 TPM2-seals keyPEM to credPath (named "mitm-ca-key", PCR-bound) via systemd-creds —
+// the same tool the audit seed uses — and verifies it unseals back, failing closed otherwise.
+func sealKeyTPM2(keyPEM []byte, credPath string) error {
+	pcrs := envOr("BULKHEAD_SEAL_PCRS", "7")
+	tmp := credPath + ".tmp"
+	_ = os.Remove(tmp)
+	cmd := exec.Command("systemd-creds", "encrypt", "--name=mitm-ca-key", "--with-key=tpm2", "--tpm2-pcrs="+pcrs, "-", tmp)
+	cmd.Stdin = bytes.NewReader(keyPEM)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("systemd-creds encrypt: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if !sealedKeyDecrypts(tmp) {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sealed cred does not unseal back to an Ed25519 key")
+	}
+	_ = os.Chmod(tmp, 0o600)
+	return os.Rename(tmp, credPath)
 }
 
 func caPresentValid(crtPath, keyPath string) bool {
