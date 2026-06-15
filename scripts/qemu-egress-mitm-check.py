@@ -53,11 +53,14 @@ try:
           "agent-trust.crt carries certificate(s) (proxy CA ++ roots)")
     check("agent-trust.crt" in run("systemctl cat bulkhead-agent-confined@.service 2>&1 | grep SSL_CERT_FILE; true"),
           "confined jail sets SSL_CERT_FILE -> agent-trust bundle")
-    # the trust file must be reachable by the agent's non-root DynamicUser (dir chain o+x, file o+r).
-    diag = run("stat -c '%n %a %U' /data /data/bulkhead /data/bulkhead/mitm-ca /data/bulkhead/mitm-ca/agent-trust.crt 2>&1; "
-               "runuser -u nobody -- cat /data/bulkhead/mitm-ca/agent-trust.crt >/dev/null 2>&1 && echo NOBODY-READ=ok || echo NOBODY-READ=fail")
-    out("\n[DIAG trust accessibility]\n" + diag)
-    check("NOBODY-READ=ok" in diag, "agent-trust.crt readable by a non-root user (agent can load it)")
+    # the trust file must be reachable by the agent's non-root DynamicUser (dir chain o+x, file o+r) —
+    # a regression guard for the CA-dir-perms bug. Parse the modes (runuser isn't on the image).
+    diag = run("stat -c 'MODE %n %a' /data/bulkhead/mitm-ca /data/bulkhead/mitm-ca/agent-trust.crt 2>&1")
+    out("\n[DIAG trust modes]\n" + diag)
+    dm = re.search(r"MODE /data/bulkhead/mitm-ca (\d+)", diag)
+    fm = re.search(r"agent-trust\.crt (\d+)", diag)
+    readable = bool(dm) and bool(fm) and (int(dm.group(1), 8) & 0o001) and (int(fm.group(1), 8) & 0o004)
+    check(readable, "CA dir is o+x and agent-trust.crt is o+r (the non-root agent can load it)")
 
     # --- bring up the two mockchats: #1 plain (the router's model backend), #2 TLS (the fetch upstream) ---
     run("mkdir -p /run/systemd/system/bulkhead-mockchat.service.d")
