@@ -5,12 +5,12 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-# Pinned to 0c6c8fc: ADR-0034 inc1 (structural egress) + signed egress provenance. src/proxy (stdlib-only):
+# Pinned to 2e82b78: ADR-0034 inc1 (structural egress) + signed egress provenance. src/proxy (stdlib-only):
 # single-canonical-parse CONNECT over a UDS, host-side DNS, advisory allowlist, post-resolution internal-IP
 # deny (SSRF/metadata) — now with a COMPLETED deny-list (fec0::/10 site-local, reserved IPv4, NAT64/6to4
 # embedded-v4) after an adversarial review — bounded splice, and src/proxy/audit.go: an Ed25519-signed,
 # hash-chained "egress-proxy"-domain decision log (record-before-act, fail-closed allow).
-SRCREV = "0c6c8fce88ad6bf26cfb4c6343005c3595db4273"
+SRCREV = "2e82b7871a41f2d3778372854f57459574a17088"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
