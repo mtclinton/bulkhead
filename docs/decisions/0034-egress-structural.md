@@ -1,6 +1,6 @@
 # ADR-0034: Network egress: structural confinement + mediating proxy, not allowlist-as-boundary
 
-Status: Accepted — increment 1 (structural confinement) + increment 2 sub-A (selective TLS-termination + content inspection) shipped + live-verified; inc2 sub-B (production CA sealing, rule-engine breadth, response inspection) pending
+Status: Accepted — increment 1 (structural confinement) + increment 2 sub-A (selective TLS-termination + content inspection) shipped + live-verified; inc2 sub-B started (re-signing CA key TPM2-sealable on bare metal); sub-B remainder (rule-engine breadth, response inspection, HTTP/2, passthrough exception list) pending
 Date: 2026-06-07
 
 ## Implementation status
@@ -36,11 +36,17 @@ loopback TLS upstream. NOTE: `default=passthrough` leaves the body-exfil gap OPE
 not explicitly marked `inspect` — the ledger makes that a measurable, budgeted decision, not a silent
 erosion.
 
-**Increment 2 sub-B — PENDING:** tpm2-sealing the CA key on bare metal; a real
+**Increment 2 sub-B — STARTED.** The re-signing CA key is now TPM2-sealable on bare metal: in a
+`BULKHEAD_SEAL_KEY=tpm2` build the first-boot provision seals `ca.key` to a PCR-bound
+`ca.key.cred` (systemd-creds, `--with-key=tpm2 --tpm2-pcrs=7`) and persists NO plaintext, and the
+proxy loads it via `LoadCredentialEncrypted` — the same proven pattern as the audit seed, gated on
+the same build switch (the public `ca.crt` stays plaintext). The plain (VM/dev) path is unchanged
+and stays fully qemu-verified; the tpm2 unseal is bare-metal-authoritative (qemu vTPM sealing is
+unreliable, ADR-0001 #12), and the tpm2-mode wiring is build-verified. STILL PENDING: a real
 allow/deny-by-method/path/header rule engine + response-direction inspection + body DLP; HTTP/2 +
-websockets; the curated, audited pinned-cert/mTLS passthrough exception list (the open question below);
-a `BULKHEAD_EGRESS_DEFAULT_MODE=inspect` knob for high-assurance tiers; leaf-cache bounding + an
-audit-chain volume review.
+websockets; the curated, audited pinned-cert/mTLS passthrough exception list (the open question
+below); a `BULKHEAD_EGRESS_DEFAULT_MODE=inspect` knob for high-assurance tiers; leaf-cache bounding +
+an audit-chain volume review.
 
 Decided/known inc1 simplifications to revisit: the proxy & router UDS are `0666` (the agent
 is a distinct DynamicUser; group-gating to a static `bulkhead-egress` group is a hardening
