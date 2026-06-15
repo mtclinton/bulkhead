@@ -35,5 +35,21 @@ Environment=BULKHEAD_AUDIT_DIR=/var/lib/bulkhead/audit
 # BPF JIT needs W+X, so MemoryDenyWriteExecute must stay off here.
 MemoryDenyWriteExecute=no
 
+# Syscall hardening for the TCB (ADR-0033). The collector loads BPF + reads a ringbuf (mmap/epoll)
+# + serves the approve.sock — it needs an UNUSUAL syscall set (bpf, perf_event_open, memlock), so
+# unlike the agent jails it canNOT use a tight @system-service allowlist without risking the BPF
+# loader (a missing syscall would fail-close the whole E0/E2 enforcement floor). We therefore deny by
+# group, not allowlist. Most dangerous groups are ALREADY blocked by the CAP_BPF/PERFMON/SYS_RESOURCE
+# bounding set (swap/reboot/module/raw-io/clock/mount all need caps this unit does not hold), so those
+# denials are explicit defense-in-depth. The load-bearing addition is io_uring: it is NOT
+# capability-gated, and an io_uring ring is a syscall-INVISIBLE I/O channel (shared SQ/CQ rings) — the
+# provenance collector, of all components, must not be able to open one and bypass the very syscall
+# observability it exists to provide. There is no @io_uring set, so the three are subtracted by name.
+# (A tighter @system-service allowlist with explicitly-traced bpf/perf_event_open + the broker's pidfd
+# syscalls is a future refinement once that set is strace-verified — see the hardening backlog.)
+SystemCallArchitectures=native
+SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register @swap @reboot @module @raw-io @clock @cpu-emulation @obsolete @mount
+SystemCallErrorNumber=EPERM
+
 [Install]
 WantedBy=multi-user.target
