@@ -84,6 +84,39 @@ the BPF-LSM substrate remains bulkhead's authoritative isolation; this series de
 
 High confidence on the substrate ranking and the reject-C-VMM call: reports #1, #8, #9, #10 are strongly and consistently sourced (22–24 verified claims each). Open questions: (1) the default/hostile **tier-assignment policy** — which workloads get pushed from Sentry to Firecracker, and on what signal; (2) whether Cloud Hypervisor's larger device set is worth its surface for any tier; (3) `sandprint`-style observed-syscall profiling as a validated *complement* to the substrate [#26]. The interception primitive (Systrap vs KVM) and io_uring handling are decided in separate ADRs.
 
+## Feasibility spike — gVisor/runsc viability (2026-06-15)
+
+A time-boxed spike retired the largest "can we even get there" unknown for this ADR. It does NOT
+revisit the defer decision (that stays grounded in #26 — the 2024–26 real breaks were egress/
+orchestrator, not kernel escapes, which is why ADR-0034 shipped first); it asks only whether the
+gVisor-Systrap path is viable for this appliance WHEN scheduled. All reproduced on the dev host with
+runsc release-20260413:
+
+- **runsc runs, rootless, under BOTH platforms.** `runsc --rootless --ignore-cgroups
+  --platform=systrap do <cmd>` and `--platform=kvm` both execute a workload. Systrap ran with no
+  hardware-virt / nested-KVM dependency — ADR-0032's substrate-independence claim, confirmed live.
+- **Host-surface collapse, demonstrated.** A workload inside the sandbox reports kernel `4.4.0`
+  (gVisor's reimplemented kernel) and `dmesg` "Starting gVisor…", NOT the host's 6.12. The
+  application's syscalls are serviced by the Sentry, not the host — this ADR's load-bearing property.
+- **A real bulkhead agent runs under the Sentry, unmodified.** The shipped `bulkhead-agent` (stdlib
+  Go) builds and runs under runsc/Systrap; under `--network=none` its probe correctly reports NOROUTE
+  (network unreachable). The Go runtime + net syscalls are gVisor-compatible.
+- **Packaging is trivial.** runsc is a single statically-linked ~63 MB Go binary (no dynamic deps), so
+  a Yocto recipe is "install the release binary" — no bazel, no meta-virtualization layer (none present).
+- **`mini-sentry`** (sibling prototype, ~5.6k LOC Go, ptrace-SYSEMU) validates the *concept*; runsc
+  with Systrap is the production vehicle — exactly the "approach mini-sentry demonstrated, upgraded to
+  Systrap" this ADR specifies.
+
+**Integration shape (deferred cost, est. M–L when scheduled).** runsc becomes the default-tier agent
+jail's OCI runtime; the namespace/E0–E3 tier is retained for trusted/low-threat (per *Migration*).
+bulkhead's egress mediation is FAVOURABLY placed: the egress proxy is already host-side and reached
+over a unix socket, so an agent moved into a Sentry keeps the SAME mediated egress — the proxy/router
+UDS legs are bind-mounted into the sandbox (gVisor supports AF_UNIX + bind mounts); the egress
+guarantee need not relocate into the Sentry the way host-LSM mediation would. Remaining work: an
+OCI-bundle agent launcher, the UDS bind-mounts + resource/seccomp config, io_uring kept disabled
+(ADR-0033; gVisor's io_uring is partial anyway), and a `make verify-*` proving a sandboxed agent with
+its mediated egress intact. **Verdict: GO on feasibility — no blocker; path clear and bounded.**
+
 ## Evidence (source reports)
 
 - [#1] Syscall-interception sandbox architectures: reimplement vs forward vs filter (~350→68 collapse; bounded gap).
