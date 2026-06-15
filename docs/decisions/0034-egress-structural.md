@@ -1,6 +1,6 @@
 # ADR-0034: Network egress: structural confinement + mediating proxy, not allowlist-as-boundary
 
-Status: Accepted — increment 1 (structural confinement) shipped + live-verified; increment 2 (TLS-termination + content inspection) pending
+Status: Accepted — increment 1 (structural confinement) + increment 2 sub-A (selective TLS-termination + content inspection) shipped + live-verified; inc2 sub-B (production CA sealing, rule-engine breadth, response inspection) pending
 Date: 2026-06-07
 
 ## Implementation status
@@ -18,9 +18,29 @@ is impossible (no route / isolated loopback) and the proxy is the only — and a
 path out, with non-allowlisted destinations refused. The shipped E2-gated `bulkhead-agent@`
 class (ADR-0004) is unchanged; this lands the structural model alongside it, not as a rip-out.
 
-**Increment 2 — content — PENDING:** TLS-termination + content inspection + the re-signing CA
-injected into the guest trust store, plus the audited pinned-cert/mTLS passthrough exception
-list (the open question below). The inc1 proxy passes TLS through opaque.
+**Increment 2 sub-A — selective TLS-termination + content inspection — SHIPPED + LIVE-VERIFIED
+(2026-06-15).** The allowlist gained a per-entry mode token (`inspect` | `passthrough` | `pinned`,
+default passthrough). For an `inspect`-marked host on a TLS port the proxy now TLS-TERMINATES: it
+presents a leaf for the CONNECT host (never the SNI — preserving the single-canonical-parse
+invariant) signed by a re-signing CA generated ON-DEVICE at first boot (`bulkhead-provision-mitm-ca`,
+unique per appliance; key plaintext-on-`/data` in the VM phase, tpm2-sealed on bare metal in sub-B),
+and re-originates TLS to the real upstream with FULL Web-PKI verification (the MITM never downgrades
+the auth the agent gave up). The confined agent trusts the CA via a jail-scoped `SSL_CERT_FILE` bundle
+(proxy CA ++ Web-PKI roots) — the host TCB services keep default trust, so the CA's blast radius is the
+confined agent alone. Decrypted agent→upstream bytes pass a content hook (per-flow byte budget,
+Host-vs-CONNECT coherence, an operator needle denylist); a deny drops mid-stream. Every inspected flow
+signs a `Hook=inspect` record (method/host/path/size/verdict — never the body) and every non-terminated
+flow a `Hook=passthrough` record, so the chain is an honest coverage ledger (`inspect` vs `passthrough`
+counts = the body-inspected fraction). `make verify-egress-mitm` proves both arms end-to-end on a
+loopback TLS upstream. NOTE: `default=passthrough` leaves the body-exfil gap OPEN for any allowed host
+not explicitly marked `inspect` — the ledger makes that a measurable, budgeted decision, not a silent
+erosion.
+
+**Increment 2 sub-B — PENDING:** tpm2-sealing the CA key on bare metal; a real
+allow/deny-by-method/path/header rule engine + response-direction inspection + body DLP; HTTP/2 +
+websockets; the curated, audited pinned-cert/mTLS passthrough exception list (the open question below);
+a `BULKHEAD_EGRESS_DEFAULT_MODE=inspect` knob for high-assurance tiers; leaf-cache bounding + an
+audit-chain volume review.
 
 Decided/known inc1 simplifications to revisit: the proxy & router UDS are `0666` (the agent
 is a distinct DynamicUser; group-gating to a static `bulkhead-egress` group is a hardening
