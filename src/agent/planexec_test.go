@@ -132,6 +132,69 @@ func TestQuarantineDelegateTaintFlow(t *testing.T) {
 	}
 }
 
+// TestParsePlanDelegateLiteralVsVarTask locks the space-sensitive lone-$var task detection: only a
+// LONE $var resolves to a tainted value; a $var with trailing tokens is a plan-fixed LITERAL task,
+// never a partial var resolution. (Red-team hardening: pins planexec's ContainsAny(" \t") branch.)
+func TestParsePlanDelegateLiteralVsVarTask(t *testing.T) {
+	steps, err := parsePlan("FETCH http://x/ -> $p\nEXTRACT $p q -> $t\nDELEGATE child loopback,other $t extra")
+	if err != nil {
+		t.Fatalf("a multi-token task must parse as a literal: %v", err)
+	}
+	d := steps[len(steps)-1]
+	if d.op != opDelegate || d.taskVar != "" || d.task != "$t extra" {
+		t.Fatalf("'$t extra' must be a LITERAL task (task=%q taskVar=%q), not a var resolution", d.task, d.taskVar)
+	}
+	steps2, err := parsePlan("FETCH http://x/ -> $p\nEXTRACT $p q -> $t\nDELEGATE child loopback,other $t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2 := steps2[len(steps2)-1]
+	if d2.taskVar != "t" || d2.task != "" {
+		t.Fatalf("a lone $t must be the tainted task var (taskVar=%q task=%q)", d2.taskVar, d2.task)
+	}
+}
+
+// TestQuarantineDelegateEmptyTaintedTask documents the empty-vData boundary: a compromised Q-LLM that
+// returns "" yields no task argv element (the broker-default task path), and the authority stays
+// plan-fixed — an empty tainted value can never silently become the child's identity or classes.
+func TestQuarantineDelegateEmptyTaintedTask(t *testing.T) {
+	t.Setenv("BULKHEAD_AGENT_ALLOW_DELEGATE", "1")
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer page.Close()
+	qr := echoQRouter(t, nil)
+	defer qr.Close()
+
+	dir := t.TempDir()
+	old := collectorBin
+	defer func() { collectorBin = old }()
+	argvFile := filepath.Join(dir, "argv")
+	sh := filepath.Join(dir, "collector")
+	if err := os.WriteFile(sh, []byte("#!/bin/sh\n: > "+argvFile+"\nfor a in \"$@\"; do echo \"[$a]\" >> "+argvFile+"; done\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	collectorBin = sh
+
+	steps, err := parsePlan("FETCH " + page.URL + " -> $p\nEXTRACT $p q -> $t\nDELEGATE childq loopback,other $t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runPlan(context.Background(), qr.URL, steps, toolRegistry()); err != nil {
+		t.Fatalf("runPlan: %v", err)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("delegate was never invoked: %v", err)
+	}
+	s := strings.TrimSpace(string(argv))
+	if !strings.Contains(s, "[childq]") || !strings.Contains(s, "[loopback,other]") {
+		t.Fatalf("authority must stay plan-fixed even with an empty tainted task; argv:\n%s", s)
+	}
+	// An empty task contributes NO argv element (runDelegate skips task==""): exactly 3 lines.
+	if got := strings.Count(s, "\n") + 1; got != 3 {
+		t.Fatalf("empty tainted task must add no task argv element (want 3 argv lines, got %d):\n%s", got, s)
+	}
+}
+
 // echoQRouter is a Q-LLM stub modeling a FULLY COMPROMISED extractor: it parrots the untrusted
 // CONTENT (the planted injection) back verbatim as its answer. It records the Route so we can
 // assert the quarantined reader stays free-tier (no denial-of-wallet).

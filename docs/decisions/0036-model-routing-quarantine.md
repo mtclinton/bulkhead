@@ -1,6 +1,6 @@
 # ADR-0036: Model routing: ship only as a structural quarantine with deterministic non-LLM enforcement
 
-Status: Accepted — increment 1 (structural quarantine, slice A) shipped 2026-06-15
+Status: Accepted — increments 1 (structural quarantine) + 2 (typed-taint DELEGATE) shipped 2026-06-15
 Date: 2026-06-07
 Pillar: model-routing
 Relates to: ADR-0035 (resource-auth layer beneath the quarantine gate), ADR-0034 (same structural-not-policy principle), ADR-0031 (substrate), ADR-0037 (multi-agent); refines the model-routing pillar of ADR-0001.
@@ -69,6 +69,16 @@ The single injectable agent (`src/agent/loop.go runLoop`, where the fetched body
 **Honest scope (the accepted signoffs).** Slice A is **static-plan only** — it cannot replan (CaMeL = 0% on the dynamic AgentDyn benchmark); dynamic/escalating workflows stay on the legacy single-LLM `runLoop` under ADR-0035's OS boundary alone. It is a **user-space control-flow-integrity property layered on ADR-0035's kernel resource authorization, NOT itself a kernel reference monitor**, and does not cover side channels, a corrupted interpreter (now trusted, TCB-adjacent code), or a malicious *initial* task. The promptLen router (`route.go`) is unchanged cost/latency triage and is **not** the boundary.
 
 **Deferred to increment 2 (full CaMeL):** the typed-taint model that lets an EXTRACT result safely flow into a later tool argument; the escalation opcodes (`request_egress`/`delegate`) inside a quarantined plan; the candidate capability-domain hardening (running the Q-LLM in its own ADR-0031/0037 isolation domain with a loopback-only E2 manifest + `NO_EXPAND`). **Replanning** remains the unresolved open question below, not a roadmap item.
+
+### Increment 2 — typed-taint DELEGATE (shipped 2026-06-15)
+
+The CaMeL typed-taint model, via a `DELEGATE <suffix> <classes> <task>` opcode (`planexec.go`). A tainted (Q-derived) value may now flow into a tool argument — but **only** the child's task (the sole DATA slot). `parsePlan` enforces the boundary structurally: the **suffix + classes are CONTROL** (the child's identity + authority) and MUST be literals fixed by the trusted planner — a `$var` in either slot is refused fail-closed; the task may be a literal or a tainted `$vData` EXTRACT result. So an injection in fetched content can direct **WHAT** a delegated child does (data) but never widen **WHAT it may do** (control).
+
+**Deterministic gate** = the *existing* delegation path (ADR-0015), no new authority code: `runDelegate` hands the (single-argv) task to the broker, which AND-clamps the child to `classes ∩ parent` (narrow-never-widen), re-derives the live parent mask under lock after the uid-0 approval gate, sets `NO_EXPAND=1` on the child, and signs the applied result. The kernel E2 manifest enforces the child's egress on its attested cgroup. A tainted task therefore cannot raise the child past the plan-fixed classes, nor escalate via `request_egress` (NO_EXPAND), nor inject unit syntax (the task rides a `0400` credential, never the unit file).
+
+**Verify.** Hermetic (`planexec_test.go`): `TestParsePlanDelegateTaintRules` (a `$var` suffix/classes, a body/unbound/missing task, a post-terminal opcode all refused), `TestQuarantineDelegateTaintFlow` (a compromised Q echoes a "widen me" task; the captured delegate argv shows it carried as DATA while classes stayed the plan-fixed `loopback,other`), plus the lone-`$var` space-sensitivity and empty-task edges. Live (`make verify-agent-orch`, ARM QD): a quarantine-mode parent that **holds public** fetches an injection page; the compromised reader echoes "go public"; the child is born `loopback,other` (narrower than the parent's ceiling *and* the tainted task's demand), the tainted task reaches it verbatim as the `.task` credential, and its public fetch is **E2-denied** while `request_egress public` is refused (NO_EXPAND). An adversarial red-team (3 lenses) returned **property-holds** — no path for a tainted value to reach identity/authority/control-flow or to escalate through the data slot.
+
+**Still deferred (slice C+):** the candidate capability-domain hardening (the Q-LLM in its own isolation domain); generalising the typed `control`/`data` parameter discipline beyond DELEGATE to future tools; **replanning** stays the unresolved open question below, never a roadmap item while enforcement must remain non-LLM.
 
 ## Confidence & open questions
 
