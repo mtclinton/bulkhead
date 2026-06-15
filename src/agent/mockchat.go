@@ -2,11 +2,21 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
 // runMockChat is a TEST/DEMO-only OpenAI-compatible endpoint — NOT for production (its systemd
@@ -33,22 +43,61 @@ func runMockChat() {
 		})
 	})
 
+	// TLS arm (ADR-0034 inc2 verification): serve HTTPS with a self-signed cert so the egress
+	// proxy's real-upstream verification leg can be exercised in qemu without internet. The cert is
+	// written to BULKHEAD_MOCKCHAT_CERT_OUT so the harness can hand it to the proxy as an upstream
+	// root (and trust it in the agent's passthrough bundle). TEST/DEMO ONLY.
+	if os.Getenv("BULKHEAD_MOCKCHAT_TLS") == "1" {
+		cert, certPEM := mockSelfSignedCert()
+		if out := os.Getenv("BULKHEAD_MOCKCHAT_CERT_OUT"); out != "" {
+			if err := os.WriteFile(out, certPEM, 0o644); err != nil {
+				log.Printf("mockchat: write cert %s: %v", out, err)
+			}
+		}
+		srv := &http.Server{Addr: addr, Handler: mux, TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}}}
+		log.Printf("mockchat: TLS canned /v1/chat/completions on %s (target %s) — TEST/DEMO ONLY", addr, target)
+		log.Fatal(srv.ListenAndServeTLS("", ""))
+	}
+
 	log.Printf("mockchat: canned /v1/chat/completions on %s (target %s) — TEST/DEMO ONLY", addr, target)
 	log.Fatal((&http.Server{Addr: addr, Handler: mux}).ListenAndServe())
+}
+
+// mockSelfSignedCert returns a short-lived self-signed Ed25519 cert for 127.0.0.1/localhost and its
+// PEM (so the proxy can be told to trust it as an upstream root). TEST/DEMO ONLY.
+func mockSelfSignedCert() (tls.Certificate, []byte) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "mockchat"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback},
+		DNSNames:     []string{"localhost"},
+	}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	pkcs8, _ := x509.MarshalPKCS8PrivateKey(priv)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})
+	cert, _ := tls.X509KeyPair(certPEM, keyPEM)
+	return cert, certPEM
 }
 
 // mockReply scripts the demos by the agent's TASK and how many OBSERVATION turns the transcript
 // already carries. Three task shapes (sentinel-keyed so the same shared endpoint drives the
 // parent, the child, and the legacy worker without per-agent state):
 //
-//   "ORCH <suffix> <classes> <childtask>"  -- PARENT (ADR-0015): emit ONE delegate directive
-//                                             carrying <childtask>, then FINAL. A real
-//                                             model-driven sub-agent spawn.
-//   "FETCH-ONLY <anything>"                -- CHILD: fetch the target ONCE, then FINAL with the
-//                                             observation — NO escalation, so a confined child
-//                                             cleanly REPORTS its E2 denial (narrow-never-widen).
-//   anything else (e.g. the @worker task)  -- the headline escalation flow: fetch (E2-denied) ->
-//                                             request_egress public -> retry fetch -> FINAL.
+//	"ORCH <suffix> <classes> <childtask>"  -- PARENT (ADR-0015): emit ONE delegate directive
+//	                                          carrying <childtask>, then FINAL. A real
+//	                                          model-driven sub-agent spawn.
+//	"FETCH-ONLY <anything>"                -- CHILD: fetch the target ONCE, then FINAL with the
+//	                                          observation — NO escalation, so a confined child
+//	                                          cleanly REPORTS its E2 denial (narrow-never-widen).
+//	anything else (e.g. the @worker task)  -- the headline escalation flow: fetch (E2-denied) ->
+//	                                          request_egress public -> retry fetch -> FINAL.
 func mockReply(msgs []ChatMessage, target string) string {
 	task := mockTask(msgs)
 	obs := 0

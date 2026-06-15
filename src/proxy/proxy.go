@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,15 @@ type Proxy struct {
 	idleTimeout time.Duration
 	tunnelMax   time.Duration
 	audit       *auditLog // signed egress-decision chain (nil in unit tests that don't exercise it)
+
+	// inc2 (ADR-0034) TLS-termination + content inspection. nil mitm => inc1 passthrough-only
+	// (the existing behaviour, and what the unit tests exercise); enabled from main via the loaded
+	// re-signing CA. An inspect-marked allowlist entry on a tlsPorts port is TLS-terminated.
+	mitm        *mitmCA
+	realRoots   *x509.CertPool // genuine Web-PKI roots for verifying the real upstream leg
+	tlsPorts    map[string]bool
+	maxReqBytes int64
+	denyNeedles []string
 }
 
 // NewProxy builds the proxy. internalCIDRs are the ONLY internal (loopback / private /
@@ -206,6 +216,31 @@ func (p *Proxy) handleConn(c net.Conn) {
 		}
 	}
 	logd("ALLOW", host, port, up.RemoteAddr().String())
+
+	// inc2 (ADR-0034) disposition for this allowed destination. An inspect-marked entry on a TLS
+	// port, with a re-signing CA loaded, is TLS-terminated + content-inspected (terminate replies
+	// OK itself). Everything else — passthrough/pinned, a non-TLS port, or no CA — takes the inc1
+	// opaque splice, but is FIRST recorded as an explicit uninspected channel so the signed chain
+	// is an honest coverage ledger (Hook=inspect vs Hook=passthrough = the body-inspected fraction).
+	mode := p.allow.Mode(host)
+	if mode == modeInspect && p.mitm != nil && p.tlsPorts[port] {
+		p.terminate(c, up, host, port)
+		return
+	}
+	reason := "default"
+	switch {
+	case mode == modePinned:
+		reason = "pinned" // MITM would break this (cert-pinned/mTLS); deliberately uninspected
+	case mode == modeInspect:
+		reason = "inspect-unavailable" // inspect requested but no CA / non-TLS port
+	}
+	if p.audit != nil {
+		if err := p.audit.recordPassthrough(host, port, reason); err != nil {
+			logd("AUDIT-FAIL", host, port, err.Error())
+			writeReply(c, "ERR audit")
+			return
+		}
+	}
 	if err := writeReply(c, "OK"); err != nil {
 		return
 	}

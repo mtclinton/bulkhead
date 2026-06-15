@@ -262,3 +262,43 @@ func (a *auditLog) recordEgress(host, port, decision, reason string) error {
 	}
 	return a.append(auditEvent{Comm: "egress-proxy", Hook: "connect", Decision: decision, Mode: mode})
 }
+
+// boundMode caps a Mode string to keep the signed chain bounded — inc2 records can carry a request
+// path or a deny rule name that is longer than a bare dst. Rune-safe truncation (same as recordEgress).
+func boundMode(s string) string {
+	if len(s) <= maxAuditDstLen {
+		return s
+	}
+	cut := maxAuditDstLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "...(truncated)"
+}
+
+// recordPassthrough (ADR-0034 inc2) signs an explicit "this allowed flow was NOT body-inspected"
+// record (Hook="passthrough") so the chain honestly accounts for every uninspected channel — the
+// ADR-0093 open-question requirement, made measurable: counting Hook=inspect vs Hook=passthrough
+// records is exactly the fraction of egress that was body-inspected. reason is "default" (mode
+// passthrough) or "pinned" (cert-pinned/mTLS, where MITM would break the flow by construction).
+func (a *auditLog) recordPassthrough(host, port, reason string) error {
+	dst := host
+	if port != "" {
+		dst = host + ":" + port
+	}
+	return a.append(auditEvent{Comm: "egress-proxy", Hook: "passthrough", Decision: "allow",
+		Mode: boundMode("dst=" + dst + " reason=" + reason)})
+}
+
+// recordInspect (ADR-0034 inc2) signs one CONTENT decision for a TLS-terminated flow
+// (Hook="inspect"). It records method/host/path/sizes/verdict — NEVER the body, so the chain stays
+// bounded and no secret material is ever written to disk; a deny carries only the triggering rule
+// name as reason. Same record-before-act / fail-closed discipline as recordEgress (the caller drops
+// the flow on a failed append).
+func (a *auditLog) recordInspect(host, method, path string, reqBytes, respBytes int64, decision, reason string) error {
+	mode := fmt.Sprintf("host=%s method=%s path=%s reqb=%d respb=%d", host, method, path, reqBytes, respBytes)
+	if reason != "" {
+		mode += " reason=" + reason
+	}
+	return a.append(auditEvent{Comm: "egress-proxy", Hook: "inspect", Decision: decision, Mode: boundMode(mode)})
+}

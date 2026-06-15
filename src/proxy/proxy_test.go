@@ -308,14 +308,20 @@ func TestHandleConnRecordsToChain(t *testing.T) {
 
 	data, _ := os.ReadFile(filepath.Join(dir, "provenance.jsonl"))
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want 2 chain records, got %d: %s", len(lines), data)
+	// inc2: the ALLOW (default passthrough mode) signs BOTH a connect-ALLOW (record-before-act) and an
+	// explicit Hook=passthrough coverage record; the DENY signs one record. So three in order.
+	if len(lines) != 3 {
+		t.Fatalf("want 3 chain records, got %d: %s", len(lines), data)
 	}
-	var allow, deny auditRecord
+	var allow, pass, deny auditRecord
 	json.Unmarshal([]byte(lines[0]), &allow)
-	json.Unmarshal([]byte(lines[1]), &deny)
-	if allow.Decision != "allow" || !strings.Contains(allow.Mode, fmt.Sprintf("dst=127.0.0.1:%s", port)) {
-		t.Fatalf("allow record wrong: %+v", allow)
+	json.Unmarshal([]byte(lines[1]), &pass)
+	json.Unmarshal([]byte(lines[2]), &deny)
+	if allow.Decision != "allow" || allow.Hook != "connect" || !strings.Contains(allow.Mode, fmt.Sprintf("dst=127.0.0.1:%s", port)) {
+		t.Fatalf("connect-allow record wrong: %+v", allow)
+	}
+	if pass.Hook != "passthrough" || pass.Decision != "allow" || !strings.Contains(pass.Mode, "reason=default") {
+		t.Fatalf("passthrough record wrong: %+v", pass)
 	}
 	if deny.Decision != "deny" || !strings.Contains(deny.Mode, "dst=8.8.8.8:80") || !strings.Contains(deny.Mode, "allowlist") {
 		t.Fatalf("deny record wrong: %+v", deny)

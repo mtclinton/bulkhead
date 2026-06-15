@@ -20,6 +20,7 @@
 package main
 
 import (
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -27,6 +28,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -52,8 +54,73 @@ func parseCIDRs(s string) ([]*net.IPNet, error) {
 	return out, nil
 }
 
+// upstreamRoots is the trust pool the proxy verifies the REAL upstream leg against (so the MITM
+// never downgrades the agent's authentication). Defaults to the host Web-PKI roots; a test/dev
+// build can add a self-signed upstream's cert via BULKHEAD_EGRESS_UPSTREAM_ROOTS (a PEM file) so the
+// proxy validates a loopback upstream without internet — prod stays on the unaugmented system pool.
+func upstreamRoots() *x509.CertPool {
+	roots, _ := x509.SystemCertPool()
+	if roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if f := os.Getenv("BULKHEAD_EGRESS_UPSTREAM_ROOTS"); f != "" {
+		if b, err := os.ReadFile(f); err == nil {
+			roots.AppendCertsFromPEM(b)
+			log.Printf("egress-proxy: added upstream roots from %s", f)
+		} else {
+			log.Printf("egress-proxy: BULKHEAD_EGRESS_UPSTREAM_ROOTS %q: %v", f, err)
+		}
+	}
+	return roots
+}
+
+func parsePorts(s string) map[string]bool {
+	m := map[string]bool{}
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
+		m[f] = true
+	}
+	return m
+}
+
+func envIntOr(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func splitNonEmpty(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func main() {
 	log.SetFlags(0) // journald stamps the time
+
+	// `bulkhead-egress-proxy --provision-ca <dir>` (ADR-0034 inc2): a first-boot oneshot that mints
+	// the on-device re-signing CA into <dir> (idempotent). Same binary so no extra dep/openssl.
+	if len(os.Args) >= 3 && os.Args[1] == "--provision-ca" {
+		if err := provisionCA(os.Args[2]); err != nil {
+			log.Fatalf("egress-proxy: provision-ca %q: %v", os.Args[2], err)
+		}
+		log.Printf("egress-proxy: re-signing CA ready in %s", os.Args[2])
+		return
+	}
 
 	// Pin the pure-Go resolver: it rejects ambiguous numeric IPv4 aliases (0x7f000001,
 	// 2130706433, 127.1, ...) as NXDOMAIN instead of coercing them like libc getaddrinfo,
@@ -111,6 +178,25 @@ func main() {
 	}
 
 	p := NewProxy(allow, internalCIDRs, audit)
+
+	// inc2 (ADR-0034): load the re-signing CA. With BULKHEAD_REQUIRE_MITM_CA=1 a missing CA is fatal
+	// here (fail-closed: an inspect-marked TLS flow is never spliced uninspected). Without a CA the
+	// proxy runs as a pure inc1 boundary and inspect-marked flows take an explicit passthrough record.
+	ca, err := loadMITMCA()
+	if err != nil {
+		log.Fatalf("egress-proxy: re-signing CA: %v", err)
+	}
+	if ca != nil {
+		p.mitm = ca
+		p.realRoots = upstreamRoots()
+		p.tlsPorts = parsePorts(envOr("BULKHEAD_EGRESS_TLS_PORTS", "443"))
+		p.maxReqBytes = int64(envIntOr("BULKHEAD_EGRESS_MAX_REQ_BYTES", 1<<20))
+		p.denyNeedles = splitNonEmpty(os.Getenv("BULKHEAD_EGRESS_DENY_NEEDLES"))
+		log.Printf("egress-proxy: TLS-termination enabled (inspect tls-ports=%v max-req=%d needles=%d)",
+			keys(p.tlsPorts), p.maxReqBytes, len(p.denyNeedles))
+	} else {
+		log.Printf("egress-proxy: no re-signing CA — inc1 boundary only (inspect-marked flows pass through, recorded)")
+	}
 
 	// Graceful shutdown: stop accepting; in-flight splices drain on their idle/total deadlines.
 	sig := make(chan os.Signal, 1)
