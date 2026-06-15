@@ -51,6 +51,30 @@ func hostOf(raw string) string {
 	return raw
 }
 
+// fetchVia performs the E2/egress-proxy-gated GET shared by the legacy fetch tool and the
+// ADR-0036 quarantine interpreter. The (capped) body is copied into sink — io.Discard for the
+// legacy loop (the model only ever gets the metadata observation), or planexec's buffer for the
+// quarantine (the bytes go to the value store, never to the planner). A DENY/transport failure is
+// returned as a structured observation, never a fatal error, so security never depends on it.
+func fetchVia(ctx context.Context, arg string, sink io.Writer) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, arg, nil)
+	if err != nil {
+		return "", err
+	}
+	hc := egressClient(8 * time.Second) // tunnels via the host egress proxy in the jail
+	resp, err := hc.Do(req)
+	if err != nil {
+		// EPERM = the in-kernel E2 class gate; errEgressDenied = the host egress proxy.
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, errEgressDenied) {
+			return fmt.Sprintf("DENIED: egress to %s blocked by the egress policy; you may request_egress public to ask the operator", hostOf(arg)), nil
+		}
+		return fmt.Sprintf("ERROR: fetch %s failed: %v", hostOf(arg), err), nil
+	}
+	defer resp.Body.Close()
+	n, _ := io.Copy(sink, io.LimitReader(resp.Body, fetchBodyCap))
+	return fmt.Sprintf("OK: fetch %s -> HTTP %d (%d bytes)", hostOf(arg), resp.StatusCode, n), nil
+}
+
 // toolRegistry is the agent's fixed, allowlisted tool set.
 func toolRegistry() map[string]Tool {
 	return map[string]Tool{
@@ -65,23 +89,11 @@ func toolRegistry() map[string]Tool {
 				}
 				return nil
 			},
+			// The legacy loop DISCARDS the body (sink = io.Discard): the model gets only metadata,
+			// never the untrusted bytes. The ADR-0036 quarantine path captures the body into the
+			// interpreter's value store via fetchVia with a real sink — see planexec.fetchCapture.
 			Run: func(ctx context.Context, arg string) (string, error) {
-				req, err := http.NewRequestWithContext(ctx, http.MethodGet, arg, nil)
-				if err != nil {
-					return "", err
-				}
-				hc := egressClient(8 * time.Second) // tunnels via the host egress proxy in the jail
-				resp, err := hc.Do(req)
-				if err != nil {
-					// EPERM = the in-kernel E2 class gate; errEgressDenied = the host egress proxy.
-					if errors.Is(err, syscall.EPERM) || errors.Is(err, errEgressDenied) {
-						return fmt.Sprintf("DENIED: egress to %s blocked by the egress policy; you may request_egress public to ask the operator", hostOf(arg)), nil
-					}
-					return fmt.Sprintf("ERROR: fetch %s failed: %v", hostOf(arg), err), nil
-				}
-				defer resp.Body.Close()
-				n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, fetchBodyCap))
-				return fmt.Sprintf("OK: fetch %s -> HTTP %d (%d bytes)", hostOf(arg), resp.StatusCode, n), nil
+				return fetchVia(ctx, arg, io.Discard)
 			},
 		},
 		// request_egress: ask the TCB broker to WIDEN this agent's egress (ADR-0009 EXPAND).

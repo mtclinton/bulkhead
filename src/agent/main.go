@@ -56,7 +56,19 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
-	ans, err := runLoop(ctx, routerURL, task, maxSteps, toolRegistry())
+
+	// ADR-0036 quarantine mode (additive, env-gated): instead of the single injectable runLoop,
+	// split into a planner (P-LLM, trusted task only) + a quarantined reader (Q-LLM, untrusted
+	// bytes, no tools) joined by the deterministic planexec interpreter. The legacy runLoop path
+	// is byte-identical when the flag is unset.
+	var ans string
+	var err error
+	if os.Getenv("BULKHEAD_AGENT_QUARANTINE") != "" {
+		log.Printf("agent[%s]: QUARANTINE mode (ADR-0036 Dual-LLM): static-plan interpreter, untrusted content cannot reach a privileged tool", inst)
+		ans, err = runQuarantine(ctx, routerURL, task, toolRegistry())
+	} else {
+		ans, err = runLoop(ctx, routerURL, task, maxSteps, toolRegistry())
+	}
 	if err != nil {
 		log.Printf("agent[%s]: ABORTED: %v", inst, err)
 		os.Exit(1)
