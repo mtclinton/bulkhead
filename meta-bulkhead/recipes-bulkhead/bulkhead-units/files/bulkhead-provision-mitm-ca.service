@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# First-boot provisioning of the egress proxy's re-signing CA (ADR-0034 increment 2). Yocto-only
+# (needs /data); ordered Before= bulkhead-egress-proxy, which loads the CA as a credential.
+# Idempotent + self-healing: a present+valid CA is KEPT (rotating it would invalidate the agent's
+# live trust and any minted leaves) and only the agent-trust bundle is refreshed. If it fails, the
+# proxy's BULKHEAD_REQUIRE_MITM_CA guard fails CLOSED (it refuses to TLS-terminate) rather than
+# splicing an inspect-marked flow uninspected.
+#
+# The CA is unique per appliance and generated ON-DEVICE — never in the repo/SBOM/RAUC bundle. Its
+# private key is plaintext-0600 on /data in the VM/dev phase (the same posture the audit seed ships
+# in); TPM2-sealing the CA key is a bare-metal hardening item (sub-B), not wired here.
+[Unit]
+Description=bulkhead first-boot provisioning of the egress-proxy re-signing CA (ADR-0034 inc2)
+Documentation=https://github.com/mtclinton/bulkhead
+RequiresMountsFor=/data
+# F6 guard (see bulkhead-seal-audit-key): /data is fstab `nofail`, so refuse to provision unless
+# /data is a genuine mount — otherwise the CA would land on the read-only rootfs or an ephemeral
+# tmpfs and a present-but-ephemeral CA would masquerade as the persistent one. If unmet, no CA is
+# written and the proxy fails closed (missing credential + REQUIRE_MITM_CA=1). The box still boots.
+ConditionPathIsMountPoint=/data
+Before=bulkhead-egress-proxy.service
+After=bulkhead-seal-audit-key.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The proxy binary itself mints the CA (stdlib crypto/x509; no openssl on-image assumption). It
+# writes ca.key (0600), ca.crt, and agent-trust.crt (= ca.crt ++ the system Web-PKI roots).
+ExecStart=/usr/bin/bulkhead-egress-proxy --provision-ca /data/bulkhead/mitm-ca
+ProtectSystem=strict
+ReadWritePaths=/data
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

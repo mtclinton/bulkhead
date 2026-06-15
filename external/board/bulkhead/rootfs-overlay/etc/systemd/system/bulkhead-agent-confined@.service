@@ -9,8 +9,11 @@
 [Unit]
 Description=bulkhead confined agent jail (%i)
 Documentation=https://github.com/mtclinton/bulkhead
-After=bulkhead-egress-proxy.service bulkhead-router.service
+After=bulkhead-egress-proxy.service bulkhead-router.service bulkhead-provision-mitm-ca.service
 Requires=bulkhead-egress-proxy.service
+# /data carries the agent-trust bundle (the proxy re-signing CA ++ Web-PKI roots) that SSL_CERT_FILE
+# points at; ensure it is mounted before this jail's mount namespace snapshots the tree.
+RequiresMountsFor=/data
 
 [Service]
 Type=exec
@@ -23,6 +26,11 @@ PrivateNetwork=yes
 # (a UNIX connect() works across the netns and across read-only /run).
 Environment=BULKHEAD_EGRESS_SOCK=/run/bulkhead-egress/egress.sock
 Environment=BULKHEAD_ROUTER_UDS=/run/bulkhead-router/router.sock
+# ADR-0034 inc2: trust the egress proxy's re-signing CA (for inspect-marked TLS the proxy terminates)
+# AND the real Web-PKI roots (for passthrough flows validated end-to-end) via one augmented bundle.
+# Scoped to ONLY this jail — the host TCB services keep default trust, so the CA's blast radius is the
+# confined agent alone. Go honours SSL_CERT_FILE under the agent's CGO_ENABLED=0 build.
+Environment=SSL_CERT_FILE=/data/bulkhead/mitm-ca/agent-trust.crt
 
 # inc1 payload: prove direct egress is impossible and the proxy is the only working path.
 ExecStart=/usr/bin/bulkhead-agent probe-egress

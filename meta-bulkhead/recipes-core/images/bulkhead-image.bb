@@ -27,6 +27,7 @@ IMAGE_INSTALL += " \
     tailscale \
     nftables \
     curl \
+    ca-certificates \
     rauc \
     dnsmasq \
     kernel-image \

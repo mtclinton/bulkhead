@@ -9,6 +9,8 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://bulkhead-broker-data.conf \
            file://bulkhead-router-data.conf \
            file://bulkhead-egress-proxy-data.conf \
+           file://bulkhead-provision-mitm-ca.service \
+           file://bulkhead-egress-proxy-mitm.conf \
            file://bulkhead-seal-audit-key.service \
            file://bulkhead-seal-audit-key \
            file://bulkhead-verify-audit.service \
@@ -64,6 +66,7 @@ SYSTEMD_SERVICE:${PN} = "\
     var-lib-bulkhead-models.mount \
     bulkhead-broker.socket \
     bulkhead-seal-audit-key.service \
+    bulkhead-provision-mitm-ca.service \
     bulkhead-verify-audit.service \
     bulkhead-broker.service \
     bulkhead-enforce.service \
@@ -117,10 +120,15 @@ do_install() {
 	install -d ${D}${systemd_system_unitdir}/bulkhead-egress-proxy.service.d
 	install -m0644 ${WORKDIR}/bulkhead-egress-proxy-data.conf \
 		${D}${systemd_system_unitdir}/bulkhead-egress-proxy.service.d/10-data-persistence.conf
+	# ADR-0034 inc2: deliver the re-signing CA as credentials + enable TLS-termination (sorts after 10-)
+	install -m0644 ${WORKDIR}/bulkhead-egress-proxy-mitm.conf \
+		${D}${systemd_system_unitdir}/bulkhead-egress-proxy.service.d/20-mitm.conf
 
 	# Yocto-only: first-boot TPM sealing of the audit signing seed (ADR-0008)
 	install -m0644 ${WORKDIR}/bulkhead-seal-audit-key.service ${D}${systemd_system_unitdir}/
 	install -Dm0755 ${WORKDIR}/bulkhead-seal-audit-key ${D}${bindir}/bulkhead-seal-audit-key
+	# ADR-0034 inc2: first-boot on-device provisioning of the egress-proxy re-signing CA
+	install -m0644 ${WORKDIR}/bulkhead-provision-mitm-ca.service ${D}${systemd_system_unitdir}/
 
 	# Yocto-only: audit-chain verification boot gate (F5) + drop-in folding it into the
 	# selftest gate (so a broken/forged chain refuses the boot).
