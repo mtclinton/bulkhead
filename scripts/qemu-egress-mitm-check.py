@@ -51,8 +51,13 @@ try:
     # the proxy CA specifically is trusted (the agent validates the proxy's minted leaf against it).
     check(n(run("echo TRUST=$(grep -c 'BEGIN CERTIFICATE' /data/bulkhead/mitm-ca/agent-trust.crt 2>/dev/null || echo 0)"), "TRUST") >= 1,
           "agent-trust.crt carries certificate(s) (proxy CA ++ roots)")
-    check("agent-trust.crt" in run("grep -h SSL_CERT_FILE /etc/systemd/system/bulkhead-agent-confined@.service 2>&1"),
+    check("agent-trust.crt" in run("systemctl cat bulkhead-agent-confined@.service 2>&1 | grep SSL_CERT_FILE; true"),
           "confined jail sets SSL_CERT_FILE -> agent-trust bundle")
+    # the trust file must be reachable by the agent's non-root DynamicUser (dir chain o+x, file o+r).
+    diag = run("stat -c '%n %a %U' /data /data/bulkhead /data/bulkhead/mitm-ca /data/bulkhead/mitm-ca/agent-trust.crt 2>&1; "
+               "runuser -u nobody -- cat /data/bulkhead/mitm-ca/agent-trust.crt >/dev/null 2>&1 && echo NOBODY-READ=ok || echo NOBODY-READ=fail")
+    out("\n[DIAG trust accessibility]\n" + diag)
+    check("NOBODY-READ=ok" in diag, "agent-trust.crt readable by a non-root user (agent can load it)")
 
     # --- bring up the two mockchats: #1 plain (the router's model backend), #2 TLS (the fetch upstream) ---
     run("mkdir -p /run/systemd/system/bulkhead-mockchat.service.d")

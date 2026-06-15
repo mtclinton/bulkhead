@@ -365,9 +365,15 @@ func stripPort(h string) string {
 // roots, with no per-destination logic in the agent. Mirrors bulkhead-seal-audit-key's first-boot
 // idempotence; the unique-per-appliance CA is never in the repo/SBOM/RAUC bundle.
 func provisionCA(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// The confined agent is a non-root DynamicUser and reads agent-trust.crt here at TLS time, so
+	// the whole dir chain must be traversable by "other". MkdirAll leaves a pre-existing parent's
+	// mode untouched (/data/bulkhead is created restrictively by the seal service), so relax it
+	// explicitly. ca.key stays 0600 below — the secret is protected by the FILE mode, not the dir.
+	_ = os.Chmod(filepath.Dir(dir), 0o755) // /data/bulkhead
+	_ = os.Chmod(dir, 0o755)               // /data/bulkhead/mitm-ca
 	keyPath := filepath.Join(dir, "ca.key")
 	crtPath := filepath.Join(dir, "ca.crt")
 	trustPath := filepath.Join(dir, "agent-trust.crt")
