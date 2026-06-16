@@ -1,6 +1,6 @@
 # ADR-0037: Multi-agent topology: each agent a separate isolation domain with mediated IPC
 
-Status: Proposed
+Status: Proposed — delegation-chain resource-authority bound shipped + live-proven 2026-06-15
 Date: 2026-06-07
 Pillar: action-authorization
 Relates to: ADR-0031/0032 (each agent domain reuses the substrate), ADR-0035 (action authorization); relates to ADR-0006 (inter-agent egress delegation) and ADR-0015 (sub-agent orchestration).
@@ -52,6 +52,15 @@ Bulkhead WILL treat **each agent as its own isolation domain**. There is no shar
 
 - **Authority re-aggregation across a delegation chain.** Even with per-hop checks, a sequence of individually-authorized delegations can compose into an effective authority no single agent was granted; the kernel mediates each message but cannot decide that the *chain's* aggregate intent is illegitimate [#25]. This is the multi-agent face of the unsolved intent-derivation problem [#24].
 - **The hijacked-but-authorized delegation.** Once a cross-agent request is legitimately authorized, mediation must pass it; semantic "should this agent have asked that" is not lowerable to the kernel [#24][#14].
+
+## Implementation status
+
+The delegation-chain half of this topology is shipped (ADR-0006/0015 delegation via the uid-0 broker), and its **resource-authority re-aggregation bound is live-proven** (`make verify-agent-orch`, ARM CHAIN, 2026-06-15) — directly answering open question (2) below (yes, bulkhead enforces both):
+
+- **Transitive narrow-never-widen.** Every hop's egress manifest is `parent ∩ requested`, where the parent mask is the kernel-attested *live* mask at that hop (`src/collector/broker.go`). So a grandchild's authority ⊆ child's ⊆ root's, and a chain's aggregate **resource** authority can never exceed the root's. Live-proven: a parent that HOLDS public delegates a child narrowed to `loopback,other`, which delegates a grandchild *requesting* public — the grandchild is born `loopback,other` (public AND-cleared by the *child's* mask, not the parent's) and its public fetch is E2-denied.
+- **Generation depth cap.** `maxDelegateDepth` bounds chain height; the generation is derived ONLY from the kernel-attested parent instance name, never agent-supplied, so a child cannot reset its counter. Live-proven: the grandchild's signed delegate record binds `gen=2`. Children are `NO_EXPAND` (cannot self-widen) and may `ALLOW_DELEGATE` only a *narrower* grandchild.
+
+This bounds **resource** re-aggregation structurally. The "Authority re-aggregation across a delegation chain" residual above is specifically the chain's aggregate **intent** being illegitimate even when every hop is individually resource-authorized — that remains a model-layer problem the OS cannot decide, correctly un-fixed.
 
 ## Confidence & open questions
 

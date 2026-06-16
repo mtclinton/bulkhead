@@ -232,6 +232,53 @@ try:
     check("loopback,other" in recQ and "task_sha=" in recQ,
           "ARM QD/AUDIT: the signed delegate record binds the child + plan-fixed loopback,other + the tainted task_sha")
 
+    # ===== ARM CHAIN (ADR-0037): transitive narrow-never-widen — authority can't re-aggregate down a chain =====
+    # The named delegation-laundering residual: a compromised NARROWED child tries to launder back to the
+    # PARENT's wider authority by spawning a grandchild that requests public. The parent HOLDS public;
+    # child1 is narrowed to loopback,other; child1 delegates a grandchild REQUESTING public,loopback,other —
+    # but the grandchild is child1 ∩ requested = loopback,other (public AND-cleared by the CHILD's live
+    # mask, attested by the kernel at each level, NOT the parent's). Authority does not re-aggregate.
+    write_parent("chainp", "public,loopback,other",
+                 "ORCH chainc loopback,other ORCH chaingc public,loopback,other FETCH-ONLY https://1.1.1.1/")
+    run("systemctl start bulkhead-agent@chainp.service 2>&1")
+    # Approve BOTH delegations as their distinct gids appear: parent->child1, then (once child1 runs) child1->grandchild.
+    approved = []; gcconf = ""; gc = None
+    for _ in range(30):
+        m = re.search(r"id=(\d+) action=delegate", run("bulkhead-collector approve list 2>&1"))
+        if m and int(m.group(1)) not in approved:
+            approved.append(int(m.group(1)))
+            run(f"bulkhead-collector approve allow {int(m.group(1))} 2>&1")
+            if len(approved) >= 2:
+                # the grandchild's transient drop-in exists the moment its launch starts — snapshot it now.
+                for _ in range(12):
+                    gm = re.search(r"bulkhead-agent@(d2-[0-9a-f]+-chaingc)\.service\.d",
+                                   run("ls -d /run/systemd/system/bulkhead-agent@d2-*-chaingc.service.d 2>/dev/null; echo END"))
+                    if gm:
+                        gc = gm.group(1)
+                        gcconf = run(f"cat /run/systemd/system/bulkhead-agent@{gc}.service.d/20-delegated-egress.conf 2>&1")
+                        break
+                    run("sleep 1 2>/dev/null; true")
+                break
+        run("sleep 2 2>/dev/null; true")
+    c1 = find_child("chainc")
+    wait_done("bulkhead-agent@chainp.service")
+    if c1: wait_done(f"bulkhead-agent@{c1}.service")
+    if gc: wait_done(f"bulkhead-agent@{gc}.service")
+    gcj = cjournal(gc) if gc else ""
+    out(f"\n[chain] child1={c1} grandchild={gc}\n[grandchild drop-in]\n{gcconf}\n[grandchild journal]\n{gcj}\n")
+
+    check(c1 is not None and gc is not None,
+          "ARM CHAIN: a 2-level delegation chain formed (parent -> d1 child -> d2 grandchild)")
+    # The grandchild is loopback,other — public AND-CLEARED by the CHILD's mask, though it REQUESTED public AND the PARENT holds public.
+    check(gc is not None and "BULKHEAD_AGENT_EGRESS=loopback,other" in gcconf,
+          "ARM CHAIN: the grandchild is loopback,other — TRANSITIVELY narrowed by the child's mask, not the parent's; authority did not re-aggregate")
+    recGC = run(f"grep -a '\"hook\":\"delegate\"' /data/bulkhead/audit-broker/provenance.jsonl 2>/dev/null | grep -a 'chaingc' | tail -1; echo END")
+    out("\n[chain grandchild broker record]\n" + recGC + "\n")
+    check("gen=2" in recGC,
+          "ARM CHAIN: the grandchild's signed delegate record binds gen=2 (depth from the kernel-attested parent name, never agent-supplied)")
+    check("DENIED: egress" in gcj,
+          "ARM CHAIN: the grandchild's public fetch is E2-DENIED — the laundering vector (reclaim the parent's public via a grandchild) is structurally blocked")
+
     # ===== ARM AUDIT: all THREE signed chains verify; control chain has the authority writes =====
     v1 = run("bulkhead-collector verify-audit /data/bulkhead/audit-broker/provenance.jsonl 2>&1; echo RC=$?")
     v2 = run("bulkhead-collector verify-audit /data/bulkhead/audit/provenance.jsonl 2>&1; echo RC=$?")
