@@ -136,7 +136,7 @@ review.
 
 ## Boundaries re-examined and confirmed solid
 
-The review also adversarially re-read two boundaries the fixes lean on and found **no gap** —
+The review also adversarially re-read three boundaries the fixes lean on and found **no gap** —
 recorded so the review's scope is the whole picture, not only what broke:
 
 - **The signed audit-chain verifier** (`src/collector/verify.go`) — the root of trust R1's gate
@@ -158,6 +158,16 @@ recorded so the review's scope is the whole picture, not only what broke:
   classes ∩ parent, broker + E2 enforced; even an injected child-planner's wider class request is
   AND-clamped). The FETCH body is bounded (`fetchBodyCap`). No taint path to control flow or
   authority was found.
+- **The router's model-routing leg** (`src/router/`, ADR-0002) — the *other* mediated channel. The
+  agent picks a model NAME that maps to a CONFIGURED provider backend, never a URL it controls (no
+  SSRF); each provider base is pinned to its exact host (`api.anthropic.com`, `api.openai.com`,
+  `generativelanguage.googleapis.com`) over https, validated at startup (`log.Fatalf` on violation).
+  The upstream API key is per-backend, sent only to its validated host, never logged or echoed, and
+  the shared HTTP client REFUSES redirects specifically so a cross-host 30x cannot exfiltrate the key
+  (Go retains auth headers across a redirect). The bulkhead `route` field is stripped before
+  forwarding; the client route is downgrade-only (an agent cannot force the paid tier —
+  denial-of-wallet), the length gate counts runes not bytes (no multi-byte bypass), `max_tokens` is
+  clamped, and upstream error bodies are logged server-side, not echoed to the agent. No gap found.
 
 ## Verification posture
 
