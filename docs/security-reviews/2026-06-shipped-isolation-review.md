@@ -127,6 +127,7 @@ Every R1–R4 change is a single self-contained commit + recipe re-pin, with `ma
 checkpoint, and is **live-verified** on the `qemux86-64` wic image (not merely unit-tested) — each
 by a tamper/adversarial arm that fails the boundary it concerns. The live checks are the
 `verify-egress-gate` (R1), `verify-agent-orch` (R2), `verify-runsc-run` (R3), and
-`verify-egress-mitm` (R4) targets. R3's live arm went further than confirm-the-fix: its `rw`
+`verify-egress-mitm` (R4) targets, bundled as a re-runnable regression suite: `make
+verify-security-review`. R3's live arm went further than confirm-the-fix: its `rw`
 counterfactual *reclassified the finding*, which is the intended outcome of building the
 counterfactual rather than asserting the fix's rationale.

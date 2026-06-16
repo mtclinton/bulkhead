@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -34,6 +34,7 @@ help:
 	@echo "  make verify-confined-agent (Yocto wic) assert a REAL agent runs in the confined jail (model via router UDS, web via egress proxy)"
 	@echo "  make verify-egress-mitm (Yocto wic) assert ADR-0034 inc2 TLS-termination + content inspection (inspect + passthrough arms)"
 	@echo "  make verify-quarantine (Yocto wic) assert ADR-0036 Dual-LLM quarantine: injected content cannot trigger a privileged tool"
+	@echo "  make verify-security-review (Yocto wic) re-run the 2026-06 review regression suite (R1 gate, R2 broker cap, R3 ro legs, R4 inspect fail-closed)"
 	@echo "  make menuconfig     Buildroot menuconfig"
 	@echo "  make linux-menuconfig  kernel menuconfig"
 	@echo "  make savedefconfig  write the minimal defconfig to external/configs"
@@ -174,6 +175,17 @@ verify-runsc-quarantine:
 # proxy (and transitively a confined agent) under a tampered chain, while a clean chain still permits it.
 verify-egress-gate:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-gate-check.py
+
+# Yocto: the re-runnable regression suite for the 2026-06 shipped-architecture security review
+# (docs/security-reviews/2026-06-shipped-isolation-review.md): R1 fail-closed egress gate, R2 broker
+# delegated-EXPAND cap, R3 runsc ro UDS legs (defense-in-depth, userns-DAC-attributed), R4 inspect
+# fail-closed. Runs the four live arms SEQUENTIALLY — each boots its own qemu, never in parallel
+# (two concurrent VMs contend and trip the boot timeouts). Stops on the first failure. Needs a built wic.
+verify-security-review:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-gate-check.py
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-agent-orch-check.py
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-run-check.py
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-mitm-check.py
 
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
