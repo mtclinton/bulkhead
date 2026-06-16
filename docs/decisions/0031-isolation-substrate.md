@@ -117,7 +117,7 @@ OCI-bundle agent launcher, the UDS bind-mounts + resource/seccomp config, io_uri
 (ADR-0033; gVisor's io_uring is partial anyway), and a `make verify-*` proving a sandboxed agent with
 its mediated egress intact. **Verdict: GO on feasibility — no blocker; path clear and bounded.**
 
-## Integration status — runsc as the default-tier substrate (slices 1-3, 2026-06-15)
+## Integration status — runsc as the default-tier substrate (slices 1-5, 2026-06-15)
 
 The spike's "remaining work" is now substantially done and live-proven in the BOOTED APPLIANCE (not just the dev host), with NO change to the agent or proxy code:
 
@@ -125,7 +125,10 @@ The spike's "remaining work" is now substantially done and live-proven in the BO
 - **Slice 2 — production agent under the Sentry** (`make verify-runsc`, commit 228e90a). The unmodified `/usr/bin/bulkhead-agent` runs under gVisor (Go runtime + net stack are Sentry-compatible); the sandbox gives it NOROUTE + ISOLATED (no direct egress). `io_uring_setup` is **ENOSYS** under the Sentry — so ADR-0033's io_uring ban is delivered by the SUBSTRATE itself (gVisor doesn't expose io_uring), no per-jail seccomp filter required (stronger than the "partial" the spike expected).
 - **Slice 3 — mediated egress preserved** (`make verify-runsc-egress`, commit dc2cf3b). With `runsc --host-uds=open` the sandboxed agent reaches the HOST egress-proxy UNIX socket across the Sentry boundary, and the host proxy makes the actual egress. The ADR-0034 boundary holds UNCHANGED: no direct egress, the proxy is the only path, the allowlist is enforced (PROXY-DENY), and every destination is signed into the /data chain (which verifies). Host-side egress mediation transfers to the substrate for free — confirming the spike's favorable-placement finding.
 
-So the integration is sound; the core properties hold under the substrate. **Still to do (slice 4+):** a PRODUCTION runsc-backed agent jail — a systemd-launched `runsc run` over an OCI bundle (vs the `runsc do` quick-run the slices prove the properties with), the router UDS leg alongside the egress one, and the resource/seccomp config; then default-tier (substrate, hostile/untrusted) vs trusted-tier (namespace/E0–E3, retained) selection per *Migration*.
+- **Slice 4 — a full real agent loop under the Sentry** (`make verify-runsc-agent`, commit 77e2b98). Stronger than the probe: the whole perceive→decide→act loop runs under gVisor with BOTH mediated channels — the model leg over the router UDS (the loop reached a model FINAL) and the web leg through the egress proxy (HTTP 200), the egress signed. The confined-jail agent, hosted by the substrate.
+- **Slice 5 — the PRODUCTION runtime form** (`make verify-runsc-run`, commit facbc93). `runsc do` is testing-only; the deployable runtime is `runsc run` over an OCI bundle, and a real jail needs a MINIMAL rootfs (root=/ would expose the whole host fs — a regression vs the systemd jail's ProtectSystem=strict). Built a minimal rootfs (ONLY the agent binary + the two UDS legs bind-mounted in; host fs not exposed) and ran the real agent loop under `runsc run` — both legs mediated, egress signed. The secure production form works.
+
+So the integration is sound through the production runtime form: a real agent runs in a minimal-rootfs Sentry with host-surface collapse + io_uring-ENOSYS + both mediated legs + signed provenance, with the egress boundary unchanged. **Still to do (slice 6+):** package the proven `runsc run` form into a deployable unit — a recipe-shipped OCI config template + a launcher that fills the per-instance bundle (the task injection-safe via the agent's credential channel, reusing ADR-0015's pattern) + a `bulkhead-agent-runsc@.service`; then default-tier (substrate, hostile/untrusted) vs trusted-tier (namespace/E0–E3, retained) selection per *Migration*. The `--host-uds=open` passthrough is the load-bearing enabler (lets the sandboxed agent reach the host proxy/router UDS); io_uring stays unavailable for free.
 
 ## Evidence (source reports)
 
