@@ -136,7 +136,7 @@ review.
 
 ## Boundaries re-examined and confirmed solid
 
-The review also adversarially re-read three boundaries the fixes lean on and found **no gap** —
+The review also adversarially re-read four boundaries the fixes lean on and found **no gap** —
 recorded so the review's scope is the whole picture, not only what broke:
 
 - **The signed audit-chain verifier** (`src/collector/verify.go`) — the root of trust R1's gate
@@ -168,6 +168,19 @@ recorded so the review's scope is the whole picture, not only what broke:
   forwarding; the client route is downgrade-only (an agent cannot force the paid tier —
   denial-of-wallet), the length gate counts runes not bytes (no multi-byte bypass), `max_tokens` is
   clamped, and upstream error bodies are logged server-side, not echoed to the agent. No gap found.
+- **The BPF-LSM action-authorization enforce** (`src/collector/provenance.bpf.c`, E0–E3,
+  ADR-0004/0011) — the foundational kernel guarantee, the syscall/resource half of isolation. Every
+  hook keys on `bpf_get_current_cgroup_id()` (the kernel's un-spoofable cgroup identity, never
+  anything the agent supplies); it is a one-way ratchet (a prior LSM deny is never reverted to
+  allow); only TCB cgroups are always-allowed, and TCB registration is anti-arbitrary (the caller's
+  attested cgroup must string-equal the fixed broker cgroup — `control.go`). The opt-in
+  observe-unless-armed posture is fail-open BY DESIGN, but every enforce is defense-in-depth atop the
+  structural jail (the no-route netns for E2 egress; `NoNewPrivileges` + an empty capability set for
+  E0/E3), so an unarmed hook never means an unconfined agent — and the arming is live-proven from
+  cold boot (`verify-hbd`). E0 (bpf) is ungrantable by construction; the one-shot operator grant is
+  atomic and un-replayable (a single `CMPXCHG(1→0)` picks exactly one winner; a miss / TTL-lapse /
+  corrupt count all fail closed to a normal deny). No gap found in the enforce design, verdict logic,
+  cgroup identity, ratchet, or grant path.
 
 ## Verification posture
 
