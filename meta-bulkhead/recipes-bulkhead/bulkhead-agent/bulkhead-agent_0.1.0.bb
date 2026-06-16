@@ -8,7 +8,7 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
 # Pinned to 0c6c8fc (ADR-0033): the confined probe-egress now also asserts io_uring_setup is
 # seccomp-denied from inside the jail (the IOURING check), on top of the ADR-0034 inc1 mediated
 # egress client (src/agent/egress.go — router UDS + CONNECT-tunnel through the egress proxy).
-SRCREV = "8cb8f1a4c8420445bcb31e2a5c0baa130f034c2b"
+SRCREV = "fae1acb155c67729db02f92fc0a33ec632c6bb06"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
