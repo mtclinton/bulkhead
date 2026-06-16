@@ -143,6 +143,13 @@ verify-runsc:
 verify-runsc-egress:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-egress-check.py
 
+# Yocto: ADR-0031 substrate integration, slice 4. Boots the wic and runs a FULL real agent loop under
+# runsc with BOTH mediated channels — the model leg (router UDS) and the web leg (egress proxy UDS) —
+# reached across the Sentry via host-uds. Asserts the loop reached FINAL (inference worked), the fetch
+# went through the proxy (HTTP 200), and the egress was signed. Needs a built wic.
+verify-runsc-agent:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-agent-check.py
+
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
 # reboots to prove the rollback to A. Needs a built wic AND bundle (bitbake bulkhead-image
