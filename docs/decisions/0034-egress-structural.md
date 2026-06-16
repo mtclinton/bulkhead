@@ -48,9 +48,15 @@ the disposition of UNMARKED allowlist entries from passthrough to inspect, so a 
 "every allowed host is TLS-terminated + content-inspected, or denied if it can't be" (the natural
 completion of the R4 inspect-fail-closed rule) with a single flag — an explicit per-entry mode still
 overrides, and unset keeps the inc1-compatible passthrough default (`verify-egress-mitm` ARM 4).
-STILL PENDING: a real allow/deny-by-method/path/header rule engine + response-direction inspection +
-body DLP; HTTP/2 + websockets; the curated, audited pinned-cert/mTLS passthrough exception list (the
-open question below); leaf-cache bounding + an audit-chain volume review.
+The rule engine's first rule — an operator HTTP-method allowlist for inspected egress
+(`BULKHEAD_EGRESS_INSPECT_METHODS`, e.g. `GET,HEAD`) — is now SHIPPED + live-verified: a terminated
+request whose method is outside the allowlist is denied the moment its head parses, BEFORE the body
+relays upstream (blocking e.g. a POST/PUT body-exfil to an otherwise-allowed inspected host), and
+signed as a `Hook=inspect` deny (`reason=method:<m>`, `verify-egress-mitm` ARM 5; case-insensitive so
+a lowercase method cannot dodge it). The MITM leaf-cert cache is also now bounded (a hard ceiling with
+cheap re-mint on eviction). STILL PENDING: extending the rule engine to path/header allow-deny +
+response-direction inspection + body DLP; HTTP/2 + websockets; the curated, audited pinned-cert/mTLS
+passthrough exception list (the open question below); an audit-chain volume review.
 
 **Post-ship security review (2026-06-16).** An adversarial review of the shipped egress boundary
 closed two wiring gaps (record: `docs/security-reviews/2026-06-shipped-isolation-review.md`).

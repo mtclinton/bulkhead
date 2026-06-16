@@ -47,6 +47,10 @@ type Proxy struct {
 	tlsPorts    map[string]bool
 	maxReqBytes int64
 	denyNeedles []string
+	// inc2 sub-B: an operator method-allowlist for INSPECTED egress (uppercase). Empty/nil => no
+	// restriction (sub-A behaviour). When set, a terminated request whose method is absent is denied
+	// before its body is relayed upstream — e.g. "GET,HEAD" blocks POST/PUT body-exfil to an inspected host.
+	allowMethods map[string]bool
 }
 
 // NewProxy builds the proxy. internalCIDRs are the ONLY internal (loopback / private /

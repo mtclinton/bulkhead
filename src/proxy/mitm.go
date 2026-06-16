@@ -328,6 +328,13 @@ func (p *Proxy) inspect(st *inspectState, buf []byte) string {
 			if st.reqHost != "" && !strings.EqualFold(stripPort(st.reqHost), st.host) {
 				st.reason = "finding:host-mismatch(" + stripPort(st.reqHost) + ")"
 			}
+			// inc2 sub-B: enforce the operator method-allowlist for inspected egress. The check fires
+			// the moment the request head is parsed, so the buffer carrying it (and any body after the
+			// \r\n\r\n) is dropped before reaching upstream — a POST/PUT exfil to an otherwise-allowed
+			// inspected host never leaves the box. Empty allowlist => no restriction (sub-A behaviour).
+			if len(p.allowMethods) > 0 && st.method != "" && !p.allowMethods[strings.ToUpper(st.method)] {
+				return "method:" + st.method
+			}
 		}
 	}
 	for _, nd := range p.denyNeedles {

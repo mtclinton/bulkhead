@@ -101,6 +101,19 @@ func splitNonEmpty(s string) []string {
 	return out
 }
 
+// methodSet parses a comma-list of HTTP methods into an UPPERCASE set (so a lowercase "post" cannot
+// dodge a "POST" rule). Empty input => nil (no method restriction). inc2 sub-B.
+func methodSet(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range splitNonEmpty(s) {
+		out[strings.ToUpper(m)] = true
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func keys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -192,8 +205,9 @@ func main() {
 		p.tlsPorts = parsePorts(envOr("BULKHEAD_EGRESS_TLS_PORTS", "443"))
 		p.maxReqBytes = int64(envIntOr("BULKHEAD_EGRESS_MAX_REQ_BYTES", 1<<20))
 		p.denyNeedles = splitNonEmpty(os.Getenv("BULKHEAD_EGRESS_DENY_NEEDLES"))
-		log.Printf("egress-proxy: TLS-termination enabled (inspect tls-ports=%v max-req=%d needles=%d)",
-			keys(p.tlsPorts), p.maxReqBytes, len(p.denyNeedles))
+		p.allowMethods = methodSet(os.Getenv("BULKHEAD_EGRESS_INSPECT_METHODS"))
+		log.Printf("egress-proxy: TLS-termination enabled (inspect tls-ports=%v max-req=%d needles=%d methods=%v)",
+			keys(p.tlsPorts), p.maxReqBytes, len(p.denyNeedles), keys(p.allowMethods))
 	} else {
 		log.Printf("egress-proxy: no re-signing CA — inc1 boundary only (inspect-marked flows pass through, recorded)")
 	}
