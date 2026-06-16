@@ -60,6 +60,26 @@ try:
     check(sandbox_kernel is not None and sandbox_kernel.startswith("4.4"),
           f"the sandbox reports gVisor's reimplemented kernel (~4.4.x), got {sandbox_kernel}")
 
+    # 2) SLICE 2: the PRODUCTION bulkhead-agent binary runs under the Sentry, and the sandbox enforces
+    #    its network isolation. probe-egress under --network=none: KVER confirms it ran under gVisor;
+    #    NOROUTE + ISOLATED confirm no direct egress from the sandbox (the substrate's network
+    #    isolation applied to the real agent, the same boundary the no-route netns gives today).
+    if winning:
+        win_flags = dict(combos)[winning].split(" do ")[0]
+        # A (dummy) egress sock makes probe-egress run ALL checks, including IOURING: under gVisor,
+        # io_uring_setup is ENOSYS (the Sentry doesn't expose io_uring), so ADR-0033's ban comes from
+        # the SUBSTRATE itself — no per-jail seccomp filter needed for it.
+        ao = run(f"{win_flags} do /bin/sh -c 'echo KVER=$(uname -r); BULKHEAD_EGRESS_SOCK=/nonexistent /usr/bin/bulkhead-agent probe-egress 2>&1'", t=120)
+        out(f"\n[bulkhead-agent under runsc]\n{ao}\n")
+        check(bool(re.search(r"KVER=4\.4", ao)),
+              "the PRODUCTION bulkhead-agent ran UNDER gVisor (sandbox kernel 4.4.x) — Go runtime + net stack are Sentry-compatible")
+        check("PROBE NOROUTE: PASS" in ao,
+              "agent-under-gVisor: NOROUTE — no direct public egress from the sandbox")
+        check("PROBE ISOLATED: PASS" in ao,
+              "agent-under-gVisor: ISOLATED — the sandbox loopback is isolated from the host")
+        check("PROBE IOURING: PASS" in ao,
+              "agent-under-gVisor: IOURING — io_uring_setup denied by the Sentry (ADR-0033's ban from the SUBSTRATE, no seccomp filter)")
+
     run("poweroff", t=20)
 except Exception as e:
     out(f"\n[harness] EXC {type(e).__name__}: {e}\n")
