@@ -15,8 +15,11 @@
 import pexpect, sys, os, re
 BUILD = "/home/work/ideas/bulkhead/yocto/build"
 def out(s): sys.stdout.write(s); sys.stdout.flush()
+# `snapshot`: this test FORGES a record into /data to trip the gate, so it MUST NOT persist — qemu
+# writes to a temp overlay discarded on exit (otherwise the forged record corrupts the deploy wic's
+# /data and breaks every later boot, since runqemu does not snapshot by default).
 inner = (f"cd {BUILD} && source ../poky/oe-init-build-env . >/dev/null 2>&1 && "
-         f"exec runqemu qemux86-64 wic ovmf nographic kvm slirp")
+         f"exec runqemu qemux86-64 wic ovmf nographic kvm slirp snapshot")
 PS = "BHX_PROMPT> "; results = {}; child = None
 def check(c, l): results[l] = bool(c); out(f"\n[CHECK] {'PASS' if c else 'FAIL'}: {l}\n")
 def login(c):
@@ -30,7 +33,10 @@ try:
     login(child)
     def run(c, t=90): child.sendline(c); child.expect(PS, timeout=t); return child.before
 
-    check("active" in run("systemctl is-active bulkhead-egress-proxy.service 2>&1"), "egress proxy active at boot (clean chain)")
+    # NB: parse a PA= sentinel, not `"active" in <output>` — the serial console echoes the command,
+    # and "is-active" contains "active", so a bare substring check always matches the echo.
+    def proxy_state(): return run("echo PA=$(systemctl is-active bulkhead-egress-proxy.service)")
+    check("PA=active" in proxy_state(), "egress proxy active at boot (clean chain)")
     check("active" in run("systemctl is-active bulkhead-verify-audit.service 2>&1"), "verify-audit boot gate active (clean chain verified)")
     # The fix: the proxy now Requires= the selftest gate (which on Yocto Requires= verify-audit).
     rq = run("systemctl show -p Requires bulkhead-egress-proxy.service 2>&1")
@@ -58,7 +64,7 @@ try:
     # CLEAN control: re-evaluating the gate on a VALID chain still permits the proxy.
     run("systemctl stop bulkhead-egress-proxy.service bulkhead-selftest.service bulkhead-verify-audit.service 2>&1")
     cleanrc = run("systemctl start bulkhead-egress-proxy.service 2>&1; echo SRC=$?", t=120)
-    check("SRC=0" in cleanrc and "active" in run("systemctl is-active bulkhead-egress-proxy.service 2>&1"),
+    check("SRC=0" in cleanrc and "PA=active" in proxy_state(),
           "CLEAN control: with a valid chain, the gate PERMITS the proxy to start (no false-brick)")
 
     # ===== TAMPER: forge a record into the /data egress chain, then re-evaluate the gate. =====
@@ -70,8 +76,7 @@ try:
     tamperrc = run("systemctl start bulkhead-egress-proxy.service 2>&1; echo SRC=$?", t=120)
     out("\n[tampered start]\n" + tamperrc)
     check("SRC=0" not in tamperrc, "TAMPER: `systemctl start bulkhead-egress-proxy` FAILED (the fail-closed gate refused it)")
-    check("active" not in run("systemctl is-active bulkhead-egress-proxy.service 2>&1") or
-          "failed" in run("systemctl is-active bulkhead-egress-proxy.service 2>&1"),
+    check("PA=active" not in proxy_state(),
           "TAMPER: the egress proxy is NOT active under a forged chain (untrusted web egress refused)")
     check("failed" in run("systemctl is-active bulkhead-verify-audit.service 2>&1"),
           "TAMPER: verify-audit is in the failed state (the chain verifier tripped)")
