@@ -134,6 +134,31 @@ collector-TCB hot-path change with append-durability ordering implications and, 
 collector-hardening posture, wants explicit **owner sign-off** rather than being bundled into this
 review.
 
+## Boundaries re-examined and confirmed solid
+
+The review also adversarially re-read two boundaries the fixes lean on and found **no gap** —
+recorded so the review's scope is the whole picture, not only what broke:
+
+- **The signed audit-chain verifier** (`src/collector/verify.go`) — the root of trust R1's gate
+  rests on. It detects every tampering class structurally: record modification (hash mismatch),
+  insertion of a forged record (well-formed JSON still hits the ed25519 signature + hash/prev
+  checks), mid-record or whole-subchain deletion (continuous `prev_hash` linkage break),
+  reordering / illegal seq-reset (seq monotonicity within a per-boot subchain), and domain confusion
+  (the domain is folded into the hash). The only un-detected case is **tail-truncation of committed
+  records** — a documented, off-box-mitigated boundary (ADR-0025/0026: `--expect-tip` binds the
+  verified tip to a quote's HEAD, `--since` proves descent). Extensive existing tests corroborate
+  (tamper, subchain-deletion, wrong-domain, torn-tail, rollback, invalid-UTF8, garbage-envelope).
+- **The Dual-LLM quarantine taint-flow** (`src/agent/planexec.go` + `qresponse.go`, ADR-0036). The
+  CaMeL property holds by construction: a FETCH target, an EXTRACT question, and a DELEGATE
+  suffix/classes are all plan-fixed **literals** (a `$var` in any of those slots is grammar-rejected
+  fail-closed); raw fetched bytes (`vBody`) can ONLY be routed through the quarantined reader (no
+  tools, fresh context, reply stored as DATA and never `parse()`/`dispatch()`-ed), and its result
+  (`vData`) can ONLY be REPORTed or used as a DELEGATE **task** — which the broker delivers as a
+  `0400` credential and which can direct WHAT a child does but never widen its authority (child =
+  classes ∩ parent, broker + E2 enforced; even an injected child-planner's wider class request is
+  AND-clamped). The FETCH body is bounded (`fetchBodyCap`). No taint path to control flow or
+  authority was found.
+
 ## Verification posture
 
 Every R1–R4 change is a single self-contained commit + recipe re-pin, with `main` green at each
