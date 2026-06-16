@@ -186,6 +186,7 @@ do_install() {
 FILES:${PN} = "\
     ${systemd_system_unitdir} \
     ${bindir}/bulkhead-agent-run \
+    ${bindir}/bulkhead-agent-runsc-launch \
     ${bindir}/bulkhead-seal-audit-key \
     ${sysconfdir}/nftables.conf \
     ${sysconfdir}/bulkhead \
