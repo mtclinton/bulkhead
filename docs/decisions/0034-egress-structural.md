@@ -42,11 +42,15 @@ erosion.
 proxy loads it via `LoadCredentialEncrypted` — the same proven pattern as the audit seed, gated on
 the same build switch (the public `ca.crt` stays plaintext). The plain (VM/dev) path is unchanged
 and stays fully qemu-verified; the tpm2 unseal is bare-metal-authoritative (qemu vTPM sealing is
-unreliable, ADR-0001 #12), and the tpm2-mode wiring is build-verified. STILL PENDING: a real
-allow/deny-by-method/path/header rule engine + response-direction inspection + body DLP; HTTP/2 +
-websockets; the curated, audited pinned-cert/mTLS passthrough exception list (the open question
-below); a `BULKHEAD_EGRESS_DEFAULT_MODE=inspect` knob for high-assurance tiers; leaf-cache bounding +
-an audit-chain volume review.
+unreliable, ADR-0001 #12), and the tpm2-mode wiring is build-verified. The
+`BULKHEAD_EGRESS_DEFAULT_MODE=inspect` high-assurance knob is now SHIPPED + live-verified: it flips
+the disposition of UNMARKED allowlist entries from passthrough to inspect, so a tier can demand
+"every allowed host is TLS-terminated + content-inspected, or denied if it can't be" (the natural
+completion of the R4 inspect-fail-closed rule) with a single flag — an explicit per-entry mode still
+overrides, and unset keeps the inc1-compatible passthrough default (`verify-egress-mitm` ARM 4).
+STILL PENDING: a real allow/deny-by-method/path/header rule engine + response-direction inspection +
+body DLP; HTTP/2 + websockets; the curated, audited pinned-cert/mTLS passthrough exception list (the
+open question below); leaf-cache bounding + an audit-chain volume review.
 
 **Post-ship security review (2026-06-16).** An adversarial review of the shipped egress boundary
 closed two wiring gaps (record: `docs/security-reviews/2026-06-shipped-isolation-review.md`).
