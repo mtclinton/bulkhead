@@ -12,6 +12,12 @@
 #     reusing ADR-0015's credential channel).
 set -eu
 inst="${1:?usage: bulkhead-agent-runsc-launch <instance>}"
+# Defense-in-depth: the instance id is interpolated into the JSON OCI config AND into the bundle
+# paths we rm -rf / mkdir. systemd constrains %i and the operator is trusted, but reject anything but
+# an identifier so a malformed/hostile instance can never inject JSON or escape /run/bulkhead-runsc.
+case "${inst}" in
+    ""|*[!A-Za-z0-9_-]*) echo "bulkhead-agent-runsc-launch: invalid instance id: ${inst}" >&2; exit 2 ;;
+esac
 task="${BULKHEAD_AGENT_TASK:-Report your egress manifest over loopback, then finish.}"
 bundle="/run/bulkhead-runsc/${inst}"
 rootfs="${bundle}/rootfs"
