@@ -169,6 +169,12 @@ verify-runsc-unit:
 verify-runsc-quarantine:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-quarantine-check.py
 
+# Yocto: security-review R1 — the egress proxy's fail-closed boot gate. Boots the wic, forges a record
+# into the /data egress chain, and asserts the gate (proxy Requires=selftest->verify-audit) REFUSES the
+# proxy (and transitively a confined agent) under a tampered chain, while a clean chain still permits it.
+verify-egress-gate:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-gate-check.py
+
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
 # reboots to prove the rollback to A. Needs a built wic AND bundle (bitbake bulkhead-image

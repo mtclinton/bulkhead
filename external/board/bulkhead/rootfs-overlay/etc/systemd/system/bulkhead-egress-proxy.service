@@ -7,8 +7,14 @@
 [Unit]
 Description=bulkhead host-mediated egress proxy (ADR-0034)
 Documentation=https://github.com/mtclinton/bulkhead
-After=bulkhead-firewall.service
+After=bulkhead-firewall.service bulkhead-selftest.service
 Wants=bulkhead-firewall.service
+# Fail-closed gate (mirrors the trusted router leg). The UNTRUSTED-web egress chokepoint must not
+# start if the boot self-test fails — and on Yocto bulkhead-selftest Requires= the audit-chain
+# verifier (10-verify-chain.conf), so a forged/gapped /data chain refuses this proxy AND transitively
+# every confined/runsc agent that Requires= it. Before this, verify-audit only Before=-ordered the
+# proxy, which does not propagate failure — so a tampered chain refused the TCB but not web egress.
+Requires=bulkhead-selftest.service
 
 [Service]
 Type=exec
