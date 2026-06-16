@@ -7,11 +7,40 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestLeafCacheBounded (ADR-0034 inc2 sub-B): the per-host leaf cache must stay bounded — otherwise an
+// agent fetching unbounded distinct inspected hostnames (especially under the default-inspect knob) is
+// a slow memory leak. Minting well past the cap keeps the cache at the bound, and every leaf — including
+// a re-mint of an evicted host — stays valid (eviction trades memory for at most a cheap re-sign).
+func TestLeafCacheBounded(t *testing.T) {
+	m := testMITM(t)
+	old := maxLeafCache
+	maxLeafCache = 8
+	defer func() { maxLeafCache = old }()
+
+	for i := 0; i < maxLeafCache*3; i++ {
+		leaf, err := m.leafFor(fmt.Sprintf("host%d.example.com", i))
+		if err != nil {
+			t.Fatalf("leafFor(host%d): %v", i, err)
+		}
+		if leaf == nil || len(leaf.Certificate) == 0 {
+			t.Fatalf("host%d: empty leaf", i)
+		}
+		if len(m.cache) > maxLeafCache {
+			t.Fatalf("after %d mints the cache holds %d leaves, want <= %d", i+1, len(m.cache), maxLeafCache)
+		}
+	}
+	// a re-fetch of a (possibly evicted) host still returns a usable leaf — eviction never breaks correctness.
+	if leaf, err := m.leafFor("host0.example.com"); err != nil || leaf == nil {
+		t.Fatalf("re-mint after eviction failed: %v (leaf=%v)", err, leaf)
+	}
+}
 
 // testMITM provisions a real on-device CA into a temp dir and builds a mitmCA from it (mirroring
 // loadMITMCA's construction), so the tests exercise the actual provision + parse path.

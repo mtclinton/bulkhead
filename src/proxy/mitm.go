@@ -43,8 +43,16 @@ type mitmCA struct {
 	leafPub ed25519.PublicKey
 
 	mu    sync.Mutex
-	cache map[string]*tls.Certificate // CONNECT host -> minted leaf
+	cache map[string]*tls.Certificate // CONNECT host -> minted leaf (bounded by maxLeafCache)
 }
+
+// maxLeafCache bounds the per-host leaf-cert cache. Without it, a confined agent fetching unbounded
+// DISTINCT allowed hostnames — especially under BULKHEAD_EGRESS_DEFAULT_MODE=inspect, where every
+// allowed host is terminated and thus minted a leaf — grows the cache without limit (a slow memory
+// leak). When full, leafFor evicts one arbitrary entry before inserting; an evicted-but-still-needed
+// host simply re-mints (~1ms), so this buys a hard memory ceiling for at most an occasional re-sign,
+// never any correctness loss. A var (not const) so tests can shrink it. ~1KB/leaf => ~1MB at 1024.
+var maxLeafCache = 1024
 
 // loadMITMCA reads the CA cert+key from CREDENTIALS_DIRECTORY (mitm-ca-crt, mitm-ca-key), exactly as
 // loadSigningKey reads the audit seed. With BULKHEAD_REQUIRE_MITM_CA=1 a missing/garbled CA fails
@@ -133,6 +141,14 @@ func (m *mitmCA) leafFor(host string) (*tls.Certificate, error) {
 	}
 	cert := &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: m.leafKey}
 	m.mu.Lock()
+	// Bounded insert: only evict when adding a genuinely NEW host that would exceed the cap (Go's map
+	// range is randomized, so the victim is arbitrary — fine, since a re-mint is cheap).
+	if _, exists := m.cache[host]; !exists && len(m.cache) >= maxLeafCache {
+		for k := range m.cache {
+			delete(m.cache, k)
+			break
+		}
+	}
 	m.cache[host] = cert
 	m.mu.Unlock()
 	return cert, nil
