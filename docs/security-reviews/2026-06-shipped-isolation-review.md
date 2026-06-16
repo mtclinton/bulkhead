@@ -113,13 +113,26 @@ Fix: `30e29b9`. Verify: `TestHandleConnInspectUnavailableDenies` (proxy unit: si
 upstream never dialed) + `make verify-egress-mitm` ARM 3 (an inspect host on a non-TLS port is
 refused, no inspect/passthrough record written).
 
-## R5 [LOW] — accepted and deferred
+## R5 [LOW] — accepted and deferred (now precisely scoped)
 
-The control-plane (action-authorization) chain records **after** the map write, so an
-audit-append failure there can leave a state change unrecorded — the inverse of the egress
-proxy's record-**before**-act discipline. Severity is LOW (the control chain is internal, not a
-boundary an untrusted agent reaches) and the fix touches the collector's hot path, so it is
-deferred to a dedicated change with owner sign-off rather than bundled into this review.
+The collector's control-plane handlers (`src/collector/control.go`: `ctlEgressSetSelf`,
+`ctlEgressClearSelf`, `ctlGrantClearSelf`, `ctlTcbRegisterBroker`, …) apply the authoritative BPF
+**map write first** and then call `recordControl` — which is a `void`, best-effort append: on an
+append failure it only `log.Printf`s, with no way to signal the caller. So a control-plane authority
+change can be **live in the map while its signed record is missing** (only an un-chained log line
+notes the failure) — the inverse of the egress proxy's record-**before**-act, fail-closed discipline.
+
+Why LOW (not MED): the control socket is `0660`-root — **not agent-reachable** (an untrusted agent
+cannot invoke these verbs; only the broker / privileged root units can), and the chain lives on
+root-owned `/data` a jailed agent cannot fill to force the append error. This is an
+integrity-of-record gap reachable only from the root TCB context, not an untrusted-agent boundary.
+
+Fix shape (deferred): make `recordControl` **return** its error and record-**before**-act — append
+the signed record durably first, then apply the `m.Update`; if the append fails, refuse the verb (and
+roll back any map touch) so no authority change is ever live un-chained. Deferred because it is a
+collector-TCB hot-path change with append-durability ordering implications and, per the project's
+collector-hardening posture, wants explicit **owner sign-off** rather than being bundled into this
+review.
 
 ## Verification posture
 
