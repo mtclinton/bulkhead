@@ -84,15 +84,17 @@ try:
     run("systemctl daemon-reload 2>&1"); run("systemctl restart bulkhead-router.service 2>&1"); run("sleep 2; true")
     check("RSTATE=active" in run("echo RSTATE=$(systemctl is-active bulkhead-router.service)"), "router restarted (mockchat backend), stable")
 
-    def set_proxy(mode):
-        # allowlist 127.0.0.1 with <mode>, opt 127/8 past the internal-IP deny, mark 8443 a TLS port,
-        # and trust mockchat #2's cert as an upstream root (so the proxy verifies the real upstream).
+    def set_proxy(mode, tls_ports="8443"):
+        # allowlist 127.0.0.1 with <mode>, opt 127/8 past the internal-IP deny, mark <tls_ports> the TLS
+        # port set, and trust mockchat #2's cert as an upstream root (so the proxy verifies the real
+        # upstream). tls_ports defaults to 8443 (the fetch port); ARM 3 passes a port that EXCLUDES 8443
+        # so an inspect-marked host becomes non-terminable.
         run(f"printf '127.0.0.1 {mode}\\n' > /run/egress-allow-test.conf")
         run("mkdir -p /run/systemd/system/bulkhead-egress-proxy.service.d")
         run("printf '[Service]\\n"
             "Environment=BULKHEAD_EGRESS_ALLOWLIST=/run/egress-allow-test.conf\\n"
             "Environment=BULKHEAD_EGRESS_ALLOW_INTERNAL_CIDRS=127.0.0.0/8\\n"
-            "Environment=BULKHEAD_EGRESS_TLS_PORTS=8443\\n"
+            f"Environment=BULKHEAD_EGRESS_TLS_PORTS={tls_ports}\\n"
             "Environment=BULKHEAD_EGRESS_UPSTREAM_ROOTS=/run/mockchat-cert.pem\\n'"
             " > /run/systemd/system/bulkhead-egress-proxy.service.d/50-test.conf")
         run("systemctl daemon-reload 2>&1"); run("systemctl restart bulkhead-egress-proxy.service 2>&1"); run("sleep 1; true")
@@ -134,6 +136,27 @@ try:
     check(pass_before >= 0 and pass_after > pass_before, f"[passthrough] proxy signed a Hook=passthrough record ({pass_before} -> {pass_after})")
     check(n(count("inspect"), "CNT") == insp_mid, "[passthrough] NO new Hook=inspect (flow was NOT body-inspected)")
     check("reason=default" in run(f"grep '\"hook\":\"passthrough\"' {CHAIN} 2>/dev/null | tail -1"), "[passthrough] passthrough record marks reason=default (uninspected, honest ledger)")
+
+    # ===== ARM 3 (security-review R4): inspect, but the proxy CANNOT terminate this port. The host is
+    #       marked `inspect`, yet 8443 is no longer in the TLS-port set, so the proxy cannot TLS-terminate
+    #       + content-inspect it. It must FAIL CLOSED (deny) — NOT silently splice the host through
+    #       uninspected (the old behaviour, which let a missing CA / wrong port downgrade inspect to
+    #       passthrough). The deny is signed reason=inspect-unavailable; no inspect/passthrough is written. =====
+    insp_b4 = n(count("inspect"), "CNT")
+    pass_b4 = n(count("passthrough"), "CNT")
+    set_proxy("inspect", tls_ports="9999")  # 8443 excluded -> the inspect host is non-terminable here
+    check("active" in run("systemctl is-active bulkhead-egress-proxy.service 2>&1"), "[R4] proxy restarted: inspect host, but 8443 is NOT a TLS port (non-terminable)")
+    sout4, jr4 = run_agent("mitmr4")
+    out("\n[R4 inspect-unavailable agent journal]\n" + jr4)
+    check(not re.search(r"OK: fetch 127\.0\.0\.1:8443 -> HTTP 200", jr4),
+          "[R4] the agent did NOT get HTTP 200 — the inspect-but-unterminable host was REFUSED, not passed through")
+    denyrec = run(f"grep 'inspect-unavailable' {CHAIN} 2>/dev/null | tail -1")
+    check('"decision":"deny"' in denyrec and "dst=127.0.0.1:8443" in denyrec,
+          "[R4] the chain signed a DENY (reason=inspect-unavailable) for the unterminable inspect host")
+    check(n(count("inspect"), "CNT") == insp_b4 and n(count("passthrough"), "CNT") == pass_b4,
+          "[R4] NO new inspect AND NO new passthrough record — the host was never spliced (fail CLOSED, not fail open)")
+    va4 = run(f"bulkhead-collector verify-audit {CHAIN} 2>&1; echo VA=$?", t=30)
+    check("VA=0" in va4 and "domain: egress-proxy" in va4, "[R4] egress chain still verifies signed after the fail-closed deny")
 
     run("systemctl stop mockchat-tls.service bulkhead-mockchat.service 2>&1; true")
     run("poweroff", t=20)
