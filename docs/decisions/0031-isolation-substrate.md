@@ -1,6 +1,6 @@
 # ADR-0031: Isolation substrate: reimplemented-kernel default, Firecracker hostile tier, no hand-rolled VMM
 
-Status: Proposed
+Status: Proposed — runsc substrate integration slices 1-3 shipped + live-proven 2026-06-15 (packaging, agent-under-Sentry, mediated-egress-preserved)
 Date: 2026-06-07
 Pillar: agent-isolation
 Relates to: ADR-0032 (interception primitive), ADR-0033 (io_uring broker), ADR-0034 (egress), ADR-0035 (action authorization), ADR-0036 (model-routing quarantine runs on this substrate), ADR-0037 (multi-agent domains reuse this substrate), ADR-0038 (confidential computing rejected); refines the agent-isolation pillar of ADR-0001.
@@ -116,6 +116,16 @@ guarantee need not relocate into the Sentry the way host-LSM mediation would. Re
 OCI-bundle agent launcher, the UDS bind-mounts + resource/seccomp config, io_uring kept disabled
 (ADR-0033; gVisor's io_uring is partial anyway), and a `make verify-*` proving a sandboxed agent with
 its mediated egress intact. **Verdict: GO on feasibility — no blocker; path clear and bounded.**
+
+## Integration status — runsc as the default-tier substrate (slices 1-3, 2026-06-15)
+
+The spike's "remaining work" is now substantially done and live-proven in the BOOTED APPLIANCE (not just the dev host), with NO change to the agent or proxy code:
+
+- **Slice 1 — packaged + host-surface collapse** (`make verify-runsc`, commit 45c28f3). runsc is in the image (Yocto recipe, release-20260413, sha256-pinned static binary) and runs via Systrap-rootless; a workload under runsc reports gVisor's reimplemented kernel **4.4.0**, not the host's 6.6.127 — the Sentry is interposed and the host syscall surface is collapsed.
+- **Slice 2 — production agent under the Sentry** (`make verify-runsc`, commit 228e90a). The unmodified `/usr/bin/bulkhead-agent` runs under gVisor (Go runtime + net stack are Sentry-compatible); the sandbox gives it NOROUTE + ISOLATED (no direct egress). `io_uring_setup` is **ENOSYS** under the Sentry — so ADR-0033's io_uring ban is delivered by the SUBSTRATE itself (gVisor doesn't expose io_uring), no per-jail seccomp filter required (stronger than the "partial" the spike expected).
+- **Slice 3 — mediated egress preserved** (`make verify-runsc-egress`, commit dc2cf3b). With `runsc --host-uds=open` the sandboxed agent reaches the HOST egress-proxy UNIX socket across the Sentry boundary, and the host proxy makes the actual egress. The ADR-0034 boundary holds UNCHANGED: no direct egress, the proxy is the only path, the allowlist is enforced (PROXY-DENY), and every destination is signed into the /data chain (which verifies). Host-side egress mediation transfers to the substrate for free — confirming the spike's favorable-placement finding.
+
+So the integration is sound; the core properties hold under the substrate. **Still to do (slice 4+):** a PRODUCTION runsc-backed agent jail — a systemd-launched `runsc run` over an OCI bundle (vs the `runsc do` quick-run the slices prove the properties with), the router UDS leg alongside the egress one, and the resource/seccomp config; then default-tier (substrate, hostile/untrusted) vs trusted-tier (namespace/E0–E3, retained) selection per *Migration*.
 
 ## Evidence (source reports)
 
