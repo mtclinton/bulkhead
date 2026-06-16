@@ -136,6 +136,13 @@ verify-quarantine:
 verify-runsc:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-substrate-check.py
 
+# Yocto: ADR-0031 substrate integration, slice 3. Boots the wic and proves an agent UNDER gVisor/runsc
+# keeps its single MEDIATED way out: with --host-uds=open it reaches the host egress proxy UDS across
+# the Sentry boundary (PROXY-OK), the allowlist is enforced (PROXY-DENY), no direct egress
+# (NOROUTE/ISOLATED), io_uring is ENOSYS, and the proxy signs the egress into its /data chain. Needs a built wic.
+verify-runsc-egress:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-egress-check.py
+
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
 # reboots to prove the rollback to A. Needs a built wic AND bundle (bitbake bulkhead-image
