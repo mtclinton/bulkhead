@@ -279,6 +279,29 @@ try:
     check("DENIED: egress" in gcj,
           "ARM CHAIN: the grandchild's public fetch is E2-DENIED — the laundering vector (reclaim the parent's public via a grandchild) is structurally blocked")
 
+    # ===== ARM DEPTHCAP (ADR-0037): the generation depth cap bounds chain HEIGHT =====
+    # Complements ARM CHAIN (transitive narrow, which bounds chain WIDTH/authority). A child AT the max
+    # delegation depth cannot spawn a grandchild: the broker refuses gen+1 > maxDelegateDepth, where gen
+    # is derived ONLY from the kernel-attested parent instance name (never agent-supplied, so a child
+    # can't reset its counter). Set the cap to 1, then a parent delegates a child (gen 1, allowed) whose
+    # task tries to delegate a grandchild (gen 2 > 1) — REFUSED at the broker, no grandchild minted.
+    run("printf '[Service]\\nEnvironment=BULKHEAD_MAX_DELEGATE_DEPTH=1\\n'"
+        " > /run/systemd/system/bulkhead-broker.service.d/91-depthcap.conf")
+    run("systemctl daemon-reload 2>&1")
+    run("systemctl restart bulkhead-broker.service 2>&1"); run("sleep 2 2>/dev/null; true")
+    check("active" in run("systemctl is-active bulkhead-broker.service 2>&1"), "ARM DEPTHCAP: broker restarted with maxDelegateDepth=1")
+    write_parent("dcparent", "loopback,other",
+                 "ORCH dccap loopback,other ORCH dcgc loopback,other FETCH-ONLY https://1.1.1.1/")
+    gidD, cinstD, _, _ = delegate_and_approve("dcparent", "dccap", "allow")
+    jD = cjournal(cinstD) if cinstD else ""
+    gcm = re.search(r"bulkhead-agent@(d2-[0-9a-f]+-dcgc)\.service\.d",
+                    run("ls -d /run/systemd/system/bulkhead-agent@d2-*-dcgc.service.d 2>/dev/null; echo END"))
+    out(f"\n[depthcap] child={cinstD} grandchild={gcm.group(1) if gcm else None}\n[child journal]\n{jD}\n")
+    check(cinstD is not None, "ARM DEPTHCAP: the gen-1 child WAS minted (within the depth cap of 1)")
+    check(gcm is None, "ARM DEPTHCAP: the gen-2 grandchild was REFUSED — never minted (chain HEIGHT bounded at the attested depth)")
+    check(bool(re.search(r"ESCALATION DENIED|denied|depth", jD)),
+          "ARM DEPTHCAP: the child's grandchild-delegation attempt was DENIED at the broker (gen+1 > maxDelegateDepth)")
+
     # ===== ARM AUDIT: all THREE signed chains verify; control chain has the authority writes =====
     v1 = run("bulkhead-collector verify-audit /data/bulkhead/audit-broker/provenance.jsonl 2>&1; echo RC=$?")
     v2 = run("bulkhead-collector verify-audit /data/bulkhead/audit/provenance.jsonl 2>&1; echo RC=$?")
