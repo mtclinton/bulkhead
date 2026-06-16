@@ -244,6 +244,42 @@ func TestDelegateDepthCap(t *testing.T) {
 	}
 }
 
+// TestExpandRefusedForDelegatedChild (security review R2): a broker-minted delegated child (gen>0,
+// attested from its d<N>- instance name — the same un-spoofable signal the depth cap uses) is refused
+// EXPAND in the TCB, regardless of the in-jail NO_EXPAND env it could bypass. A top-level agent (gen 0)
+// is NOT blanket-refused. (delegGen's parsing of the attested path is itself covered by TestDelegGen,
+// and that the kernel attestation yields the right d<N>- path is live-proven by ARM DEPTHCAP.)
+func TestExpandRefusedForDelegatedChild(t *testing.T) {
+	resetPend()
+	ask := func(path string) string {
+		c1, c2 := net.Pipe()
+		got := make(chan string, 1)
+		go func() {
+			line, _ := bufio.NewReader(c2).ReadString('\n')
+			got <- strings.TrimSpace(line)
+			_, _ = io.Copy(io.Discard, c2)
+		}()
+		handleExpandTail(c1, 1234, path, []string{"EXPAND", "public"})
+		_ = c1.Close()
+		return <-got
+	}
+	childPath := "/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@d1-deadbeef-kid.service"
+	if r := ask(childPath); r != "ERR no-expand-for-delegated" {
+		t.Fatalf("a delegated child's EXPAND must be refused in the broker, reply=%q want ERR no-expand-for-delegated", r)
+	}
+	pendMu.Lock()
+	n := len(pend)
+	pendMu.Unlock()
+	if n != 0 {
+		t.Fatalf("a refused delegated EXPAND registered %d pending, want 0 (no side effect)", n)
+	}
+	// A top-level agent (gen 0) passes the gen-check and proceeds (here hitting the no-manifest path,
+	// since the unit test has no pinned BPF map) — proving the cap is scoped to delegated children only.
+	if r := ask("/bulkhead.slice/bulkhead-agent.slice/bulkhead-agent@worker.service"); r == "ERR no-expand-for-delegated" {
+		t.Fatalf("a top-level agent must NOT be blanket-refused EXPAND, reply=%q", r)
+	}
+}
+
 // resetPend clears the global registry between tests.
 func resetPend() {
 	pendMu.Lock()

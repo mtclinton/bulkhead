@@ -387,6 +387,18 @@ func handleDelegateTail(conn net.Conn, parentCgID uint64, parentPath string, f [
 // request that outlived its agent (cgroup exited/recycled) can never resurrect a manifest.
 func handleExpandTail(conn net.Conn, agentCgID uint64, agentPath string, f []string) {
 	reply := func(s string) { fmt.Fprintln(conn, s) }
+	// R2 (security review): a broker-minted delegated child must NEVER widen its egress past its
+	// delegation root — the grandchild ⊆ child ⊆ parent LIFETIME invariant. NO_EXPAND in the child's
+	// drop-in is only an Environment= flag checked inside the UNTRUSTED agent runtime, which the threat
+	// model treats as compromised (a child can exec `bulkhead-collector expand` or write EXPAND to the
+	// 0666 broker.sock directly, bypassing its own runtime). Enforce the cap in the TCB using the
+	// un-spoofable signal the depth cap already trusts: delegGen of the kernel-ATTESTED parent path.
+	// gen>0 == a broker-minted child (instance d<N>-…); refuse outright. Top-level agents (gen 0) may
+	// still EXPAND with operator approval as before.
+	if gen, gerr := delegGen(agentPath); gerr == nil && gen > 0 {
+		reply("ERR no-expand-for-delegated")
+		return
+	}
 	if len(f) != 2 {
 		reply("ERR protocol")
 		return
