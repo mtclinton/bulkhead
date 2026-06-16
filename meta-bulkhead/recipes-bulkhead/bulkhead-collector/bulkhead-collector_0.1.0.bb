@@ -26,7 +26,7 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
 # Bumped 60774ac -> 19505b6 for verify.go chainDomain: verify-audit now maps an audit-egress path to the
 # "egress-proxy" domain so it can verify the egress proxy's signed chain (ADR-0034/0017). The BPF program
 # (provenance.bpf.c / bpf_bpfel.o) is UNCHANGED from 60774ac — only the userspace verifier gained the case.
-SRCREV = "19505b60330fe79f4689077a2917f1e79ca7f5d3"
+SRCREV = "bb70990107054da2c93990c371c28e6029c6d198"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
