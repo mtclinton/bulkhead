@@ -1,0 +1,35 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# ADR-0031: launch a bulkhead agent under the gVisor substrate (the default tier for hostile/untrusted
+# agents). Builds a per-instance OCI bundle with a MINIMAL rootfs — ONLY the agent binary + the
+# egress/router UDS legs + the task credential are bind-mounted in; the host filesystem is NOT exposed
+# (vs root=/ which would regress the systemd jail's ProtectSystem=strict). Then `runsc run`s it:
+#   - the Sentry collapses the host syscall surface (host-surface collapse) and io_uring is ENOSYS
+#     for free (ADR-0033 ban from the substrate, no per-jail seccomp);
+#   - --network=none gives no direct egress; the agent's ONLY ways out are the two mediated UDS legs,
+#     reached across the Sentry via --host-uds=open (the host proxy/router make the actual I/O);
+#   - the task rides a 0400 credential (file CONTENT, never JSON/unit syntax — injection-safe,
+#     reusing ADR-0015's credential channel).
+set -eu
+inst="${1:?usage: bulkhead-agent-runsc-launch <instance>}"
+task="${BULKHEAD_AGENT_TASK:-Report your egress manifest over loopback, then finish.}"
+bundle="/run/bulkhead-runsc/${inst}"
+rootfs="${bundle}/rootfs"
+creds="${bundle}/creds"
+
+# Reap any stale container/bundle from a prior crashed run (the happy path cleans up in ExecStopPost).
+/usr/bin/runsc --rootless --ignore-cgroups delete -force "${inst}" 2>/dev/null || true
+rm -rf "${bundle}"
+mkdir -p "${rootfs}/usr/bin" "${rootfs}/run/bulkhead-egress" "${rootfs}/run/bulkhead-router" \
+         "${rootfs}/run/creds" "${rootfs}/proc" "${rootfs}/dev" "${rootfs}/sys" "${creds}"
+: > "${rootfs}/usr/bin/bulkhead-agent"            # bind-mount point for the (host) agent binary
+printf '%s' "${task}" > "${creds}/agent-task"     # injection-safe: the task is file CONTENT
+chmod 0400 "${creds}/agent-task"
+
+# The OCI config. $inst and $creds are the only expansions (both are non-attacker-controlled paths/ids).
+cat > "${bundle}/config.json" <<EOF
+{"ociVersion":"1.0.0","process":{"user":{"uid":0,"gid":0},"args":["/usr/bin/bulkhead-agent","${inst}"],"env":["PATH=/usr/bin:/bin","BULKHEAD_ROUTER_UDS=/run/bulkhead-router/router.sock","BULKHEAD_EGRESS_SOCK=/run/bulkhead-egress/egress.sock","BULKHEAD_AGENT_TASK_CRED=agent-task","CREDENTIALS_DIRECTORY=/run/creds","BULKHEAD_AGENT_DEADLINE=90"],"cwd":"/","capabilities":{"bounding":[],"effective":[],"inheritable":[],"permitted":[]},"rlimits":[{"type":"RLIMIT_NOFILE","hard":1024,"soft":1024}]},"root":{"path":"rootfs","readonly":true},"hostname":"runsc","mounts":[{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs"},{"destination":"/sys","type":"sysfs","source":"sysfs","options":["nosuid","noexec","nodev","ro"]},{"destination":"/usr/bin/bulkhead-agent","type":"bind","source":"/usr/bin/bulkhead-agent","options":["bind","ro"]},{"destination":"/run/bulkhead-egress","type":"bind","source":"/run/bulkhead-egress","options":["bind","rw"]},{"destination":"/run/bulkhead-router","type":"bind","source":"/run/bulkhead-router","options":["bind","rw"]},{"destination":"/run/creds","type":"bind","source":"${creds}","options":["bind","ro"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"network"},{"type":"ipc"},{"type":"uts"},{"type":"mount"}]}}
+EOF
+
+exec /usr/bin/runsc --host-uds=open --rootless --ignore-cgroups --platform=systrap --network=none \
+    run -bundle "${bundle}" "${inst}"

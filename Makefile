@@ -156,6 +156,13 @@ verify-runsc-agent:
 verify-runsc-run:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-run-check.py
 
+# Yocto: ADR-0031 slice 6. The DEPLOYABLE form: `systemctl start bulkhead-agent-runsc@<inst>` launches
+# a substrate-jailed agent (unit -> launcher -> minimal-rootfs OCI bundle -> runsc run), task delivered
+# injection-safely as a credential. Asserts a real agent loop, both legs mediated, egress signed, the
+# bundle reaped on stop. Needs a built wic (re-pin bulkhead-units).
+verify-runsc-unit:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-unit-check.py
+
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
 # reboots to prove the rollback to A. Needs a built wic AND bundle (bitbake bulkhead-image

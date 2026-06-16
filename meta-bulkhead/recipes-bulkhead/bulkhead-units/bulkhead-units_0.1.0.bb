@@ -101,6 +101,8 @@ do_install() {
 		install -m0644 $d/*.conf ${D}${systemd_system_unitdir}/$dn/
 	done
 	install -Dm0755 ${OV}/usr/bin/bulkhead-agent-run ${D}${bindir}/bulkhead-agent-run
+	# ADR-0031: the gVisor-substrate agent launcher (ExecStart of bulkhead-agent-runsc@.service)
+	install -Dm0755 ${OV}/usr/bin/bulkhead-agent-runsc-launch ${D}${bindir}/bulkhead-agent-runsc-launch
 
 	# Yocto-only: persist the collector audit log on /data (RO rootfs -> /var is volatile)
 	install -d ${D}${systemd_system_unitdir}/bulkhead-collector.service.d

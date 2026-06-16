@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# ADR-0031: a bulkhead agent jailed under the gVisor SUBSTRATE (the default tier for hostile/untrusted
+# agents). Unlike bulkhead-agent-confined@ (a no-route netns + systemd hardening), this runs the agent
+# under runsc/gVisor — the Sentry interposes a reimplemented application kernel, collapsing the host
+# syscall surface and making io_uring unavailable (ENOSYS) for free. The agent's only ways out are the
+# host egress-proxy + router UDS legs, reached across the Sentry via host-uds passthrough; the task is
+# delivered as a 0400 credential (injection-safe). Instantiate as bulkhead-agent-runsc@<inst> with
+# BULKHEAD_AGENT_TASK set (env or a drop-in). Not [Install]-enabled: started on demand.
+[Unit]
+Description=bulkhead agent under the gVisor substrate (%i)
+Documentation=https://github.com/mtclinton/bulkhead
+After=bulkhead-egress-proxy.service bulkhead-router.service
+Requires=bulkhead-egress-proxy.service
+
+[Service]
+# A bulkhead agent is a bounded perceive->decide->act run, not a daemon: runsc run blocks until the
+# agent exits and propagates its exit code, so oneshot fits and `systemctl start` reflects the result.
+Type=oneshot
+ExecStart=/usr/bin/bulkhead-agent-runsc-launch %i
+# Reap the container + the transient bundle when the run ends (best-effort; the launcher also
+# pre-reaps a stale id on the next start).
+ExecStopPost=-/usr/bin/runsc --rootless --ignore-cgroups delete -force %i
+ExecStopPost=-/bin/rm -rf /run/bulkhead-runsc/%i
