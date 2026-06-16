@@ -130,6 +130,12 @@ verify-egress-mitm:
 verify-quarantine:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-quarantine-injection-check.py
 
+# Yocto: ADR-0031 substrate integration, slice 1. Boots the wic and proves gVisor/runsc runs in the
+# appliance with host-surface collapse — a workload under runsc reports gVisor's reimplemented kernel
+# (~4.4.x / "Starting gVisor"), not the host 6.x. Probes platform/flag combos. Needs a built wic.
+verify-runsc:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-substrate-check.py
+
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
 # reboots to prove the rollback to A. Needs a built wic AND bundle (bitbake bulkhead-image

@@ -25,6 +25,7 @@ IMAGE_INSTALL += " \
     bulkhead-units \
     llama-cpp \
     tailscale \
+    runsc \
     nftables \
     curl \
     ca-certificates \
