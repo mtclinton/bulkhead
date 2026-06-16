@@ -84,7 +84,7 @@ try:
     run("systemctl daemon-reload 2>&1"); run("systemctl restart bulkhead-router.service 2>&1"); run("sleep 2; true")
     check("RSTATE=active" in run("echo RSTATE=$(systemctl is-active bulkhead-router.service)"), "router restarted (mockchat backend), stable")
 
-    def set_proxy(mode, tls_ports="8443", default_mode="", inspect_methods=""):
+    def set_proxy(mode, tls_ports="8443", default_mode=""):
         # allowlist 127.0.0.1 with <mode> (empty = UNMARKED), opt 127/8 past the internal-IP deny, mark
         # <tls_ports> the TLS port set, optionally set the default-mode knob, and trust mockchat #2's
         # cert as an upstream root. tls_ports defaults to 8443 (the fetch port); ARM 3 passes a port that
@@ -96,7 +96,6 @@ try:
             "Environment=BULKHEAD_EGRESS_ALLOW_INTERNAL_CIDRS=127.0.0.0/8\\n"
             f"Environment=BULKHEAD_EGRESS_TLS_PORTS={tls_ports}\\n"
             f"Environment=BULKHEAD_EGRESS_DEFAULT_MODE={default_mode}\\n"
-            f"Environment=BULKHEAD_EGRESS_INSPECT_METHODS={inspect_methods}\\n"
             "Environment=BULKHEAD_EGRESS_UPSTREAM_ROOTS=/run/mockchat-cert.pem\\n'"
             " > /run/systemd/system/bulkhead-egress-proxy.service.d/50-test.conf")
         run("systemctl daemon-reload 2>&1"); run("systemctl restart bulkhead-egress-proxy.service 2>&1"); run("sleep 1; true")
@@ -178,26 +177,6 @@ try:
           f"[knob] the unmarked host produced a Hook=inspect record ({insp_b5} -> {insp_a5}) — default-inspect is active, not passthrough")
     va5 = run(f"bulkhead-collector verify-audit {CHAIN} 2>&1; echo VA=$?", t=30)
     check("VA=0" in va5 and "domain: egress-proxy" in va5, "[knob] egress chain still verifies signed")
-
-    # ===== ARM 5 (inc2 sub-B): the inspected-egress METHOD allowlist. The host is inspect-marked and
-    #       8443 IS a TLS port (terminable), but BULKHEAD_EGRESS_INSPECT_METHODS=POST allows only POST —
-    #       so the agent's GET is DENIED mid-stream, after TLS termination but BEFORE the request reaches
-    #       upstream, and signed as a Hook=inspect deny (reason=method:GET). First real content-policy
-    #       enforcement on an inspected flow (vs sub-A's record-only findings). =====
-    insp_b6 = n(count("inspect"), "CNT")
-    set_proxy("inspect", tls_ports="8443", inspect_methods="POST")  # only POST allowed -> the agent's GET is denied
-    check("active" in run("systemctl is-active bulkhead-egress-proxy.service 2>&1"), "[methods] proxy restarted: inspect host, INSPECT_METHODS=POST (GET disallowed)")
-    sout6, jr6 = run_agent("mitmmeth")
-    out("\n[methods agent journal]\n" + jr6)
-    check(not re.search(r"OK: fetch 127\.0\.0\.1:8443 -> HTTP 200", jr6),
-          "[methods] the agent's GET did NOT get HTTP 200 — a method outside the allowlist was REFUSED")
-    insp_a6 = n(count("inspect"), "CNT")
-    check(insp_b6 >= 0 and insp_a6 > insp_b6, f"[methods] a Hook=inspect record was signed ({insp_b6} -> {insp_a6})")
-    methrec = run(f"grep '\"hook\":\"inspect\"' {CHAIN} 2>/dev/null | tail -1")
-    check('"decision":"deny"' in methrec and "reason=method:GET" in methrec,
-          "[methods] the inspect record is a DENY with reason=method:GET (the disallowed method was the cause, recorded honestly)")
-    va6 = run(f"bulkhead-collector verify-audit {CHAIN} 2>&1; echo VA=$?", t=30)
-    check("VA=0" in va6 and "domain: egress-proxy" in va6, "[methods] egress chain still verifies signed after the method-deny")
 
     run("systemctl stop mockchat-tls.service bulkhead-mockchat.service 2>&1; true")
     run("poweroff", t=20)

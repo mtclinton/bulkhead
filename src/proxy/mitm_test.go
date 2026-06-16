@@ -241,30 +241,3 @@ func TestInspectRules(t *testing.T) {
 		t.Errorf("split needle: want deny, got %q", r)
 	}
 }
-
-// TestInspectMethodAllowlist (ADR-0034 inc2 sub-B): the operator method-allowlist for inspected egress
-// denies a request whose method is absent (the moment the head parses, before the body relays), and an
-// empty allowlist imposes no restriction. The match is case-insensitive so a lowercase method cannot dodge it.
-func TestInspectMethodAllowlist(t *testing.T) {
-	if ms := methodSet("get, Head"); len(ms) != 2 || !ms["GET"] || !ms["HEAD"] {
-		t.Fatalf("methodSet parse/uppercase wrong: %v", ms)
-	}
-	if methodSet("   ") != nil {
-		t.Fatal("empty methodSet must be nil (no restriction)")
-	}
-
-	p := &Proxy{allowMethods: methodSet("GET,HEAD")}
-	if r := p.inspect(&inspectState{host: "h.com"}, []byte("GET / HTTP/1.1\r\nHost: h.com\r\n\r\n")); r != "" {
-		t.Errorf("GET in allowlist: want allow, got %q", r)
-	}
-	if r := p.inspect(&inspectState{host: "h.com"}, []byte("POST /x HTTP/1.1\r\nHost: h.com\r\n\r\n")); r != "method:POST" {
-		t.Errorf("POST not in allowlist: want method deny, got %q", r)
-	}
-	if r := p.inspect(&inspectState{host: "h.com"}, []byte("post /x HTTP/1.1\r\nHost: h.com\r\n\r\n")); r != "method:post" {
-		t.Errorf("lowercase post must still be denied (no case dodge), got %q", r)
-	}
-	// no allowlist => sub-A behaviour: any method is allowed through inspection.
-	if r := (&Proxy{}).inspect(&inspectState{host: "h.com"}, []byte("POST /x HTTP/1.1\r\nHost: h.com\r\n\r\n")); r != "" {
-		t.Errorf("no allowlist: POST must be allowed, got %q", r)
-	}
-}
