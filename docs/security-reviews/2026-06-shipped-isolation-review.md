@@ -2,7 +2,10 @@
 
 Status: 3 confirmed wiring-gap findings (R1, R2, R4) fixed + live-verified; R3 **reclassified** by
 its own live counterfactual from a MED DoS to a defense-in-depth hardening (the DoS was not
-exploitable in the rootless config — see below); R5 accepted-and-deferred.
+exploitable in the rootless config — see below); R5 accepted-and-deferred. The review also
+re-examined four adjacent boundaries (the audit-chain verifier, the Dual-LLM quarantine, the router
+model-routing leg, and the BPF-LSM action-auth enforce) and found them **gap-free** — so the pass
+covers the whole shipped isolation architecture, network and syscall halves, not only where it broke.
 
 ## Scope
 
