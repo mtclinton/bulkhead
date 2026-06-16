@@ -72,6 +72,40 @@ func TestAllowlistMode(t *testing.T) {
 	}
 }
 
+// TestDefaultEgressModeKnob (ADR-0034 inc2 sub-B): BULKHEAD_EGRESS_DEFAULT_MODE flips the disposition
+// of UNMARKED allowlist entries — the high-assurance "inspect everything (or deny what can't be
+// terminated)" posture — while an explicit per-entry mode token still wins. Unset/invalid keeps the
+// inc1-compatible passthrough default (zero behaviour change when the knob is not set).
+func TestDefaultEgressModeKnob(t *testing.T) {
+	content := "api.host.com\n.example.com\n10.0.0.0/8\npin.host.com pinned\nplain.host.com passthrough\n*\n"
+	t.Setenv("BULKHEAD_EGRESS_DEFAULT_MODE", "inspect")
+	al, err := LoadAllowlist(writeFile(t, t.TempDir(), content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ host, want string }{
+		{"api.host.com", modeInspect},       // unmarked exact -> knob
+		{"x.example.com", modeInspect},      // unmarked suffix -> knob
+		{"10.1.2.3", modeInspect},           // unmarked cidr -> knob
+		{"pin.host.com", modePinned},        // explicit pinned overrides the knob
+		{"plain.host.com", modePassthrough}, // explicit passthrough overrides the knob
+		{"other.host.com", modeInspect},     // falls to the unmarked "*" -> knob
+	} {
+		if got := al.Mode(c.host); got != c.want {
+			t.Errorf("knob=inspect: Mode(%q)=%q want %q", c.host, got, c.want)
+		}
+	}
+
+	// Unset -> the inc1-compatible passthrough default; an invalid value falls back the same way.
+	for _, val := range []string{"", "bogus"} {
+		t.Setenv("BULKHEAD_EGRESS_DEFAULT_MODE", val)
+		al2, _ := LoadAllowlist(writeFile(t, t.TempDir(), "api.host.com\n"))
+		if got := al2.Mode("api.host.com"); got != modePassthrough {
+			t.Errorf("knob=%q: an unmarked entry must default to passthrough, got %q", val, got)
+		}
+	}
+}
+
 func TestProvisionCARoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	if err := provisionCA(dir); err != nil {

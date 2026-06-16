@@ -25,6 +25,11 @@ Environment=BULKHEAD_EGRESS_SOCK=/run/bulkhead-egress/egress.sock
 Environment=BULKHEAD_EGRESS_ALLOWLIST=/etc/bulkhead/egress-allow.conf
 # Default-deny internal destinations; an operator opts specific CIDRs in here.
 Environment=BULKHEAD_EGRESS_ALLOW_INTERNAL_CIDRS=
+# High-assurance egress posture (ADR-0034 inc2). Empty = the inc1-compatible `passthrough` default
+# (a host is body-inspected only when its allowlist entry says `inspect`). Set to `inspect` to flip
+# the default for UNMARKED entries: every allowed host is then TLS-terminated + content-inspected, or
+# DENIED if it cannot be terminated (the inspect fail-closed rule) — an explicit per-entry mode wins.
+Environment=BULKHEAD_EGRESS_DEFAULT_MODE=
 ExecStart=/usr/bin/bulkhead-egress-proxy
 Restart=on-failure
 RestartSec=2

@@ -14,7 +14,8 @@ import (
 // destination. The allowlist still decides WHICH destinations the single mediated path dials
 // (inc1); the mode decides whether that flow is TLS-terminated + content-inspected or spliced
 // opaque. Default is passthrough (compatibility-safe); a host is body-inspected only when its
-// entry explicitly says so.
+// entry says so — OR when BULKHEAD_EGRESS_DEFAULT_MODE flips the default for unmarked entries
+// (the high-assurance "inspect everything that can be terminated, deny the rest" knob).
 const (
 	modeInspect     = "inspect"     // TLS-terminate + content-inspect (the body-exfil guarantee)
 	modePassthrough = "passthrough" // opaque inc1 splice; inspection deliberately waived (default)
@@ -23,6 +24,19 @@ const (
 
 func validMode(m string) bool {
 	return m == modeInspect || m == modePassthrough || m == modePinned
+}
+
+// defaultEgressMode is the disposition for an UNMARKED allowlist entry. It is passthrough
+// (compatibility-safe) unless BULKHEAD_EGRESS_DEFAULT_MODE names another valid mode — the
+// high-assurance knob (ADR-0034 inc2 sub-B). Set it to `inspect` and EVERY allowed host is
+// TLS-terminated + content-inspected, or DENIED if it cannot be terminated (the inspect
+// fail-closed rule, security-review R4) — unless that host's own allowlist entry overrides with an
+// explicit mode token. An unset or invalid value keeps the inc1-compatible passthrough default.
+func defaultEgressMode() string {
+	if m := strings.ToLower(os.Getenv("BULKHEAD_EGRESS_DEFAULT_MODE")); validMode(m) {
+		return m
+	}
+	return modePassthrough
 }
 
 type suffixRule struct {
@@ -46,13 +60,15 @@ type cidrRule struct {
 type Allowlist struct {
 	all     bool
 	allMode string
+	defMode string            // disposition for an UNMARKED entry (passthrough, or the high-assurance knob)
 	exact   map[string]string // host -> mode
 	suffix  []suffixRule
 	cidrs   []cidrRule
 }
 
 func LoadAllowlist(path string) (*Allowlist, error) {
-	a := &Allowlist{exact: map[string]string{}, allMode: modePassthrough}
+	dm := defaultEgressMode()
+	a := &Allowlist{exact: map[string]string{}, allMode: dm, defMode: dm}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -74,7 +90,7 @@ func LoadAllowlist(path string) (*Allowlist, error) {
 		// "<pattern> [mode]" — the optional second field is the inspection disposition.
 		fields := strings.Fields(line)
 		pat := fields[0]
-		mode := modePassthrough
+		mode := a.defMode
 		if len(fields) >= 2 {
 			mode = strings.ToLower(fields[1])
 			if !validMode(mode) {
@@ -131,8 +147,9 @@ func (a *Allowlist) Allows(host string) bool {
 // Mode returns the inspection disposition for a host. It uses the SAME host matching as Allows
 // (the destination is parsed once, in readRequest, and never re-interpreted), but resolves the
 // most-SPECIFIC matching entry first (exact > suffix > cidr > "*") so a per-host "inspect" wins
-// over a "* passthrough" default. A host that matches nothing returns passthrough — Mode is only
-// meaningful after Allows returned true, and passthrough is the safe fallback.
+// over a "* passthrough" default. A host that matches nothing returns the default mode — Mode is
+// only meaningful after Allows returned true, and the default (passthrough, or the configured knob)
+// is the safe fallback.
 func (a *Allowlist) Mode(host string) string {
 	h := strings.ToLower(host)
 	if m, ok := a.exact[h]; ok {
@@ -153,7 +170,7 @@ func (a *Allowlist) Mode(host string) string {
 	if a.all {
 		return a.allMode
 	}
-	return modePassthrough
+	return a.defMode
 }
 
 func (a *Allowlist) describe() string {
@@ -163,5 +180,5 @@ func (a *Allowlist) describe() string {
 	if len(a.exact)+len(a.suffix)+len(a.cidrs) == 0 {
 		return "allowlist: EMPTY — fail-closed, all egress denied"
 	}
-	return fmt.Sprintf("allowlist: %d exact, %d suffix, %d cidr", len(a.exact), len(a.suffix), len(a.cidrs))
+	return fmt.Sprintf("allowlist: %d exact, %d suffix, %d cidr (default mode %s for unmarked entries)", len(a.exact), len(a.suffix), len(a.cidrs), a.defMode)
 }

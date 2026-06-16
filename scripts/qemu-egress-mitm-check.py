@@ -84,17 +84,18 @@ try:
     run("systemctl daemon-reload 2>&1"); run("systemctl restart bulkhead-router.service 2>&1"); run("sleep 2; true")
     check("RSTATE=active" in run("echo RSTATE=$(systemctl is-active bulkhead-router.service)"), "router restarted (mockchat backend), stable")
 
-    def set_proxy(mode, tls_ports="8443"):
-        # allowlist 127.0.0.1 with <mode>, opt 127/8 past the internal-IP deny, mark <tls_ports> the TLS
-        # port set, and trust mockchat #2's cert as an upstream root (so the proxy verifies the real
-        # upstream). tls_ports defaults to 8443 (the fetch port); ARM 3 passes a port that EXCLUDES 8443
-        # so an inspect-marked host becomes non-terminable.
+    def set_proxy(mode, tls_ports="8443", default_mode=""):
+        # allowlist 127.0.0.1 with <mode> (empty = UNMARKED), opt 127/8 past the internal-IP deny, mark
+        # <tls_ports> the TLS port set, optionally set the default-mode knob, and trust mockchat #2's
+        # cert as an upstream root. tls_ports defaults to 8443 (the fetch port); ARM 3 passes a port that
+        # EXCLUDES 8443 so an inspect host is non-terminable; ARM 4 leaves the entry UNMARKED + knob=inspect.
         run(f"printf '127.0.0.1 {mode}\\n' > /run/egress-allow-test.conf")
         run("mkdir -p /run/systemd/system/bulkhead-egress-proxy.service.d")
         run("printf '[Service]\\n"
             "Environment=BULKHEAD_EGRESS_ALLOWLIST=/run/egress-allow-test.conf\\n"
             "Environment=BULKHEAD_EGRESS_ALLOW_INTERNAL_CIDRS=127.0.0.0/8\\n"
             f"Environment=BULKHEAD_EGRESS_TLS_PORTS={tls_ports}\\n"
+            f"Environment=BULKHEAD_EGRESS_DEFAULT_MODE={default_mode}\\n"
             "Environment=BULKHEAD_EGRESS_UPSTREAM_ROOTS=/run/mockchat-cert.pem\\n'"
             " > /run/systemd/system/bulkhead-egress-proxy.service.d/50-test.conf")
         run("systemctl daemon-reload 2>&1"); run("systemctl restart bulkhead-egress-proxy.service 2>&1"); run("sleep 1; true")
@@ -157,6 +158,25 @@ try:
           "[R4] NO new inspect AND NO new passthrough record — the host was never spliced (fail CLOSED, not fail open)")
     va4 = run(f"bulkhead-collector verify-audit {CHAIN} 2>&1; echo VA=$?", t=30)
     check("VA=0" in va4 and "domain: egress-proxy" in va4, "[R4] egress chain still verifies signed after the fail-closed deny")
+
+    # ===== ARM 4 (ADR-0034 inc2 sub-B): the BULKHEAD_EGRESS_DEFAULT_MODE=inspect knob. The allowlist
+    #       entry is UNMARKED, but the default-mode knob makes it `inspect` — so the host is
+    #       TLS-terminated + content-inspected exactly as an explicit `inspect` entry would be. This is
+    #       the high-assurance "inspect everything (that can be terminated)" posture, the natural
+    #       completion of R4 (which made an un-terminable inspect host fail closed). =====
+    insp_b5 = n(count("inspect"), "CNT")
+    set_proxy("", tls_ports="8443", default_mode="inspect")  # UNMARKED 127.0.0.1 + the knob
+    check("active" in run("systemctl is-active bulkhead-egress-proxy.service 2>&1"), "[knob] proxy restarted: UNMARKED allowlist entry + BULKHEAD_EGRESS_DEFAULT_MODE=inspect")
+    sout5, jr5 = run_agent("mitmknob")
+    out("\n[knob agent journal]\n" + jr5)
+    check("SRC=0" in sout5, "[knob] confined agent reached FINAL (exit 0)")
+    check(bool(re.search(r"OK: fetch 127\.0\.0\.1:8443 -> HTTP 200", jr5)),
+          "[knob] agent fetched 8443 -> HTTP 200 through the TERMINATING proxy — the knob made the UNMARKED host inspect")
+    insp_a5 = n(count("inspect"), "CNT")
+    check(insp_b5 >= 0 and insp_a5 > insp_b5,
+          f"[knob] the unmarked host produced a Hook=inspect record ({insp_b5} -> {insp_a5}) — default-inspect is active, not passthrough")
+    va5 = run(f"bulkhead-collector verify-audit {CHAIN} 2>&1; echo VA=$?", t=30)
+    check("VA=0" in va5 and "domain: egress-proxy" in va5, "[knob] egress chain still verifies signed")
 
     run("systemctl stop mockchat-tls.service bulkhead-mockchat.service 2>&1; true")
     run("poweroff", t=20)
