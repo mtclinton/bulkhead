@@ -10,7 +10,7 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
 # deny (SSRF/metadata) — now with a COMPLETED deny-list (fec0::/10 site-local, reserved IPv4, NAT64/6to4
 # embedded-v4) after an adversarial review — bounded splice, and src/proxy/audit.go: an Ed25519-signed,
 # hash-chained "egress-proxy"-domain decision log (record-before-act, fail-closed allow).
-SRCREV = "6236cf684bb580c63d805b2d9b0c419392293a73"
+SRCREV = "f5a2ad2eb1c37d428d1ed57e05099eb9f5cf9a8f"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
