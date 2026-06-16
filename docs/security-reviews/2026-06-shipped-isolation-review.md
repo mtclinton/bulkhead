@@ -6,6 +6,9 @@ exploitable in the rootless config — see below); R5 accepted-and-deferred. The
 re-examined four adjacent boundaries (the audit-chain verifier, the Dual-LLM quarantine, the router
 model-routing leg, and the BPF-LSM action-auth enforce) and found them **gap-free** — so the pass
 covers the whole shipped isolation architecture, network and syscall halves, not only where it broke.
+A follow-up multi-agent adversarial audit (2026-06-16, see below) then found + **reverted** one HIGH
+(R6, a pipelining bypass in this session's OWN just-shipped method-allowlist), deferred one MED (R7,
+router denial-of-wallet), and saw 17 of 19 candidates refuted by independent skeptics.
 
 ## Scope
 
@@ -184,6 +187,49 @@ recorded so the review's scope is the whole picture, not only what broke:
   atomic and un-replayable (a single `CMPXCHG(1→0)` picks exactly one winner; a miss / TTL-lapse /
   corrupt count all fail closed to a normal deny). No gap found in the enforce design, verdict logic,
   cgroup identity, ratchet, or grant path.
+
+## Follow-up: multi-agent adversarial audit (2026-06-16)
+
+A second, deeper pass: 8 parallel adversarial auditors (proxy, broker, BPF-LSM, quarantine, router,
+audit-chain, substrate/units, build/supply-chain), with **each candidate finding adversarially
+REFUTED by an independent skeptic before being believed** — the R3 counterfactual discipline applied
+at scale. 19 candidates → **2 survived refutation, 17 were backstopped**.
+
+### R6 [HIGH] — the inspected-egress method allowlist was bypassable by HTTP/1.1 pipelining (fixed by revert)
+
+Found in code this same session had just shipped. The method allowlist
+(`BULKHEAD_EGRESS_INSPECT_METHODS`) checked the method only ONCE, against the first request line,
+inside `if !st.hdrParsed` of a raw byte relay. A compromised agent (the threat model) writes
+`GET /ok\r\n\r\nPOST /steal\r\n\r\n<secret>` into one terminated TLS record: `inspect()` sees
+method=GET, allows, and relays the whole buffer (POST + body) upstream — the check never sees the
+POST. Confirmed empirically against the real `inspect()`. A control a compromised agent trivially
+bypasses is a false guarantee, so the feature was **REVERTED** (`f5a2ad2`) rather than patched in
+place. A sound request-line rule engine requires the inspect path to become HTTP/1.1-aware (frame
+each request by Content-Length/Transfer-Encoding, rule-check per request, fail closed on un-parseable
+framing or non-HTTP/1.1) — recorded in ADR-0034 as the requirement for a correct re-attempt.
+
+### R7 [MED] — the router has no per-agent rate/spend cap (denial-of-wallet residual) — deferred
+
+The router's only denial-of-wallet control is the per-request TIER gate (downgrade-only route + the
+rune-length threshold to the paid path). Both are correct, but they gate one request's tier, not the
+VOLUME. A compromised agent reaching the router UDS with an attacker-controlled body can loop
+threshold-length, max-`max_tokens`, most-expensive-model requests — each a legitimate paid call — and
+nothing bounds the loop, so the operator's API bill grows without limit (the signed chain records
+every call but does not prevent the spend). Fix shape: a paid-path rate/spend bound (a token-bucket
+keyed on the UDS peer-credential, or a configurable paid-calls-per-window that fail-closes to 429).
+DEFERRED: the limit/window is a deployment POLICY choice (per-peer vs global, the threshold) — the
+owner's to set, not a mechanical default.
+
+### Refuted (17) — high-confidence assurance
+
+The other 17 candidates were backstopped by a harder layer: e.g. the runsc `/dev` tmpfs missing
+nosuid/noexec is mooted by the empty CapabilityBoundingSet (no CAP_MKNOD) + the rootless userns; the
+control-chain append-swallow (the R5 area) is gated by the 0660-root socket; a torn-tail re-anchor is
+the documented ADR-0026/0030 tail boundary; the RAUC no-downgrade hook is backstopped by rauc's
+native serial floor; HTTP/2 bypassing `parseHead` is mooted by the structural proxy-mediation
+(uninspected like passthrough — not a NEW exploit). That 17/19 candidates fell to independent
+skeptics is itself the assurance: the boundaries the first pass confirmed hold up under a second,
+adversarial, multi-perspective look.
 
 ## Verification posture
 
