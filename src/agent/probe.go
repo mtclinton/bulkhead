@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 	"unsafe"
@@ -104,6 +105,75 @@ func runEgressProbe() int {
 		report("IOURING", false, "io_uring_setup SUCCEEDED — a syscall-invisible I/O channel is reachable!")
 	default:
 		report("IOURING", false, fmt.Sprintf("io_uring_setup not seccomp-denied (errno %v)", errno))
+	}
+
+	return exitCode(ok)
+}
+
+// runRomountProbe is the security-review R3 live check (dispatched from main). Under the gVisor
+// substrate the two mediated UDS legs are bind-mounted READ-ONLY, so a sandboxed agent cannot
+// remove or replace the shared egress.sock — a cross-tier DoS that would deny every other tier its
+// only way out. From inside the runsc sandbox this verifies, on the egress leg:
+//
+//  1. CONNECT — a connect() to the egress proxy STILL works through the ro-mounted UDS (a socket
+//     inode is exempt from the read-only-mount write check, so mediated egress is unaffected);
+//  2. UNLINK  — unlink(2) of the egress socket FAILS with EROFS (the ro mount blocks removal);
+//  3. CREATE  — creating a new entry in the leg dir FAILS with EROFS (no rogue socket can be planted).
+//
+// It prints one "PROBE ROMOUNT-<name>: PASS|FAIL" line per check and returns 0 iff all pass.
+func runRomountProbe() int {
+	target := envOr("BULKHEAD_PROBE_TARGET", "127.0.0.1:8088")
+	sock := os.Getenv("BULKHEAD_EGRESS_SOCK")
+
+	ok := true
+	report := func(name string, pass bool, detail string) {
+		ok = ok && pass
+		state := "FAIL"
+		if pass {
+			state = "PASS"
+		}
+		fmt.Printf("PROBE ROMOUNT-%s: %s — %s\n", name, state, detail)
+	}
+
+	if sock == "" {
+		report("CONNECT", false, "BULKHEAD_EGRESS_SOCK unset — nothing to probe")
+		return exitCode(ok)
+	}
+
+	// 1. CONNECT — a connect through the ro-mounted UDS still works (the socket inode is exempt
+	//    from the RO-mount write check, so the agent keeps its mediated egress).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	conn, err := proxyDial(ctx, sock, target)
+	cancel()
+	if err == nil {
+		conn.Close()
+		report("CONNECT", true, fmt.Sprintf("%s reachable via the ro-mounted egress proxy UDS", target))
+	} else {
+		report("CONNECT", false, fmt.Sprintf("%s NOT reachable via the ro-mounted proxy UDS (%v)", target, err))
+	}
+
+	// 2. UNLINK — removing the shared socket must EROFS (this is the cross-tier DoS the ro mount closes).
+	switch err := os.Remove(sock); {
+	case errors.Is(err, syscall.EROFS):
+		report("UNLINK", true, fmt.Sprintf("unlink(%s) refused EROFS — the socket cannot be removed", sock))
+	case err == nil:
+		report("UNLINK", false, fmt.Sprintf("unlink(%s) SUCCEEDED — the shared socket was removed (cross-tier DoS!)", sock))
+	default:
+		report("UNLINK", false, fmt.Sprintf("unlink(%s) failed but not with EROFS (%v)", sock, err))
+	}
+
+	// 3. CREATE — planting a new entry in the leg dir must EROFS too (no rogue replacement socket).
+	dir := filepath.Dir(sock)
+	probe := filepath.Join(dir, "romount-probe")
+	switch f, err := os.Create(probe); {
+	case errors.Is(err, syscall.EROFS):
+		report("CREATE", true, fmt.Sprintf("create in %s refused EROFS — no rogue entry can be planted", dir))
+	case err == nil:
+		f.Close()
+		_ = os.Remove(probe)
+		report("CREATE", false, fmt.Sprintf("create in %s SUCCEEDED — the leg dir is writable!", dir))
+	default:
+		report("CREATE", false, fmt.Sprintf("create in %s failed but not with EROFS (%v)", dir, err))
 	}
 
 	return exitCode(ok)

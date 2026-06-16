@@ -39,6 +39,13 @@ func main() {
 		os.Exit(runEgressProbe())
 	}
 
+	// `bulkhead-agent probe-romount` is the security-review R3 live vehicle: under the gVisor
+	// substrate the mediated UDS legs are bind-mounted read-only, so from inside the sandbox a
+	// connect() still works but unlink/create of the shared socket EROFS — closing a cross-tier DoS.
+	if len(os.Args) >= 2 && os.Args[1] == "probe-romount" {
+		os.Exit(runRomountProbe())
+	}
+
 	inst := "?"
 	if len(os.Args) >= 2 {
 		inst = os.Args[1]

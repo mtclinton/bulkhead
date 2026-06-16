@@ -6,6 +6,11 @@
 # ProtectSystem=strict). So this builds a minimal rootfs (only the agent binary + the two UDS legs
 # bind-mounted in) and runs the real agent loop under `runsc run`, with both mediated channels intact.
 # Proves the secure production form works before it is packaged into a recipe/wrapper/systemd unit.
+#
+# security-review R3: the two UDS legs are bind-mounted READ-ONLY (matching the launcher). The agent
+# loop reaching HTTP 200 proves connect() still works through a ro-mounted socket under gVisor (a
+# socket inode is exempt from the RO-mount write check); a follow-up `probe-romount` run then proves
+# unlink/create of the shared egress.sock is refused EROFS — closing a cross-tier socket-unlink DoS.
 # Boots the wic (slirp); stdlib + pexpect.
 import pexpect, sys, os, re
 BUILD = "/home/work/ideas/bulkhead/yocto/build"
@@ -31,9 +36,14 @@ CONFIG = ('{"ociVersion":"1.0.0","process":{"user":{"uid":0,"gid":0},'
     '{"destination":"/dev","type":"tmpfs","source":"tmpfs"},'
     '{"destination":"/sys","type":"sysfs","source":"sysfs","options":["nosuid","noexec","nodev","ro"]},'
     '{"destination":"/usr/bin/bulkhead-agent","type":"bind","source":"/usr/bin/bulkhead-agent","options":["bind","ro"]},'
-    '{"destination":"/run/bulkhead-egress","type":"bind","source":"/run/bulkhead-egress","options":["bind","rw"]},'
-    '{"destination":"/run/bulkhead-router","type":"bind","source":"/run/bulkhead-router","options":["bind","rw"]}],'
+    '{"destination":"/run/bulkhead-egress","type":"bind","source":"/run/bulkhead-egress","options":["bind","ro"]},'
+    '{"destination":"/run/bulkhead-router","type":"bind","source":"/run/bulkhead-router","options":["bind","ro"]}],'
     '"linux":{"namespaces":[{"type":"pid"},{"type":"network"},{"type":"ipc"},{"type":"uts"},{"type":"mount"}]}}')
+# security-review R3: the SAME bundle, but the agent runs `probe-romount` — from inside the ro-leg
+# sandbox it confirms connect() still works yet unlink/create of the shared egress.sock EROFS.
+CONFIG_ROM = (CONFIG
+    .replace('"args":["/usr/bin/bulkhead-agent","runscjob"]', '"args":["/usr/bin/bulkhead-agent","probe-romount"]')
+    .replace('"BULKHEAD_AGENT_TASK=FETCH-ONLY run"', '"BULKHEAD_PROBE_TARGET=127.0.0.1:8088"'))
 try:
     child = pexpect.spawn("/bin/bash", ["-c", inner], timeout=300, encoding="utf-8", codec_errors="replace")
     child.logfile_read = sys.stdout
@@ -85,14 +95,32 @@ try:
     check(bool(re.search(r"agent\[runscjob\]: DONE", ro)),
           "the agent loop ran under `runsc run` (minimal rootfs) and reached DONE — model leg over the router UDS worked")
     check("OK: fetch 127.0.0.1:8088 -> HTTP 200" in ro,
-          "the web leg worked: the fetch went THROUGH the egress proxy (HTTP 200) from inside the runsc-run sandbox")
+          "R3: the web leg worked THROUGH the READ-ONLY egress UDS mount (HTTP 200) — connect() on a ro socket mount under gVisor is unaffected")
     na = re.search(r"NA=(\d+)", run(f"echo NA=$(grep -c '\"hook\":\"connect\"' {chain} 2>/dev/null || echo 0)"))
     nafter = int(na.group(1)) if na else -1
     va = run(f"bulkhead-collector verify-audit {chain} 2>&1; echo VA_RC=$?", t=30)
     check(nbefore >= 0 and nafter > nbefore, f"the runsc-run agent's egress was SIGNED into the chain ({nbefore} -> {nafter})")
     check("VA_RC=0" in va and "domain: egress-proxy" in va, "the egress chain still verifies signed")
-
     run("runsc --rootless --ignore-cgroups delete -force runscjob 2>/dev/null; true")
+
+    # ===== security-review R3: re-run the SAME ro-leg bundle as `probe-romount`. The legs are mounted
+    #       read-only, so from inside the sandbox a connect() still works but unlink/create of the
+    #       shared egress.sock must EROFS — a sandboxed agent cannot DoS the other tiers by removing
+    #       the one socket they all egress through. (The agent loop above already proved egress works
+    #       on the ro mount; this proves the write surface is genuinely closed under gVisor.) =====
+    run("rm -f /run/oci/config.json")
+    for i in range(0, len(CONFIG_ROM), 480):
+        run(f"printf '%s' '{CONFIG_ROM[i:i+480]}' >> /run/oci/config.json")
+    rom = run("runsc --host-uds=open --rootless --ignore-cgroups --platform=systrap --network=none "
+              "run -bundle /run/oci runscrom 2>&1; echo ROM_RC=$?", t=120)
+    out(f"\n[runsc run — probe-romount in the ro-leg sandbox]\n{rom}\n")
+    check("PROBE ROMOUNT-CONNECT: PASS" in rom,
+          "R3: connect() to the egress proxy STILL works through the ro-mounted UDS (mediated egress unaffected)")
+    check("PROBE ROMOUNT-UNLINK: PASS" in rom,
+          "R3: unlink(egress.sock) is refused EROFS — a sandboxed agent cannot remove the shared socket (cross-tier DoS closed)")
+    check("PROBE ROMOUNT-CREATE: PASS" in rom,
+          "R3: creating an entry in the egress leg dir is refused EROFS — no rogue replacement socket can be planted")
+    run("runsc --rootless --ignore-cgroups delete -force runscrom 2>/dev/null; true")
     run("systemctl stop bulkhead-mockchat.service 2>&1")
     run("poweroff", t=20)
 except Exception as e:
