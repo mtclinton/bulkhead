@@ -7,10 +7,14 @@
 # bind-mounted in) and runs the real agent loop under `runsc run`, with both mediated channels intact.
 # Proves the secure production form works before it is packaged into a recipe/wrapper/systemd unit.
 #
-# security-review R3: the two UDS legs are bind-mounted READ-ONLY (matching the launcher). The agent
-# loop reaching HTTP 200 proves connect() still works through a ro-mounted socket under gVisor (a
-# socket inode is exempt from the RO-mount write check); a follow-up `probe-romount` run then proves
-# unlink/create of the shared egress.sock is refused EROFS — closing a cross-tier socket-unlink DoS.
+# security-review R3: the two UDS legs are bind-mounted READ-ONLY (matching the launcher) as a
+# least-privilege / defense-in-depth measure. The agent loop reaching HTTP 200 proves connect() still
+# works through a ro-mounted socket under gVisor. A `probe-romount` run then shows a sandboxed agent
+# cannot unlink/replace the shared egress.sock — BUT the rw counterfactual shows the write is refused
+# EVEN with the leg mounted rw. So the load-bearing control is the rootless user-namespace DAC (runsc's
+# gofer maps to host-nobody for the proxy-owned, mode-0755 leg dir, so it cannot write it regardless of
+# the mount flag); the ro mount is a SECOND layer that only becomes load-bearing for a non-rootless /
+# root-gofer tier. (gVisor surfaces the refusal as EACCES/EPERM, not Linux's EROFS.)
 # Boots the wic (slirp); stdlib + pexpect.
 import pexpect, sys, os, re
 BUILD = "/home/work/ideas/bulkhead/yocto/build"
@@ -111,11 +115,11 @@ try:
     check("VA_RC=0" in va and "domain: egress-proxy" in va, "the egress chain still verifies signed")
     run("runsc --rootless --ignore-cgroups delete -force runscjob 2>/dev/null; true")
 
-    # ===== security-review R3: re-run the SAME ro-leg bundle as `probe-romount`. The legs are mounted
-    #       read-only, so from inside the sandbox a connect() still works but unlink/create of the
-    #       shared egress.sock must EROFS — a sandboxed agent cannot DoS the other tiers by removing
-    #       the one socket they all egress through. (The agent loop above already proved egress works
-    #       on the ro mount; this proves the write surface is genuinely closed under gVisor.) =====
+    # ===== security-review R3: re-run the SAME ro-leg bundle as `probe-romount`. From inside the
+    #       sandbox a connect() still works but unlink/create of the shared egress.sock is REFUSED — a
+    #       sandboxed agent cannot DoS the other tiers by removing the one socket they all egress
+    #       through. (The agent loop above already proved egress works on the ro mount; this shows the
+    #       write surface is closed. The rw counterfactual below then attributes WHICH layer closes it.) =====
     run("rm -f /run/oci/config.json")
     for i in range(0, len(CONFIG_ROM), 480):
         run(f"printf '%s' '{CONFIG_ROM[i:i+480]}' >> /run/oci/config.json")
@@ -124,28 +128,32 @@ try:
     out(f"\n[runsc run — probe-romount in the ro-leg sandbox]\n{rom}\n")
     check("PROBE ROMOUNT-CONNECT: OK" in rom,
           "R3: connect() to the egress proxy STILL works through the ro-mounted UDS (mediated egress unaffected)")
-    # gVisor surfaces a read-only-mount write as EACCES/EPERM (not Linux's EROFS) — accept any REFUSED-*.
+    # gVisor surfaces a refused write as EACCES/EPERM (not Linux's EROFS) — accept any REFUSED-*.
     check("PROBE ROMOUNT-UNLINK: REFUSED" in rom,
-          "R3: unlink(egress.sock) is REFUSED — a sandboxed agent cannot remove the shared socket (cross-tier DoS closed)")
+          "R3: unlink(egress.sock) is REFUSED — a sandboxed agent cannot remove the shared socket (cross-tier DoS blocked)")
     check("PROBE ROMOUNT-CREATE: REFUSED" in rom,
           "R3: creating an entry in the egress leg dir is REFUSED — no rogue replacement socket can be planted")
     run("runsc --rootless --ignore-cgroups delete -force runscrom 2>/dev/null; true")
 
-    # COUNTERFACTUAL: re-run the SAME leg dir mounted READ-WRITE (sock unset -> CREATE-only, never
-    # touches the real socket). The write the ro mount just refused is ALLOWED here, proving the ro
-    # mount is what closes the DoS — not a host-DAC accident that would have blocked rw too.
+    # COUNTERFACTUAL — attribute the refusal to a LAYER. Re-run the SAME leg dir mounted READ-WRITE
+    # (sock unset -> CREATE-only, never touches the real socket). The write is refused EVEN with rw:
+    # so the load-bearing control is the rootless user-namespace DAC (the gofer maps to host-nobody for
+    # the proxy-owned mode-0755 leg dir and cannot write it regardless of the mount flag). The ro mount
+    # is genuine least-privilege / defense-in-depth, but it only becomes load-bearing for a tier whose
+    # gofer runs as real root (non-rootless) — where the userns remap would not apply. This is the
+    # honest finding: the cross-tier DoS was NOT exploitable in the rootless config; ro hardens anyway.
     run("rm -f /run/oci/config.json")
     for i in range(0, len(CONFIG_RW), 480):
         run(f"printf '%s' '{CONFIG_RW[i:i+480]}' >> /run/oci/config.json")
     rw = run("runsc --host-uds=open --rootless --ignore-cgroups --platform=systrap --network=none "
              "run -bundle /run/oci runscrw 2>&1; echo RW_RC=$?", t=120)
     out(f"\n[runsc run — probe-romount counterfactual, leg dir mounted RW]\n{rw}\n")
-    check("PROBE ROMOUNT-CREATE: ALLOWED" in rw,
-          "R3 counterfactual: with the leg dir mounted RW the same CREATE SUCCEEDS — the ro mount is causally what refuses it (the finding was real)")
+    check("PROBE ROMOUNT-CREATE: REFUSED" in rw,
+          "R3 attribution: the cross-tier write is REFUSED even with the leg mounted RW — the rootless userns DAC (gofer = host-nobody for the proxy-owned leg dir) is the load-bearing control; the ro mount is defense-in-depth (load-bearing only for a non-rootless/root-gofer tier)")
     run("runsc --rootless --ignore-cgroups delete -force runscrw 2>/dev/null; true")
-    # the counterfactual must NOT have left its probe file behind in the real leg dir.
+    # the rw write was refused, so nothing should have been planted in the real leg dir either.
     check("LEFT=no" in run("echo LEFT=$([ -e /run/bulkhead-egress/romount-probe ] && echo yes || echo no)"),
-          "R3 counterfactual cleaned up — no stray file left in the live egress leg dir")
+          "no stray file left in the live egress leg dir (the rw write was refused too)")
     run("systemctl stop bulkhead-mockchat.service 2>&1")
     run("poweroff", t=20)
 except Exception as e:

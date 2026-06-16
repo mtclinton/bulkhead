@@ -111,10 +111,12 @@ func runEgressProbe() int {
 }
 
 // runRomountProbe is the security-review R3 live check (dispatched from main). Under the gVisor
-// substrate the two mediated UDS legs are bind-mounted READ-ONLY, so a sandboxed agent cannot remove
-// or replace the shared egress.sock — a cross-tier DoS that would deny every other tier its only way
-// out. From inside the runsc sandbox it REPORTS the outcome of three writes (the harness judges them
-// against the mount mode, so the same binary serves both the ro test and the rw counterfactual):
+// substrate the two mediated UDS legs are bind-mounted READ-ONLY (defense-in-depth): a sandboxed
+// agent must not be able to remove or replace the shared egress.sock — a cross-tier DoS that would
+// deny every other tier its only way out. From inside the runsc sandbox it REPORTS the outcome of
+// three writes; the HARNESS judges them against the mount mode and attributes which layer refuses
+// them (the rootless userns DAC, or the ro mount — see verify-runsc-run). The same binary serves both
+// the ro test and the rw counterfactual:
 //
 //	ROMOUNT-CONNECT — a connect() to the egress proxy through the UDS (OK|FAIL);
 //	ROMOUNT-UNLINK  — unlink(2) of the egress socket (ALLOWED|REFUSED-*) — the literal DoS;

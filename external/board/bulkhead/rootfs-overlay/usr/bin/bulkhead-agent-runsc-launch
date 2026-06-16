@@ -8,10 +8,12 @@
 #     for free (ADR-0033 ban from the substrate, no per-jail seccomp);
 #   - --network=none gives no direct egress; the agent's ONLY ways out are the two mediated UDS legs,
 #     reached across the Sentry via --host-uds=open (the host proxy/router make the actual I/O). Those
-#     legs are bind-mounted READ-ONLY: a connect() to the proxy/router socket still works (a socket
-#     inode is exempt from the read-only-mount write check — Linux sb_permission only EROFS-es reg/
-#     dir/symlink), but the agent CANNOT unlink/replace the shared egress.sock out from under the other
-#     tiers — closing a cross-tier socket-unlink DoS (security-review R3);
+#     legs are bind-mounted READ-ONLY (least-privilege / defense-in-depth): a connect() to the socket
+#     still works, but the agent has no business WRITING the shared leg dir. In THIS rootless config a
+#     cross-tier socket-unlink DoS is already blocked by the user-namespace DAC (the gofer maps to
+#     host-nobody for the proxy-owned mode-0755 leg dir, so it cannot write it regardless of the mount
+#     flag); ro makes that hold even for a non-rootless / root-gofer tier where the userns remap would
+#     not apply (security-review R3 — live-ATTRIBUTED to the userns layer in verify-runsc-run);
 #   - the task rides a 0400 credential (file CONTENT, never JSON/unit syntax — injection-safe,
 #     reusing ADR-0015's credential channel).
 set -eu
