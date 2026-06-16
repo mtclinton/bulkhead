@@ -190,6 +190,22 @@ func (p *Proxy) handleConn(c net.Conn) {
 		return
 	}
 
+	// inc2 (ADR-0034) disposition is decided BEFORE we dial/record, because an inspect-marked
+	// destination we cannot actually terminate must fail CLOSED — not dial out and sign a misleading
+	// "allow". An operator who marks a host `inspect` is asking to see inside it; they get either a
+	// TLS-terminated, content-inspected channel or a refusal. A missing re-signing CA (p.mitm==nil)
+	// or a non-TLS port we cannot terminate therefore DENIES, rather than silently splicing the host
+	// through uninspected — without this, a CA that failed to load downgraded EVERY inspect host to
+	// opaque passthrough. A destination meant to ride opaque must be marked `pinned`/passthrough, not
+	// `inspect`. (security-review R4.)
+	mode := p.allow.Mode(host)
+	if mode == modeInspect && !(p.mitm != nil && p.tlsPorts[port]) {
+		logd("DENY", host, port, "inspect-unavailable")
+		p.record(host, port, "deny", "inspect-unavailable")
+		writeReply(c, "ERR denied")
+		return
+	}
+
 	// Resolve + connect on the HOST (the guest has no resolver). The destination is the
 	// exact (host, port) the allowlist just approved — one parse, no second interpretation.
 	_ = c.SetReadDeadline(time.Time{})
@@ -217,22 +233,19 @@ func (p *Proxy) handleConn(c net.Conn) {
 	}
 	logd("ALLOW", host, port, up.RemoteAddr().String())
 
-	// inc2 (ADR-0034) disposition for this allowed destination. An inspect-marked entry on a TLS
-	// port, with a re-signing CA loaded, is TLS-terminated + content-inspected (terminate replies
-	// OK itself). Everything else — passthrough/pinned, a non-TLS port, or no CA — takes the inc1
-	// opaque splice, but is FIRST recorded as an explicit uninspected channel so the signed chain
-	// is an honest coverage ledger (Hook=inspect vs Hook=passthrough = the body-inspected fraction).
-	mode := p.allow.Mode(host)
-	if mode == modeInspect && p.mitm != nil && p.tlsPorts[port] {
+	// inc2 (ADR-0034) disposition for this allowed destination. An inspect-marked entry reached here
+	// ONLY with a re-signing CA loaded on a TLS port (the fail-closed check above guaranteed it), so
+	// it is TLS-terminated + content-inspected (terminate replies OK itself). Everything else —
+	// passthrough or pinned — takes the inc1 opaque splice, but is FIRST recorded as an explicit
+	// uninspected channel so the signed chain is an honest coverage ledger (Hook=inspect vs
+	// Hook=passthrough = the body-inspected fraction).
+	if mode == modeInspect {
 		p.terminate(c, up, host, port)
 		return
 	}
 	reason := "default"
-	switch {
-	case mode == modePinned:
+	if mode == modePinned {
 		reason = "pinned" // MITM would break this (cert-pinned/mTLS); deliberately uninspected
-	case mode == modeInspect:
-		reason = "inspect-unavailable" // inspect requested but no CA / non-TLS port
 	}
 	if p.audit != nil {
 		if err := p.audit.recordPassthrough(host, port, reason); err != nil {

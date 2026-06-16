@@ -328,6 +328,84 @@ func TestHandleConnRecordsToChain(t *testing.T) {
 	}
 }
 
+// TestHandleConnInspectUnavailableDenies (security-review R4): a host the operator marked `inspect`
+// but which cannot be TLS-terminated here (no re-signing CA loaded — p.mitm==nil) must FAIL CLOSED.
+// The CONNECT is refused and the chain signs a SINGLE deny (reason=inspect-unavailable), not the old
+// allow+passthrough that silently spliced the host through uninspected; the upstream is never dialed.
+func TestHandleConnInspectUnavailableDenies(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	dialed := make(chan struct{}, 1)
+	go func() {
+		for {
+			c, e := echo.Accept()
+			if e != nil {
+				return
+			}
+			select {
+			case dialed <- struct{}{}:
+			default:
+			}
+			c.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(echo.Addr().String())
+
+	dir := t.TempDir()
+	// inspect-marked, but NewProxy below loads NO re-signing CA, so it cannot terminate -> must deny.
+	al, _ := LoadAllowlist(writeFile(t, dir, "127.0.0.1 inspect\n"))
+	_, loop, _ := net.ParseCIDR("127.0.0.0/8")
+	audit := newTestAuditLog(t, filepath.Join(dir, "provenance.jsonl"))
+	p := NewProxy(al, []*net.IPNet{loop}, audit)
+	if p.mitm != nil {
+		t.Fatal("precondition: this test needs a proxy with no MITM CA")
+	}
+
+	sock := filepath.Join(dir, "egress.sock")
+	ln, _ := net.Listen("unix", sock)
+	defer ln.Close()
+	go func() {
+		for {
+			c, e := ln.Accept()
+			if e != nil {
+				return
+			}
+			go p.handleConn(c)
+		}
+	}()
+
+	c, _ := net.Dial("unix", sock)
+	fmt.Fprintf(c, "CONNECT 127.0.0.1:%s\n", port)
+	if reply, _ := bufio.NewReader(c).ReadString('\n'); !strings.HasPrefix(strings.TrimSpace(reply), "ERR denied") {
+		t.Fatalf("inspect-unavailable: want ERR denied, got %q", reply)
+	}
+	c.Close()
+	audit.Close()
+
+	// Fail closed means BEFORE any dial: the upstream echo must never have accepted a connection.
+	select {
+	case <-dialed:
+		t.Fatal("upstream was dialed for an inspect-unavailable host — must fail closed before dial")
+	default:
+	}
+
+	data, _ := os.ReadFile(filepath.Join(dir, "provenance.jsonl"))
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("want exactly 1 chain record (a single deny), got %d: %s", len(lines), data)
+	}
+	var deny auditRecord
+	json.Unmarshal([]byte(lines[0]), &deny)
+	if deny.Decision != "deny" ||
+		!strings.Contains(deny.Mode, fmt.Sprintf("dst=127.0.0.1:%s", port)) ||
+		!strings.Contains(deny.Mode, "inspect-unavailable") {
+		t.Fatalf("inspect-unavailable deny record wrong: %+v", deny)
+	}
+}
+
 // End-to-end: an allowed CONNECT reaches a host-side echo server through the proxy; a
 // non-allowlisted destination is refused before any dial.
 func TestProxyEndToEnd(t *testing.T) {
