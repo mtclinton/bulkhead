@@ -150,6 +150,12 @@ verify-runsc-egress:
 verify-runsc-agent:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-agent-check.py
 
+# Yocto: ADR-0031 substrate integration, slice 5. The PRODUCTION runtime form: `runsc run` over an OCI
+# bundle with a MINIMAL rootfs (only the agent binary + the two UDS legs bind-mounted, the host fs is
+# NOT exposed). Runs a real agent loop, both legs mediated, egress signed. Needs a built wic.
+verify-runsc-run:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-run-check.py
+
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
 # reboots to prove the rollback to A. Needs a built wic AND bundle (bitbake bulkhead-image
