@@ -48,6 +48,18 @@ websockets; the curated, audited pinned-cert/mTLS passthrough exception list (th
 below); a `BULKHEAD_EGRESS_DEFAULT_MODE=inspect` knob for high-assurance tiers; leaf-cache bounding +
 an audit-chain volume review.
 
+**Post-ship security review (2026-06-16).** An adversarial review of the shipped egress boundary
+closed two wiring gaps (record: `docs/security-reviews/2026-06-shipped-isolation-review.md`).
+**R1** — the proxy now `Requires=` the fail-closed audit gate; it was only `Before=`-ordered after
+the chain verifier, which does NOT propagate failure, so a forged `/data` chain refused the TCB
+collector but still granted untrusted web egress. A tampered chain now fail-closes the proxy and
+transitively every confined/runsc agent that `Requires=` it. **R4** — an `inspect`-marked host the
+proxy cannot TLS-terminate (no re-signing CA loaded, or a non-TLS port) now DENIES instead of
+silently splicing through uninspected; previously a failed CA load downgraded EVERY inspect host to
+opaque passthrough. The disposition is decided before the dial, so the deny signs a single
+`inspect-unavailable` record and never reaches upstream. Live-verified: `make verify-egress-gate`
+(R1) and `make verify-egress-mitm` ARM 3 (R4); bundled into `make verify-security-review`.
+
 Decided/known inc1 simplifications to revisit: the proxy & router UDS are `0666` (the agent
 is a distinct DynamicUser; group-gating to a static `bulkhead-egress` group is a hardening
 follow-up — the boundary is the netns, not the socket mode). Shipped since this ADR was first

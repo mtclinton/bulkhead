@@ -62,6 +62,15 @@ The delegation-chain half of this topology is shipped (ADR-0006/0015 delegation 
 
 This bounds **resource** re-aggregation structurally. The "Authority re-aggregation across a delegation chain" residual above is specifically the chain's aggregate **intent** being illegitimate even when every hop is individually resource-authorized — that remains a model-layer problem the OS cannot decide, correctly un-fixed.
 
+**Post-ship security review (2026-06-16) — R2.** The "Children are `NO_EXPAND`" claim above had a
+wiring gap: `NO_EXPAND` was enforced only as an `Environment=` flag inside the UNTRUSTED agent
+runtime, which a compromised child bypasses by exec'ing `bulkhead-collector expand` (or writing
+`EXPAND` to the broker socket) directly. The broker's `handleExpandTail` now refuses `EXPAND` from
+any child whose kernel-attested cgroup path has delegation generation > 0 — the same un-spoofable
+signal the depth cap trusts — so the self-widen cap is enforced in the TCB, not the jail. Unit-tested
+(`TestExpandRefusedForDelegatedChild`) + no-regression on `make verify-agent-orch`. Record:
+`docs/security-reviews/2026-06-shipped-isolation-review.md`.
+
 ## Confidence & open questions
 
 Moderate-to-high on the topology decision; the underlying report verified 26/31 claims [#25], lower than most of the corpus, so the delegation-attack taxonomy is solid but not exhaustively sourced. Open questions: (1) the concrete authority token format and its attenuation semantics across hops; (2) whether bulkhead enforces a maximum delegation depth or per-chain authority budget to bound re-aggregation, given the OS cannot decide it semantically; (3) how mediated IPC interacts with the quarantine boundary of ADR-0036 when a quarantined (Q-LLM) agent delegates.
