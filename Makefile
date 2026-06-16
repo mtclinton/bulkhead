@@ -163,6 +163,12 @@ verify-runsc-run:
 verify-runsc-unit:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-unit-check.py
 
+# Yocto: capstone — the two flagship defenses compose. An ADR-0036 CaMeL-quarantine agent run UNDER
+# the ADR-0031 gVisor substrate: a prompt injection in fetched content is inert (control-flow
+# integrity) AND the agent runs under host-surface collapse (kernel 4.4.0), egress still signed.
+verify-runsc-quarantine:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-quarantine-check.py
+
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
 # reboots to prove the rollback to A. Needs a built wic AND bundle (bitbake bulkhead-image
