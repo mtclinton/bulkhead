@@ -111,72 +111,72 @@ func runEgressProbe() int {
 }
 
 // runRomountProbe is the security-review R3 live check (dispatched from main). Under the gVisor
-// substrate the two mediated UDS legs are bind-mounted READ-ONLY, so a sandboxed agent cannot
-// remove or replace the shared egress.sock — a cross-tier DoS that would deny every other tier its
-// only way out. From inside the runsc sandbox this verifies, on the egress leg:
+// substrate the two mediated UDS legs are bind-mounted READ-ONLY, so a sandboxed agent cannot remove
+// or replace the shared egress.sock — a cross-tier DoS that would deny every other tier its only way
+// out. From inside the runsc sandbox it REPORTS the outcome of three writes (the harness judges them
+// against the mount mode, so the same binary serves both the ro test and the rw counterfactual):
 //
-//  1. CONNECT — a connect() to the egress proxy STILL works through the ro-mounted UDS (a socket
-//     inode is exempt from the read-only-mount write check, so mediated egress is unaffected);
-//  2. UNLINK  — unlink(2) of the egress socket FAILS with EROFS (the ro mount blocks removal);
-//  3. CREATE  — creating a new entry in the leg dir FAILS with EROFS (no rogue socket can be planted).
+//	ROMOUNT-CONNECT — a connect() to the egress proxy through the UDS (OK|FAIL);
+//	ROMOUNT-UNLINK  — unlink(2) of the egress socket (ALLOWED|REFUSED-*) — the literal DoS;
+//	ROMOUNT-CREATE  — creating a new entry in the probed leg dir (ALLOWED|REFUSED-*).
 //
-// It prints one "PROBE ROMOUNT-<name>: PASS|FAIL" line per check and returns 0 iff all pass.
+// Note gVisor reports a read-only-mount write as EACCES/EPERM, not Linux's EROFS — either is a
+// refusal that closes the DoS (so the harness accepts any REFUSED-*). CONNECT (egress.sock) and the
+// probed dir (BULKHEAD_ROMOUNT_DIR, default = the sock's dir) are decoupled so the rw counterfactual
+// can probe the SAME leg dir mounted rw with the sock unset — proving a write there is otherwise
+// allowed, hence the ro mount is what refuses it. Always exits 0; the harness owns pass/fail.
 func runRomountProbe() int {
 	target := envOr("BULKHEAD_PROBE_TARGET", "127.0.0.1:8088")
 	sock := os.Getenv("BULKHEAD_EGRESS_SOCK")
+	dir := os.Getenv("BULKHEAD_ROMOUNT_DIR")
+	if dir == "" && sock != "" {
+		dir = filepath.Dir(sock)
+	}
 
-	ok := true
-	report := func(name string, pass bool, detail string) {
-		ok = ok && pass
-		state := "FAIL"
-		if pass {
-			state = "PASS"
+	if sock != "" {
+		// CONNECT — a mediated connect still works through the (ro) UDS mount.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := proxyDial(ctx, sock, target)
+		cancel()
+		if err == nil {
+			conn.Close()
+			fmt.Printf("PROBE ROMOUNT-CONNECT: OK — %s reachable via the egress proxy UDS\n", target)
+		} else {
+			fmt.Printf("PROBE ROMOUNT-CONNECT: FAIL — %s not reachable (%v)\n", target, err)
 		}
-		fmt.Printf("PROBE ROMOUNT-%s: %s — %s\n", name, state, detail)
+		// UNLINK — removing the shared socket is the literal cross-tier DoS. (Skipped when sock is
+		// unset, as in the rw counterfactual, so it never deletes the real socket.)
+		fmt.Printf("PROBE ROMOUNT-UNLINK: %s — unlink(%s)\n", romountOutcome(os.Remove(sock)), sock)
 	}
 
-	if sock == "" {
-		report("CONNECT", false, "BULKHEAD_EGRESS_SOCK unset — nothing to probe")
-		return exitCode(ok)
+	// CREATE — planting any new entry in the leg dir (a rogue replacement socket). Non-destructive:
+	// the temp file is removed if it was created. UNLINK-of-sock and CREATE both need write on the
+	// SAME dir, so CREATE-refused already implies the existing sock cannot be unlinked either.
+	if dir != "" {
+		probe := filepath.Join(dir, "romount-probe")
+		f, err := os.Create(probe)
+		if err == nil {
+			f.Close()
+			_ = os.Remove(probe)
+		}
+		fmt.Printf("PROBE ROMOUNT-CREATE: %s — create(%s)\n", romountOutcome(err), probe)
 	}
+	return 0
+}
 
-	// 1. CONNECT — a connect through the ro-mounted UDS still works (the socket inode is exempt
-	//    from the RO-mount write check, so the agent keeps its mediated egress).
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	conn, err := proxyDial(ctx, sock, target)
-	cancel()
-	if err == nil {
-		conn.Close()
-		report("CONNECT", true, fmt.Sprintf("%s reachable via the ro-mounted egress proxy UDS", target))
-	} else {
-		report("CONNECT", false, fmt.Sprintf("%s NOT reachable via the ro-mounted proxy UDS (%v)", target, err))
-	}
-
-	// 2. UNLINK — removing the shared socket must EROFS (this is the cross-tier DoS the ro mount closes).
-	switch err := os.Remove(sock); {
-	case errors.Is(err, syscall.EROFS):
-		report("UNLINK", true, fmt.Sprintf("unlink(%s) refused EROFS — the socket cannot be removed", sock))
+// romountOutcome classifies a write attempt. gVisor surfaces a read-only-mount write as EACCES/EPERM
+// (not Linux's EROFS); all three are refusals that close the DoS, so they fold into REFUSED-*.
+func romountOutcome(err error) string {
+	switch {
 	case err == nil:
-		report("UNLINK", false, fmt.Sprintf("unlink(%s) SUCCEEDED — the shared socket was removed (cross-tier DoS!)", sock))
-	default:
-		report("UNLINK", false, fmt.Sprintf("unlink(%s) failed but not with EROFS (%v)", sock, err))
-	}
-
-	// 3. CREATE — planting a new entry in the leg dir must EROFS too (no rogue replacement socket).
-	dir := filepath.Dir(sock)
-	probe := filepath.Join(dir, "romount-probe")
-	switch f, err := os.Create(probe); {
+		return "ALLOWED"
 	case errors.Is(err, syscall.EROFS):
-		report("CREATE", true, fmt.Sprintf("create in %s refused EROFS — no rogue entry can be planted", dir))
-	case err == nil:
-		f.Close()
-		_ = os.Remove(probe)
-		report("CREATE", false, fmt.Sprintf("create in %s SUCCEEDED — the leg dir is writable!", dir))
+		return "REFUSED-EROFS"
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return "REFUSED-PERM"
 	default:
-		report("CREATE", false, fmt.Sprintf("create in %s failed but not with EROFS (%v)", dir, err))
+		return fmt.Sprintf("REFUSED-OTHER(%v)", err)
 	}
-
-	return exitCode(ok)
 }
 
 func exitCode(ok bool) int {
