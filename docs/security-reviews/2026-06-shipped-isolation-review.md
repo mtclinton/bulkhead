@@ -203,7 +203,7 @@ audit-chain, substrate/units, build/supply-chain), with **each candidate finding
 REFUTED by an independent skeptic before being believed** — the R3 counterfactual discipline applied
 at scale. 19 candidates → **2 survived refutation, 17 were backstopped**.
 
-### R6 [HIGH] — the inspected-egress method allowlist was bypassable by HTTP/1.1 pipelining (fixed by revert)
+### R6 [HIGH] — the inspected-egress method allowlist was bypassable by HTTP/1.1 pipelining (reverted, then RE-DONE SOUNDLY)
 
 Found in code this same session had just shipped. The method allowlist
 (`BULKHEAD_EGRESS_INSPECT_METHODS`) checked the method only ONCE, against the first request line,
@@ -215,6 +215,16 @@ bypasses is a false guarantee, so the feature was **REVERTED** (`f5a2ad2`) rathe
 place. A sound request-line rule engine requires the inspect path to become HTTP/1.1-aware (frame
 each request by Content-Length/Transfer-Encoding, rule-check per request, fail closed on un-parseable
 framing or non-HTTP/1.1) — recorded in ADR-0034 as the requirement for a correct re-attempt.
+**RE-DONE SOUNDLY (2026-06-17).** The inspect leg is now HTTP/1.1-AWARE: it PARSES each request
+(`http.ReadRequest`), vets it whole, and RE-SERIALISES it to the upstream with canonical fixed-length
+framing — so the upstream's request boundaries are exactly the proxy's, never the agent's raw bytes,
+which forecloses the pipelining/smuggling class BY CONSTRUCTION (every request is framed and gated;
+nothing leaves until the whole request is vetted). Ambiguous framing (duplicate Content-Length), h2,
+and post-Upgrade websockets fail closed (R4). The method allowlist is its first rule.
+`TestInspectRelayPipelineBypass` proves the old bypass is dead (a `POST /evil` pipelined behind an
+allowed `GET` is denied AND never forwarded); `make verify-egress-mitm` ARM 5 live-proves the method
+deny end-to-end (the agent's GET refused with EOF, a signed Hook=inspect deny reason=method:GET, chain
+verifies), with ARMs 1–4 still green (a normal GET still inspects through to HTTP 200).
 
 ### R7 [MED] — the router has no paid-call volume cap (denial-of-wallet residual) — MECHANISM SHIPPED
 
@@ -389,7 +399,9 @@ Four adversarial lenses over the shipped architecture, each candidate refuted be
 per-component, cross-cutting (interactions/sequences), parsing/crypto, and invariants. Net outcome —
 **confirmed-and-fixed:** R7 (router paid-call cap), R8 (torn-tail brick), R9 (/data exhaustion →
 bounded-retention segment rotation, ADR-0040), R10 (GC inode-recycle race), R11 (deny-needle
-fragmentation); **reverted:** R6 (the method-allowlist, unsound vs a compromised agent);
+fragmentation); **reverted-then-re-done-soundly:** R6 (the method-allowlist — the inspect leg is now
+HTTP/1.1-aware / parse-and-re-frame, so the pipelining bypass is closed by construction; ADR-0034 inc2
+sub-B, live-proven verify-egress-mitm ARM 5);
 **documented-deferred:** R5 (control-chain record-after-act, gated), R12 (unbounded startup read, now
 ≤8 MiB after R9's rotation); plus the runsc OCI hardening. The final invariant
 lens found **0 violations**. The signed-chain canonical encoding, the Dual-LLM quarantine, the router,
