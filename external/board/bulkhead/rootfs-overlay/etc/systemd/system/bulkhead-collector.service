@@ -35,20 +35,26 @@ Environment=BULKHEAD_AUDIT_DIR=/var/lib/bulkhead/audit
 # BPF JIT needs W+X, so MemoryDenyWriteExecute must stay off here.
 MemoryDenyWriteExecute=no
 
-# Syscall hardening for the TCB (ADR-0033). The collector loads BPF + reads a ringbuf (mmap/epoll)
-# + serves the approve.sock — it needs an UNUSUAL syscall set (bpf, perf_event_open, memlock), so
-# unlike the agent jails it canNOT use a tight @system-service allowlist without risking the BPF
-# loader (a missing syscall would fail-close the whole E0/E2 enforcement floor). We therefore deny by
-# group, not allowlist. Most dangerous groups are ALREADY blocked by the CAP_BPF/PERFMON/SYS_RESOURCE
-# bounding set (swap/reboot/module/raw-io/clock/mount all need caps this unit does not hold), so those
-# denials are explicit defense-in-depth. The load-bearing addition is io_uring: it is NOT
-# capability-gated, and an io_uring ring is a syscall-INVISIBLE I/O channel (shared SQ/CQ rings) — the
-# provenance collector, of all components, must not be able to open one and bypass the very syscall
-# observability it exists to provide. There is no @io_uring set, so the three are subtracted by name.
-# (A tighter @system-service allowlist with explicitly-traced bpf/perf_event_open + the broker's pidfd
-# syscalls is a future refinement once that set is strace-verified — see the hardening backlog.)
+# Syscall hardening for the TCB (ADR-0033/ADR-0041). The collector is the most privileged process in
+# the system (it owns the eBPF path, the broker, and the audit-signing seed), so it gets a DEFAULT-DENY
+# allowlist like every agent jail — not the permissive group-denylist it used to carry. The base is the
+# standard @system-service set (which covers the Go runtime, file I/O, the AF_UNIX/AF_NETLINK sockets,
+# epoll/mmap for the ringbuf, getsockopt for SO_PEERPIDFD, and the /proc reads behind the pidfd cgroup
+# attestation), plus exactly two privileged extras the @system-service set excludes:
+#   bpf             — every eBPF op: BPF_PROG_LOAD + BPF_MAP_* + BPF_LINK_CREATE (the 5 LSM attaches),
+#                     and the control-socket map writes (gated by CAP_BPF).
+#   perf_event_open — defensive: the cilium/ebpf loader feature-probes with it on some kernels (gated by
+#                     CAP_PERFMON). The LSM links themselves are BPF_LINK_CREATE, not perf events.
+# This is strictly TIGHTER than the old denylist and preserves its load-bearing property for free: io_uring
+# is NOT in @system-service, so an io_uring ring — a syscall-INVISIBLE I/O channel the provenance collector
+# must never open — is denied by the allowlist (as are @swap/@reboot/@module/@raw-io/@mount/@clock-setters,
+# none of which are in @system-service). A missing syscall would fail-close the E0/E2 floor, so the set is
+# VERIFIED by booting the real collector under it and passing the full live suite (verify-floor for
+# load/attach/all-4-enforce-hooks/ringbuf/control-socket, verify-agent-orch for the broker/SO_PEERPIDFD
+# delegation, verify-attest for signing + the TPM-quoted chain HEADs). EPERM (not KILL) keeps a denied
+# call a handled error, not a crash.
 SystemCallArchitectures=native
-SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register @swap @reboot @module @raw-io @clock @cpu-emulation @obsolete @mount
+SystemCallFilter=@system-service bpf perf_event_open
 SystemCallErrorNumber=EPERM
 
 [Install]
