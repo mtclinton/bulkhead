@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -120,6 +120,13 @@ verify-audit-rotation:
 # guest kernel, 8/8). Needs a built wic (for the deploy bzImage) + firecracker ($FIRECRACKER) + /dev/kvm.
 verify-firecracker-spike:
 	sh $(BULKHEAD_ROOT)/scripts/fc-spike-check.sh
+
+# Host-side (NOT the qemu harness): ADR-0042 Firecracker mediated-channel SLICE 1. Boots a no-network
+# microVM and proves the in-VM agent reaches a host endpoint ONLY through a provisioned vsock leg + the
+# bulkhead-fc-vsockmux (CONNECT->OK), an unprovisioned port is refused, and there is no NIC. 8/8. Needs a
+# built wic + firecracker ($FIRECRACKER) + /dev/kvm; exits 2 INCONCLUSIVE where /dev/kvm is absent.
+verify-firecracker-legs:
+	sh $(BULKHEAD_ROOT)/scripts/fc-legs-check.sh
 
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
