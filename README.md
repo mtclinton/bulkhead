@@ -1,101 +1,133 @@
 # bulkhead
 
 **An agent appliance, built from the kernel up.** bulkhead is a Linux
-distribution in which agent isolation, action authorization, and model routing
-are system-level guarantees — not libraries bolted onto a general-purpose OS.
+distribution in which the isolation of an AI agent is an operating-system
+guarantee — not a library bolted onto a general-purpose OS, and not a prompt
+asking the model to behave.
 
-> **Status: working appliance, active development.** The v1 milestone (boots to
-> systemd, local inference, kernel-enforced fail-closed floor, default-deny
-> egress, Tailscale-only inbound) is complete and verified live in qemu, and the
-> Yocto production distribution — immutable verity rootfs with RAUC A/B atomic
-> updates and auto-rollback — builds, boots, and updates end-to-end. Work now
-> centers on the flagship: **agent action authorization as an OS primitive**
-> (the BPF-LSM enforce layer + a TCB broker mediating human-gated actions). See
-> [docs/architecture.md](docs/architecture.md), the
-> [threat model](docs/threat-model.md), and the
-> [decision records](docs/decisions/) (ADR-0001 … ADR-0012) for the full design
-> and rationale; every slice is verified live before the next.
+The design starts from a blunt assumption: the agent is already compromised. A
+prompt-injection-to-RCE chain has succeeded, and untrusted code is running inside
+the sandbox. The interesting question is not "how do we keep the agent honest"
+but "given a hostile agent, what boundary still stands between it and the host" —
+and bulkhead's job is to make that boundary structural, kernel-enforced, and
+small enough to audit.
+
+> **Status: a working, hardened appliance under active development.** It boots to
+> systemd, serves local inference and routed model calls, and confines agents on
+> a kernel-enforced, fail-closed floor that the boot self-test refuses to come up
+> without. Shipped and verified live (in qemu, under a software TPM): the BPF-LSM
+> action-authorization layer and its TCB broker; a gVisor-based isolation
+> substrate as the default agent tier; structural egress through a mediating
+> proxy; the Dual-LLM model-routing quarantine; mediated multi-agent delegation;
+> signed, hash-chained audit logs with TPM-quoted remote attestation; and a Yocto
+> production image — verity rootfs, RAUC A/B atomic updates, anti-rollback. Every
+> slice is proven live before the next one starts. The full design and its
+> rationale live in [docs/architecture.md](docs/architecture.md), the
+> [threat model](docs/threat-model.md), and 39 decision records under
+> [docs/decisions/](docs/decisions/); a standing adversarial review tracks the
+> gaps in [docs/security-reviews/](docs/security-reviews/).
 
 ## Why
 
 On a normal Linux box an agent runs with the full authority of whoever launched
-it. bulkhead makes confinement non-negotiable instead: every agent runs inside a
-kernel-enforced sandbox, every privileged action is explicitly authorized, and
-every security-relevant decision is recorded in a tamper-evident, signed log.
-The defensible angle is security — a hardened agent appliance with a small,
-auditable trusted computing base.
+it: your shell, your keys, your network. bulkhead inverts that default and makes
+confinement non-optional. Every agent runs inside a kernel-enforced sandbox it
+cannot reach around; every privileged action it attempts is mediated by a small
+trusted core, per agent, as policy the agent has no handle on; and every
+security-relevant decision lands in a tamper-evident, signed log that a relying
+party can verify off-box.
 
-## Architecture, in one paragraph
+The bet is that isolation only becomes credible on a single-purpose appliance
+with a small attack surface — so bulkhead is exactly that, not a daily driver.
+The trusted computing base is a pinned kernel, a privileged collector, and a
+caged broker; everything else is unprivileged and arranged so that breaking it
+buys the attacker nothing the kernel hasn't already denied.
 
-A single pinned kernel provides the security substrate: cgroup v2, namespaces,
-seccomp, Landlock, and BPF-LSM. Enforcement is **layered and fail-closed** — a
-seccomp + Landlock + dropped-capability + namespace floor is applied at process
-launch, so an agent *cannot* run unconfined, and a boot-time self-test gates the
-services behind it. On top of that floor a privileged **collector** owns the
-eBPF path: high-fidelity provenance plus an **opt-in BPF-LSM enforce layer**, and
-a signed, hash-chained audit log. A managed local inference service (llama.cpp)
-and a Go request router run as unprivileged services. Inbound is Tailscale-only;
-egress is default-deny with a DNS-driven allowlist. Secrets are delivered at
-runtime via TPM-bound systemd credentials and never live in the repo or an
-image. The prototype is built with Buildroot; the production distribution is
-built with Yocto and ships RAUC A/B atomic updates over a verity rootfs. Full
-detail in [docs/architecture.md](docs/architecture.md).
+## What actually stands in the way
 
-## Agent action authorization (the flagship)
+bulkhead is layered so that no single control is load-bearing on its own. Walking
+outward from a compromised agent:
 
-Beyond the launch-time floor, bulkhead authorizes *what a running agent may do*
-in the kernel, per agent, as policy the agent cannot reach:
+- **An isolation substrate, not just a namespace.** The default tier runs the
+  agent under gVisor (`runsc`, Systrap platform, rootless): a reimplemented
+  guest kernel that intercepts every syscall and collapses the host surface the
+  agent can touch — a sandbox escape has to break the Sentry *and then* the host,
+  not one CVE. The shared-kernel BPF-LSM tier (below) is kept for trusted
+  workloads; a Firecracker microVM is the path for an explicitly hostile tier.
+  `io_uring` is denied outright — it is a syscall-invisible I/O channel, so the
+  substrate refuses it rather than trying to mediate it (ADR-0031/0032/0033).
 
-- **BPF-LSM enforce (E0–E3).** Opt-in, default-observe, fail-open, TCB-exempt
-  LSM hooks deny, per agent cgroup: `bpf()` (protect the substrate), `ptrace`
-  (per-agent, finer than host-wide Yama), `socket_connect` (a per-agent egress
-  **class** manifest classified in-kernel from the connect address), and
-  privilege gains via `setuid`/`capset` (allow drops, deny raises).
-- **Per-agent jails.** Each agent is a systemd template instance in its own
-  cgroup; an exec-ordered `ExecStartPre` installs the agent's egress manifest
-  *before* its payload can `connect()`, closing the manifest-vs-connect race
-  without a sleep.
-- **A TCB broker for gated actions.** A small, socket-activated, capability-caged
-  broker authorizes sensitive actions with the requester's cgroup
-  **kernel-attested** (`SO_PEERPIDFD`) — never a forgeable request field:
-  inter-agent egress **delegation** (`child = parent ∩ requested`,
-  narrow-never-widen), a **human approval-gate** (block for a uid-0 operator
-  decision over a `0600` socket), operator-approved egress **expansion** and
-  operator-initiated **narrow** (in-place incident throttle), and a
-  **kernel-enforced one-shot E1/E3 privilege grant** (a human-approved, single-use
-  exception consumed atomically in the BPF hook). A TCB-context garbage collector
-  reclaims a dead agent's policy even when the agent's own cleanup is blocked.
-- **Signed, verifiable audit.** The collector and broker each Ed25519-sign a
-  hash-chained decision log; `bulkhead-collector verify-audit` recomputes and
-  checks the chain, wired into the boot gate so a tampered chain refuses the
-  boot. The signing key is a TPM-sealed (bare metal) / persistent (VM) credential.
+- **Action authorization in the kernel, per agent.** A privileged collector owns
+  the eBPF path and installs opt-in, fail-closed BPF-LSM hooks that deny, per
+  agent cgroup: `bpf()` (protect the substrate the TCB rests on), `ptrace`
+  (per-agent, finer than host-wide Yama), `socket_connect` against a per-agent
+  egress-class manifest classified in-kernel from the destination, and privilege
+  *gains* via `setuid`/`capset` (drops always allowed, raises denied). The
+  manifest is installed by an exec-ordered `ExecStartPre` before the agent's
+  payload can `connect()`, closing the install-vs-connect race without a sleep
+  (ADR-0004 … ADR-0011).
 
-Every item above is implemented and verified live in qemu — see ADR-0004 through
-ADR-0012.
+- **A broker for the actions a human must gate.** A socket-activated,
+  capability-caged broker authorizes sensitive requests with the caller's cgroup
+  **kernel-attested** via `SO_PEERPIDFD` — never a field the agent can forge. It
+  handles inter-agent egress delegation (`child = parent ∩ requested`, so
+  authority can only ever narrow), a blocking human approval gate over a `0600`
+  socket (uid-0 operator only), operator-driven expansion and in-place incident
+  throttling, and a kernel-enforced one-shot privilege grant consumed atomically
+  inside the BPF hook. A TCB-context garbage collector reclaims a dead agent's
+  policy even when the agent's own cleanup is blocked (ADR-0006/0011/0012).
+
+- **Egress that is structural, not advisory.** A confined agent runs in a
+  no-route network namespace; its only way out is a UNIX socket to a host
+  mediating proxy. The proxy resolves and connects on the host, denies internal
+  address classes (SSRF, the metadata endpoint) on the *resolved* IP, and — for
+  hosts marked for it — terminates TLS and inspects the flow, re-signing with an
+  on-device CA the agent trusts. The DNS allowlist is kept as an advisory hint;
+  the boundary is the namespace and the proxy, which is what makes it hold
+  against a compromised agent (ADR-0034).
+
+- **A model-routing quarantine, not a trusted prompt.** Untrusted fetched content
+  never reaches a privileged tool. A planning model sees only the trusted task
+  and emits a *static* plan; a deterministic, non-LLM interpreter executes it; a
+  separate quarantined reader is the only thing that ingests untrusted bytes, has
+  no tools, and whose reply is stored as data and never parsed as a directive.
+  Control flow is fixed before a single untrusted byte is read (the CaMeL
+  property), so an injection can steer *what a delegated child is told* but never
+  *what it is allowed to do* (ADR-0036).
+
+- **Each agent its own domain.** There is no shared trust pool and no direct
+  agent-to-agent path; everything goes through mediated IPC that preserves
+  authority. Delegation chains are bounded in depth and width, and a child's
+  reach is transitively clamped to its parent's — narrow-never-widen all the way
+  down, enforced by the broker and the kernel, not by the agents (ADR-0037).
+
+- **Provenance you can verify off-box.** The collector, broker, proxy, and router
+  each Ed25519-sign a hash-chained decision log that continues across boots;
+  `verify-audit` recomputes the chain and is wired into the boot gate, so a
+  tampered `/data` refuses the boot. The signing seed is a TPM-sealed credential
+  on bare metal. A relying party can pull a TPM quote that binds the enforcing
+  TCB's measured state to the chain HEADs and get a no-rewind verdict — the log
+  it verifies is the one the box actually ran (ADR-0017 … ADR-0028).
 
 ## Model routing
 
-The router is OpenAI-compatible and chooses the backend per request under a
-**denial-of-wallet** rule: a coarse, deterministic prompt-length gate is the
-*only* path to a paid tier (a client may force the free local tier but never the
-paid one).
-
-1. **Local inference** (llama.cpp) — tokenless, for high-volume and
-   privacy-sensitive work; the default tier.
-2. **Paid API — provider-pluggable.** Anthropic (default), OpenAI, and Gemini,
-   each a backend with its own file-sourced key, host-pinned base, and
-   no-redirect client; the vendor is chosen by model prefix *after* the
-   length gate, never as a way to force the paid tier.
-
-Keys are file/credential-sourced (TPM-bound), per provider, never in env or an
-image; the egress floor's DNS allowlist gains a set per provider.
+The router is OpenAI-compatible and picks a backend per request under a
+denial-of-wallet rule: a coarse, deterministic prompt-length gate is the *only*
+path to a paid tier, and a client may force the free local tier but never the
+paid one. Local inference (llama.cpp) is the default. The paid path is
+provider-pluggable — Anthropic, OpenAI, Gemini — each a backend with its own
+file-sourced key, a base pinned to that provider's exact host over HTTPS, and a
+client that refuses redirects so a cross-host hop can't walk off with the key.
+The vendor is chosen by model prefix *after* the length gate, never as a way to
+reach the paid tier, and an optional per-minute cap bounds runaway spend. Keys
+are TPM-bound credentials, per provider, never in the environment or an image.
 
 ## Build & run
 
-Requires a Linux build host. Neither the Buildroot tree nor the Yocto layers are
+You need a Linux build host. Neither the Buildroot tree nor the Yocto layers are
 vendored; both are fetched at pinned revisions.
 
-**Buildroot prototype** (fast, CPU-only, for iteration):
+**Buildroot prototype** — fast, CPU-only, for iteration:
 
 ```sh
 make buildroot     # fetch + checkout the pinned Buildroot tree
@@ -105,33 +137,33 @@ make run           # boot it in qemu
 make verify        # assert the security floor is live in the booted guest
 ```
 
-**Yocto production** (immutable verity rootfs + RAUC A/B updates; a multi-hour
-build) — see [yocto/README.md](yocto/README.md) for the full flow:
+**Yocto production** — immutable verity rootfs with RAUC A/B atomic updates and
+auto-rollback; a multi-hour build. See [yocto/README.md](yocto/README.md):
 
 ```sh
-yocto/scripts/fetch-yocto.sh                       # poky + meta-oe + meta-rauc + meta-security @ scarthgap
+yocto/scripts/fetch-yocto.sh                  # poky + meta-oe + meta-rauc + meta-security @ scarthgap
 source yocto/poky/oe-init-build-env yocto/build
-bitbake bulkhead-image                             # -> wic image; signed RAUC bundle via bitbake bulkhead-bundle
+bitbake bulkhead-image                        # -> wic image; signed RAUC bundle via bitbake bulkhead-bundle
 ```
 
-## Source code offer (AGPL-3.0 §13)
+The `make verify-*` targets boot the real image in qemu and assert a specific
+guarantee end to end — the fail-closed floor, the egress boundary, cold-boot
+attestation, sub-agent delegation, the quarantine, the gVisor substrate, the A/B
+update and rollback. Nothing is called done until its target is green.
 
-bulkhead is licensed under **AGPL-3.0-only**. Because it serves requests over a
-network, the Corresponding Source for any running build — including the build
-scripts needed to reproduce the image — is offered to all network users. A
+## Source, secrets, and license
+
+bulkhead is **[AGPL-3.0-only](LICENSE)**. Because it serves requests over a
+network, the Corresponding Source for any running build — including the scripts
+needed to reproduce the image — is offered to all network users under §13: a
 running appliance exposes the offer at `GET /source` and an `X-Source-Code`
-response header; the canonical source is this repository at the commit the image
-was built from.
+header, and the canonical source is this repository at the commit the image was
+built from.
 
-## Secrets policy
+No credential, API key, or private key is **ever** committed here or baked into
+an image. Secrets — provider keys, the RAUC signing key, the audit seed — are
+supplied at runtime from a secret store or TPM-bound systemd credentials. A
+gitleaks scan and a single-author / no-AI-attribution check run on every push and
+pull request; `pre-commit install` wires the same checks locally.
 
-No credential, API key, or private key is **ever** committed to this repository
-or baked into an image. Secrets are supplied at runtime from a secret store or
-TPM-bound systemd credentials (provider keys, the RAUC signing key, the audit
-seed). A [gitleaks](https://github.com/gitleaks/gitleaks) scan and a
-single-author/no-AI-attribution check run on every push and pull request; a
-local pre-commit hook is available (`pre-commit install`).
-
-## License
-
-[AGPL-3.0-only](LICENSE). Copyright (C) 2026 mtclinton.
+Copyright (C) 2026 mtclinton.
