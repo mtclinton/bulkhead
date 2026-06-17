@@ -14,7 +14,9 @@ found three more the per-surface pass missed: R8 [HIGH] torn-tail fusion (**fixe
 /data exhaustion (deferred — rotation design), R10 [MED] a GC cgroup-inode-recycle race (**fixed**),
 with 4 of 7 refuted. A THIRD, parsing/crypto audit then found R11 [HIGH] a deny-needle scan evaded by
 TLS-record fragmentation (**fixed**) and R12 [LOW] an unbounded startup chain read (documented), with
-7 of 10 refuted — the canonical-encoding/crypto and agent grammar holding up.
+7 of 10 refuted — the canonical-encoding/crypto and agent grammar holding up. A FOURTH, invariant
+audit (does each core promise hold in every path?) found **0 violations** — the convergence signal
+after three bug-finding lenses; only a runsc least-privilege parity nicety was closed.
 
 ## Scope
 
@@ -339,6 +341,47 @@ of the in-agent gate; `varName`/`isIdent` rejects multi-token register smuggling
 pidfd-pinned attested cgroup path; the chain-domain binding comes from the root-owned image-baked unit;
 a mismatched re-signing CA key fails closed at the handshake. That 7/10 fell — and that the
 canonical-vs-json hash encoding (the highest-value forge target) held — is the assurance.
+
+## Fourth audit: invariant lens (2026-06-16) — campaign convergence
+
+The final lens checked bulkhead's CORE PROMISES directly — for each invariant (narrow-never-widen,
+fail-closed, record-before-act, single-parse/attested-identity, least-privilege), find any path that
+violates it. 8 candidates → **0 survived refutation**. Every apparent violation was upheld by the hard
+layer it should be:
+
+- **narrow-never-widen** — the top-level EXPAND ceiling is all-classes, but every EXPAND is operator-
+  gated (SO_PEERCRED uid==0 on the 0600 root-only approve socket; a non-root agent cannot approve), and
+  R2's `gen>0` refusal closes the delegated-child climb on the kernel-attested path; DELEGATE is a pure
+  `parent & requested` intersection.
+- **fail-closed** — the BPF E2 enforce fails open-to-observe when unarmed, but it is an additive one-way
+  ratchet over a STRUCTURAL deny floor that holds regardless: the agent slice + unit carry
+  `IPAddressDeny=any`/loopback-only (a cgroup/skb filter, not the LSM hook), nftables is `policy drop`,
+  and the confined agent is in a no-route netns reaching out only via the fail-closed egress proxy. A
+  disarmed E2 can only fail to ADD a denial, never open the floor.
+- **record-before-act** — the egress proxy records before acting; control-plane record-after-act is R5
+  (gated, deferred); the operator CLI `egress set` is E0-bpf-denied to non-TCB callers.
+- **single-parse / attested-identity** — the CONNECT host is the sole identity for the dial, the leaf,
+  and the SSRF guard (on the resolved IP); SNI/Host are logged cross-checks only; authority keys on the
+  SO_PEERPIDFD-pinned cgroup, never an agent-supplied value.
+- **least-privilege** — every agent jail is capless + NoNewPrivileges + seccomp + (netns or gVisor);
+  the one gap (the runsc bundle omitting `noNewPrivileges`) was backstopped by the empty cap set and is
+  now closed for parity (`0b4dc4a`, + `/dev` nosuid/noexec/nodev).
+
+0 invariant violations on the final lens — after three lenses that DID find bugs (R6–R12) — is the
+convergence signal: the core promises hold; the issues found were specific implementation bugs (now
+fixed), not broken guarantees.
+
+## Audit campaign summary
+
+Four adversarial lenses over the shipped architecture, each candidate refuted before belief:
+per-component, cross-cutting (interactions/sequences), parsing/crypto, and invariants. Net outcome —
+**confirmed-and-fixed:** R7 (router paid-call cap), R8 (torn-tail brick), R10 (GC inode-recycle race),
+R11 (deny-needle fragmentation); **reverted:** R6 (the method-allowlist, unsound vs a compromised
+agent); **documented-deferred:** R5 (control-chain record-after-act, gated), R9 (/data exhaustion,
+needs chain rotation), R12 (unbounded startup read); plus the runsc OCI hardening. The final invariant
+lens found **0 violations**. The signed-chain canonical encoding, the Dual-LLM quarantine, the router,
+and the BPF-LSM enforce all withstood adversarial scrutiny. (These audits are in addition to the
+earlier per-component review that fixed R1/R2/R4, reclassified R3, and scoped R5.)
 
 ## Verification posture
 
