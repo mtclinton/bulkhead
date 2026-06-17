@@ -42,6 +42,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -979,6 +980,80 @@ func lastChainHash(path string) []byte {
 			return nil
 		}
 		return h
+	}
+	return nil
+}
+
+// --- ADR-0038: bounded-retention segment rotation -------------------------------------------------
+// The signed chains share a fixed 100 MB /data partition; an unbounded append-only log lets one noisy
+// tier (egress) fill /data and starve every other chain into a fail-closed append DoS (security-review
+// R9). Rotation seals the live file into a numbered segment (<live>.NNNNNN) once it reaches a byte
+// threshold, keeps a bounded window of segments, and prunes older ones — capping each chain at
+// (segKeep+1)*rotateBytes. The seam is link-continuous (prevHash/seq are NOT reset across a rotation),
+// so verifySegmentedChain checks the retained segments + live file as ONE chain. segmentPath/listSegments
+// MUST stay byte-identical across src/collector, src/proxy, src/router (the collector's verifier reads the
+// segments the proxy/router produce); the "%s.%06d" naming is the shared contract.
+
+// segmentPath is the sealed-segment path for number n: <dir>/<base>.NNNNNN, zero-padded width-6 so the
+// lexical order of the names equals their numeric order (6 digits => up to 999999 segments per chain).
+func segmentPath(dir, base string, n uint64) string {
+	return filepath.Join(dir, fmt.Sprintf("%s.%06d", base, n))
+}
+
+// listSegments returns the existing sealed-segment numbers for <dir>/<base>, ascending. A sibling counts
+// as a segment IFF its name is exactly base + "." + an all-digit suffix — so the live file, audit-pub.txt,
+// a *.tmp, or another chain's files in a shared dir (control.jsonl beside provenance.jsonl) are excluded.
+func listSegments(dir, base string) []uint64 {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	prefix := base + "."
+	var nums []uint64
+	for _, e := range ents {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		suf := name[len(prefix):]
+		if suf == "" || strings.TrimLeft(suf, "0123456789") != "" {
+			continue // not an all-digit suffix
+		}
+		n, err := strconv.ParseUint(suf, 10, 64)
+		if err != nil {
+			continue
+		}
+		nums = append(nums, n)
+	}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
+	return nums
+}
+
+// nextSegNum returns the number the next sealed segment should get: one past the highest existing segment
+// (so a box that rotated, lost power, and rebooted never reuses a number or overwrites signed history), or
+// 1 on a chain that has never rotated.
+func nextSegNum(dir, base string) uint64 {
+	segs := listSegments(dir, base)
+	if len(segs) == 0 {
+		return 1
+	}
+	return segs[len(segs)-1] + 1
+}
+
+// lastChainTip returns the chain's current tip (last well-formed record hash): the LIVE file's tip, or —
+// if the live file is empty/absent (the rename->first-append window after a rotate, or a rotate that
+// crashed before its first new record) — the newest non-empty sealed segment's tip, else nil (genesis).
+// Used to seed the cross-boot prevHash (F5) and to bind the attest HEADs (ADR-0025) so a quote taken in
+// that window binds the newest-segment tip, not a spurious genesis. Per-file tolerance mirrors lastChainHash.
+func lastChainTip(dir, base string) []byte {
+	if h := lastChainHash(filepath.Join(dir, base)); h != nil {
+		return h
+	}
+	segs := listSegments(dir, base)
+	for i := len(segs) - 1; i >= 0; i-- {
+		if h := lastChainHash(segmentPath(dir, base, segs[i])); h != nil {
+			return h
+		}
 	}
 	return nil
 }
