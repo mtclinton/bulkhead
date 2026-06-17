@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -107,6 +107,14 @@ verify-yocto-router:
 verify-egress-reboot:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-reboot-check.py
 
+# Yocto: ADR-0040 / security-review R9 — bounded-retention audit-chain segment rotation. Boots the wic,
+# drops in a tiny rotation threshold so the egress chain rotates several times and HEAD-prunes (oldest
+# segment > 1, exercising the verifier's retained-head anchor), asserts verify-audit OK + footprint
+# bounded, then reboots and proves the boot gate stays green over the segmented+pruned chain (no
+# false-brick) and appends continue link-continuous across the seam. Needs a built wic.
+verify-audit-rotation:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-audit-rotation-check.py
+
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
 # router's local backend + the proxy allowlist at a loopback mockchat, runs the confined agent on
@@ -186,6 +194,7 @@ verify-security-review:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-agent-orch-check.py
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-run-check.py
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-egress-mitm-check.py
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-audit-rotation-check.py
 
 # Yocto: the RAUC A/B atomic update + rollback (ADR-0003). Boots slot A, `rauc install`s the
 # bundle (attached as a raw virtio disk) into slot B, reboots into B, then mark-bads B and
