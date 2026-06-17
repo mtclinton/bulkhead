@@ -87,6 +87,12 @@ func openAuditLog(domain, filename string) (*auditLog, error) {
 		return nil, err
 	}
 	chainPath := filepath.Join(dir, filename)
+	// Discard an un-acked partial final record (a power-loss can leave append's "line\n" without its
+	// '\n'); else O_APPEND fuses the next record onto the fragment, false-bricking verify-audit two
+	// boots later. Best-effort. (Cross-cutting audit 2026-06-16; mirrors the collector's repair.)
+	if err := repairTornTail(chainPath); err != nil {
+		log.Printf("audit: torn-tail repair (%s): %v", chainPath, err)
+	}
 	prev := make([]byte, sha256.Size)
 	if h := lastChainHash(chainPath); h != nil {
 		prev = h
@@ -156,6 +162,23 @@ func canonical(r auditRecord, prev []byte, domain string) []byte {
 	put(uint64(len(prev)))
 	b.Write(prev)
 	return b.Bytes()
+}
+
+// repairTornTail discards an un-acknowledged partial final record (bytes after the last newline,
+// left by a power-loss mid-append), so the next append cannot fuse onto the fragment. Byte-identical
+// to the collector's. (Cross-cutting audit.)
+func repairTornTail(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(b) == 0 || b[len(b)-1] == '\n' {
+		return nil
+	}
+	return os.Truncate(path, int64(bytes.LastIndexByte(b, '\n')+1))
 }
 
 // lastChainHash returns the decoded Hash of the last well-formed record (the tip), or nil. Byte-identical

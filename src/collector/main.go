@@ -841,6 +841,17 @@ func openAuditLog(domain, filename string) (*auditLog, error) {
 		return nil, err
 	}
 	chainPath := filepath.Join(dir, filename)
+	// Repair an un-acknowledged partial final record before continuing the chain. A power-loss can
+	// leave append()'s "line\n" written WITHOUT its terminating '\n'; the verifier tolerates that
+	// fragment only while it stays last, but O_APPEND would FUSE the next boot's first record onto it
+	// ({frag...{seq:1...}\n), putting a malformed two-records-on-one-line MID-chain once a second
+	// record follows — false-bricking verify-audit (and forcing a RAUC rollback) two boots after one
+	// unclean shutdown. Truncating the un-acked tail restores "a sequence of newline-terminated
+	// records" (mirroring append()'s own rollback). Best-effort: a failure degrades to the prior
+	// behaviour, never blocks the open. (Cross-cutting audit 2026-06-16, torn-tail finding.)
+	if err := repairTornTail(chainPath); err != nil {
+		log.Printf("audit: torn-tail repair (%s): %v", chainPath, err)
+	}
 	// F5 (composed review): continue the hash chain ACROSS boots — the new boot's first
 	// record links to the prior boot's LAST hash, not a fresh zero. So deleting a whole
 	// middle per-boot subchain breaks the linkage and verify-audit catches it (re-anchoring
@@ -928,6 +939,26 @@ func canonical(r auditRecord, prev []byte, domain string) []byte {
 
 // lastChainHash returns the decoded Hash of the last well-formed record in the chain file,
 // or nil (genesis / unreadable). Used to continue the hash chain across boots (F5).
+// repairTornTail discards an un-acknowledged partial final record — bytes after the last newline,
+// left by a power-loss between append()'s write and its '\n'. It restores the invariant that the
+// file is a sequence of newline-terminated records, so the next append starts a fresh line and
+// cannot fuse onto the fragment. A clean file (empty, or ending in '\n') is untouched; a file with
+// no newline at all truncates to 0 (the whole partial first record was never committed).
+func repairTornTail(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(b) == 0 || b[len(b)-1] == '\n' {
+		return nil
+	}
+	keep := int64(bytes.LastIndexByte(b, '\n') + 1) // 0 when there is no newline
+	return os.Truncate(path, keep)
+}
+
 func lastChainHash(path string) []byte {
 	data, err := os.ReadFile(path)
 	if err != nil {
