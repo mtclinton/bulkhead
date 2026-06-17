@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -142,6 +142,14 @@ verify-firecracker-agent:
 # /dev/kvm + python3.
 verify-firecracker-proxy:
 	sh $(BULKHEAD_ROOT)/scripts/fc-proxy-check.sh
+
+# Host-side: ADR-0042 Firecracker mediated-channel SLICE 4 confinement assertions. Boots a microVM + mux
+# and asserts (lsof/ss) that the running firecracker holds NO host internet socket (no network egress
+# primitive), the per-instance dir holds EXACTLY the 3 expected sockets, and the mux is their sole
+# listener. The jailer's uid/chroot/netns/cgroup confinement is root-gated (run as root with $JAILER to
+# wrap firecracker under it; the deployable hardened unit + jailer launcher land in slice 6).
+verify-firecracker-jail:
+	sh $(BULKHEAD_ROOT)/scripts/fc-jail-check.sh
 
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
