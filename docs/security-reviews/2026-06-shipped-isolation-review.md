@@ -280,8 +280,10 @@ oldest retained record's prev (the cross-prune link is the off-box check, extend
 boundary to a bounded head). Per-tier caps `(keep+1)×8 MiB`: five chains = 80 MiB < 100 MB, so the
 egress tier physically cannot starve the others. R1 — a rotation fault degrades to "keep writing the
 current file", never a failed append, so rotation can never *become* the denial it removes. The one
-deliberate trade (pruned-segment tamper detection moves off-box) is owner-noted in ADR-0040. Live
-rotate-across-reboot verification on the production image is the remaining step.
+deliberate trade (pruned-segment tamper detection moves off-box) is owner-noted in ADR-0040.
+Live-proven across a reboot on the production image (`make verify-audit-rotation`, 19/19): the egress chain
+rotated and HEAD-pruned (so the retained-head anchor is load-bearing), verify-audit OK + footprint bounded,
+and the boot gate stayed green over the segmented+pruned chain across a reboot with link-continuous appends.
 
 ### R10 [MED] — GC manifest-prune races cgroup-inode RECYCLE (fixed)
 

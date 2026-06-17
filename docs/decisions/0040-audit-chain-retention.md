@@ -1,6 +1,6 @@
 # ADR-0040: Bounded-retention segment rotation for the signed audit chains
 
-Status: Accepted — verifier + signer rotation + per-tier config shipped; live-verify on the production image pending
+Status: Accepted — verifier + signer rotation + per-tier config shipped + live-proven across a reboot on the production image (2026-06-16, `make verify-audit-rotation`, 19/19)
 Date: 2026-06-16
 Pillar: provenance (the signed audit chains)
 Relates to: ADR-0008 (the sealed signing seed), ADR-0017 (the control-write chain), ADR-0025/0026 (audit HEADs in the quote + the no-rewind verdict), ADR-0030 (the boot-gate detection boundary this extends), ADR-0034 (the egress chain — the highest-volume tier). Addresses security-review finding R9.
@@ -13,7 +13,7 @@ Shipped (code + unit tests, all three Go modules green):
 - **The signers rotate** (collector ×2 chains, broker, router, egress-proxy). `append()` seals the live file into a numbered segment once it reaches `BULKHEAD_AUDIT_SEGMENT_BYTES`, before writing the record; `pruneSegments()` keeps the newest `BULKHEAD_AUDIT_SEGMENTS_KEEP`. The seven rotation helpers are byte-identical across `src/collector`, `src/proxy`, `src/router`.
 - **Per-tier config** in the `*-data.conf` drop-ins: 8 MiB segments, keep 1 → each chain caps at 16 MiB; the collector's two chains + broker + router + egress = 80 MiB < the 100 MB `/data` partition.
 
-Pending: a live rotate-across-reboot test on the production image (`make verify-*`).
+Live-proven (`make verify-audit-rotation`, 19/19): on the real wic the egress chain rotated and HEAD-pruned (oldest retained segment 000014, so the retained-head anchor was load-bearing), `verify-audit` reported OK, the footprint stayed bounded, and across an in-guest reboot the boot gate stayed green (no false-brick on a segmented+pruned chain), the DynamicUser proxy reseeded, the sealed segment was re-permissioned 0640:bulkhead-audit, and appends continued link-continuous (no-rewind CLEAN).
 
 ## Context and problem statement
 
