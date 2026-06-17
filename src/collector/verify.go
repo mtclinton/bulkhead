@@ -75,6 +75,11 @@ type chainSeed struct {
 	foundSince    bool   // whether the --since HEAD was already matched in an earlier file
 	sinceSeq      uint64 // the seq at which it matched
 	allowTornTail bool   // tolerate an unparseable FINAL record — true ONLY for the live file
+	anchorFirst   bool   // ACCEPT this file's first record's prev/seq as the on-box anchor (head was PRUNED:
+	//                      its predecessor segment is gone, so its prev links to absent history — the
+	//                      cross-prune link is an OFF-BOX check, ADR-0038). Set ONLY on the oldest retained
+	//                      file when the oldest segment number > 1; a still-present segment 000001 is
+	//                      genesis and stays strictly anchored at zero (head-subchain deletion still caught).
 }
 
 // verifyChainSegment verifies one file of a (possibly segmented) chain starting from the seed `in`, and
@@ -103,6 +108,7 @@ func verifyChainSegment(path string, pub ed25519.PublicKey, domain string, since
 	expectSeq := in.expectSeq   // expected seq WITHIN the current per-boot subchain (carried across the seam)
 	foundSince := in.foundSince // OR-ed across the chain's files
 	sinceSeq := in.sinceSeq
+	first := true      // the first VALID record in this file (for the retained-head anchor, in.anchorFirst)
 	var tornTail error // a deferred unmarshal error on a line that MIGHT be an interrupted final record
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
@@ -126,21 +132,38 @@ func verifyChainSegment(path string, pub ed25519.PublicKey, domain string, since
 			tornTail = fmt.Errorf("record %d: malformed json: %w", n+1, e)
 			continue
 		}
-		// seq resets to 1 at a per-boot boundary; otherwise it increments. But prev_hash chains
-		// CONTINUOUSLY across boots (F5) AND across segment seams (ADR-0038) and is NOT reset here — so
-		// deleting a whole middle subchain OR a whole sealed segment breaks the link (the next record's
-		// prev_hash won't match the surviving prior record's hash). Genesis is the very first record of
-		// the OLDEST retained file (seq=1, prev=0); a rotation seam is link-continuous, not a reset.
-		if r.Seq == 1 {
-			expectSeq = 1
+		if first && in.anchorFirst {
+			// ADR-0038 retained-head anchor: this is the oldest retained file after head-PRUNING; its
+			// predecessor segment is gone, so its first record's prev links to absent (pruned) history we
+			// cannot check on-box (the cross-prune link is verified OFF-BOX against the attested HEADs).
+			// ACCEPT the record's own prev/seq as the anchor — the signature check below still binds this
+			// prev, so an attacker can only present a contiguous SUFFIX of legitimately-signed records
+			// (== head truncation, the documented boundary), never forge/reorder. Every SUBSEQUENT record
+			// is checked normally against the running state, so a deletion WITHIN the retained window is
+			// still caught. (seq is diagnostic, not the security ordering — the hash chain is.)
+			pp, e := hex.DecodeString(r.PrevHash)
+			if e != nil || len(pp) != sha256.Size {
+				return n, out, fmt.Errorf("record %d: malformed prev_hash at retained-head anchor: %v", n+1, e)
+			}
+			prev = pp
+			expectSeq = r.Seq
 		} else {
-			expectSeq++
-		}
-		if r.Seq != expectSeq {
-			return n, out, fmt.Errorf("record %d: seq=%d, expected %d (gap, reorder, or illegal reset)", n+1, r.Seq, expectSeq)
-		}
-		if !hexEqual(r.PrevHash, prev) {
-			return n, out, fmt.Errorf("record %d (seq %d): prev_hash linkage broken (record/subchain/segment removed or reordered)", n+1, r.Seq)
+			// seq resets to 1 at a per-boot boundary; otherwise it increments. But prev_hash chains
+			// CONTINUOUSLY across boots (F5) AND across segment seams (ADR-0038) and is NOT reset here — so
+			// deleting a whole middle subchain OR a whole sealed segment breaks the link (the next record's
+			// prev_hash won't match the surviving prior record's hash). Genesis is the very first record of
+			// the OLDEST retained file (seq=1, prev=0); a rotation seam is link-continuous, not a reset.
+			if r.Seq == 1 {
+				expectSeq = 1
+			} else {
+				expectSeq++
+			}
+			if r.Seq != expectSeq {
+				return n, out, fmt.Errorf("record %d: seq=%d, expected %d (gap, reorder, or illegal reset)", n+1, r.Seq, expectSeq)
+			}
+			if !hexEqual(r.PrevHash, prev) {
+				return n, out, fmt.Errorf("record %d (seq %d): prev_hash linkage broken (record/subchain/segment removed or reordered)", n+1, r.Seq)
+			}
 		}
 		sum := sha256.Sum256(canonical(r, prev, domain))
 		if !hexEqual(r.Hash, sum[:]) {
@@ -158,6 +181,7 @@ func verifyChainSegment(path string, pub ed25519.PublicKey, domain string, since
 		}
 		prev = sum[:]
 		n++
+		first = false
 	}
 	if e := sc.Err(); e != nil {
 		return n, out, e
@@ -212,11 +236,16 @@ func verifyChainState(path string, pub ed25519.PublicKey, domain string, since [
 func verifySegmentedChain(livePath string, pub ed25519.PublicKey, domain string, since []byte) (n int, tip []byte, sinceSeq uint64, foundSince bool, err error) {
 	dir := filepath.Dir(livePath)
 	base := filepath.Base(livePath)
+	segs := listSegments(dir, base)
 	seed := chainSeed{prev: zeroHash}
 	total := 0
-	// Sealed segments first, oldest -> newest; each must be COMPLETE (no torn tail tolerated).
-	for _, num := range listSegments(dir, base) {
+	// Sealed segments first, oldest -> newest; each must be COMPLETE (no torn tail tolerated). The OLDEST
+	// retained file is the on-box anchor: if its segment number is > 1 the head was PRUNED, so accept its
+	// first record's prev (the cross-prune link is OFF-BOX, ADR-0038); if segment 000001 is still present
+	// it IS genesis and stays strictly anchored at prev=zero (head-subchain deletion still caught).
+	for i, num := range segs {
 		seed.allowTornTail = false
+		seed.anchorFirst = i == 0 && num != 1
 		cnt, out, e := verifyChainSegment(segmentPath(dir, base, num), pub, domain, since, seed)
 		total += cnt
 		if e != nil {
@@ -224,8 +253,10 @@ func verifySegmentedChain(livePath string, pub ed25519.PublicKey, domain string,
 		}
 		seed = out
 	}
-	// The live file last; tolerate an interrupted partial tail here only.
+	// The live file last; tolerate an interrupted partial tail here only. It is never the post-prune anchor
+	// (segKeep>=1 keeps >=1 sealed segment, so the live file always links to a present segment's tip).
 	seed.allowTornTail = true
+	seed.anchorFirst = false
 	cnt, out, e := verifyChainSegment(livePath, pub, domain, since, seed)
 	total += cnt
 	if e != nil {

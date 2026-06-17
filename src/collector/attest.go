@@ -540,15 +540,19 @@ func brokerAuditDir() string {
 
 // attestChainHeads reads the current HEAD (last well-formed record hash) of the three signed chains
 // from DISK. Each is a coherent per-file snapshot: append() writes each record with a SINGLE
-// write()+fsync and every chain has a single writer, so lastChainHash never observes a torn line and no
+// write()+fsync and every chain has a single writer, so lastChainTip never observes a torn line and no
 // lock is needed (a concurrent append advancing a HEAD between the three reads is benign — the quote
 // binds whatever was on disk, and the relying party checks its OWN prior-observed expected). A
 // genesis/empty/unreadable chain yields nil, which quoteExtraData maps to 32 zero bytes.
+//
+// ADR-0038: lastChainTip (not lastChainHash) resolves the tip as live-else-newest-segment, so a quote
+// taken in the rename->first-append window after a rotation binds the newest sealed segment's tip — the
+// true HEAD — rather than the momentarily-empty live file's spurious genesis.
 func attestChainHeads() (hColl, hCtrl, hBroker []byte) {
 	base := auditBaseDir()
-	hColl = lastChainHash(filepath.Join(base, "provenance.jsonl"))
-	hCtrl = lastChainHash(filepath.Join(base, "control.jsonl"))
-	hBroker = lastChainHash(filepath.Join(brokerAuditDir(), "provenance.jsonl"))
+	hColl = lastChainTip(base, "provenance.jsonl")
+	hCtrl = lastChainTip(base, "control.jsonl")
+	hBroker = lastChainTip(brokerAuditDir(), "provenance.jsonl")
 	return
 }
 
