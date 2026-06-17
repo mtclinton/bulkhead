@@ -11,8 +11,8 @@ A follow-up multi-agent adversarial audit (2026-06-16, see below) then found + *
 mechanism for one MED (R7, a router paid-call denial-of-wallet cap), and saw 17 of 19 candidates
 refuted by independent skeptics. A SECOND, cross-cutting audit (interactions/sequences/races) then
 found three more the per-surface pass missed: R8 [HIGH] torn-tail fusion (**fixed**), R9 [HIGH] shared
-/data exhaustion (deferred — rotation design), R10 [MED] a GC↔launch race (deferred — a design
-trade-off), with 4 of 7 refuted.
+/data exhaustion (deferred — rotation design), R10 [MED] a GC cgroup-inode-recycle race (**fixed**),
+with 4 of 7 refuted.
 
 ## Scope
 
@@ -271,15 +271,23 @@ chain over N MB so cross-boot `prev_hash` continuity survives the rotation, and 
 rotated segments) + per-tier disk isolation. DEFERRED: rotating a hash-chained, signed, boot-gated log
 while preserving cross-boot verifiability is a substantial design increment — the owner's to scope.
 
-### R10 [MED] — GC manifest-prune races the agent launch (deferred)
+### R10 [MED] — GC manifest-prune races cgroup-inode RECYCLE (fixed)
 
-`gc.go` snapshots agent liveness (`liveAgentCgids()`) OUTSIDE `controlMu`, then prunes `egress_policy`
-under it. A child launched in that window (its manifest set under the lock) is absent from the
-pre-lock snapshot, so the GC prunes its manifest → the child runs with NO manifest → unrestricted at
-the BPF layer (netns-bounded, hence MED, not a full bypass). The simple fix (snapshot under the lock)
-**reverses a deliberate design choice** — the code comment keeps the cgroupfs scan out of the lock for
-latency; a cleaner variant re-checks each prune candidate's liveness under the lock. DEFERRED: the
-latency-vs-race trade-off is the owner's documented choice to revisit.
+`gc.go` snapshotted agent liveness (`liveAgentCgids()`) OUTSIDE `controlMu`, then pruned
+`egress_policy` under it. The two-pass `seen` guard does spare a *fresh* launch (a never-witnessed
+cgid is never pruned) — but NOT a cgroup-inode RECYCLE: `seen` is never cleared, so a dead agent A's
+inode X stays in `seen` forever; if a stale outside-lock scan misses the replacement agent B (which
+recycled inode X, cgid == dir inode, ADR-0029) while B's manifest is already written under the lock,
+the GC prunes X — deleting B's manifest. B then runs with NO `egress_policy` entry → the BPF E2 hook
+`allowed`-lookup misses → unrestricted at E2 (the netns + proxy floor remains, hence MED, not a full
+bypass; the per-agent egress-class restriction is lost). **Fixed** (the snapshot is now taken INSIDE
+`controlMu`, making it atomic with the broker/ExecStartPre manifest write that is also `controlMu`-
+gated: a recycled inode is either already-live by snapshot time, or not-yet-written; either way it is
+not wrongly pruned). The latency-vs-race call: the cgroupfs glob over the appliance's few agents is a
+negligible added lock-hold, worth closing the recycle race. The prune predicate is unchanged (its
+`selectEgressPrunes` tests still pass); the fix is a concurrency *atomicity* change, correct by
+construction (snapshot + delete now share the writer's lock). (A separate minor note: `seen` grows
+monotonically — a bounded-but-unfreed set; benign once the recycle race is closed.)
 
 ### Refuted (4)
 

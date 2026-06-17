@@ -229,12 +229,22 @@ func gcLoop(stop <-chan struct{}) {
 				gm.Close()
 				continue
 			}
-			live := liveAgentCgids()
 			tcb, terr := ebpf.LoadPinnedMap(filepath.Join(pinDir, "tcb_cgroups"), nil)
 			// controlMu (ADR-0024): gc's bpf-map deletes (grant_once/egress_policy/tcb_cgroups) must be
 			// serialized vs the attestDigest/gatePosture reads, so a digest/gate never observes a TORN map
-			// mid-gc. Held ONLY across the (bounded, <=1024-entry) mutations, NOT the cgroup-fs scan above.
+			// mid-gc.
+			//
+			// R10 (cross-cutting audit): the liveness snapshot is taken INSIDE the lock, NOT before it.
+			// Taken outside, a cgroup INODE recycled from a dead agent A onto a fresh agent B (ADR-0029;
+			// cgid == dir inode) could be wrongly pruned: A's inode sits PERMANENTLY in `seen`, a stale
+			// outside-lock scan misses B (captured in the gap before B's cgroup dir is globbable), and B's
+			// just-written manifest is then deleted -> B runs manifest-less == unrestricted at the E2 hook.
+			// Snapshotting under the lock makes the scan ATOMIC with the broker/ExecStartPre manifest write
+			// (also controlMu-gated): a recycled inode is either already live by snapshot time (spared) or
+			// not yet written (nothing to prune). The scan is a bounded cgroupfs glob over the appliance's
+			// few agents — a negligible added lock-hold for closing the recycle race.
 			controlMu.Lock()
+			live := liveAgentCgids()
 			gd, ed := runGCPass(live, gm, ep, seen, grantSeen)
 			var tp []uint64
 			if terr == nil {
