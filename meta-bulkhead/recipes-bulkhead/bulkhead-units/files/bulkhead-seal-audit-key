@@ -42,13 +42,20 @@ CHAINS="$DATADIR/audit/provenance.jsonl $DATADIR/audit-broker/provenance.jsonl $
 refuse_if_chains_present() {
 	[ "${BULKHEAD_SEAL_FORCE_NEW:-0}" = 1 ] && return 0
 	for c in $CHAINS; do
-		[ -s "$c" ] || continue
-		echo "bulkhead-seal: SEALED AUDIT KEY LOST — the signing seed is absent/unreadable but a signed audit" >&2
-		echo "bulkhead-seal: chain survives on /data ($c). Minting a fresh seed would BRICK the boot (every prior" >&2
-		echo "bulkhead-seal: record fails signature). REFUSING to mint over surviving chains; state left untouched." >&2
-		echo "bulkhead-seal: Restore the seed from backup and reboot, or set BULKHEAD_SEAL_FORCE_NEW=1 to mint a new" >&2
-		echo "bulkhead-seal: identity (this DISCARDS the ability to verify all prior audit history)." >&2
-		exit 1
+		# The live chain file AND any sealed rotation segments (<chain>.NNNNNN, ADR-0038) count as surviving
+		# signed history: a box that rotated and then lost its seed has its signed records in the SEGMENTS,
+		# with the live file possibly small or empty. Checking only the live file would let such a box mint a
+		# fresh seed and brick on the surviving segments. (An unmatched .[0-9]* glob stays literal, so the
+		# `-s` test simply skips it.)
+		for f in "$c" "$c".[0-9]*; do
+			[ -s "$f" ] || continue
+			echo "bulkhead-seal: SEALED AUDIT KEY LOST — the signing seed is absent/unreadable but a signed audit" >&2
+			echo "bulkhead-seal: chain survives on /data ($f). Minting a fresh seed would BRICK the boot (every prior" >&2
+			echo "bulkhead-seal: record fails signature). REFUSING to mint over surviving chains; state left untouched." >&2
+			echo "bulkhead-seal: Restore the seed from backup and reboot, or set BULKHEAD_SEAL_FORCE_NEW=1 to mint a new" >&2
+			echo "bulkhead-seal: identity (this DISCARDS the ability to verify all prior audit history)." >&2
+			exit 1
+		done
 	done
 }
 
