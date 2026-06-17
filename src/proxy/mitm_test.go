@@ -3,15 +3,18 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+	"time"
 )
 
 // TestLeafCacheBounded (ADR-0034 inc2 sub-B): the per-host leaf cache must stay bounded — otherwise an
@@ -203,83 +206,136 @@ func TestLeafForVerifies(t *testing.T) {
 	}
 }
 
-// TestInspectRules exercises the sub-A content rules (pure logic, no TLS): byte cap, needle (incl.
-// split across buffers via the sliding window), HTTP head parse + Host-coherence finding.
-func TestInspectRules(t *testing.T) {
-	allow := &Proxy{maxReqBytes: 100, denyNeedles: []string{"SECRET"}}
-
-	st := &inspectState{host: "h.com"}
-	if r := allow.inspect(st, []byte("GET / HTTP/1.1\r\nHost: h.com\r\n\r\n")); r != "" {
-		t.Errorf("clean request: want allow, got deny %q", r)
+// TestInspectRequestRules exercises the per-request rule engine directly (pure, no TLS): the method
+// allowlist (case-insensitive), the needle scan over the complete serialised request, and the byte cap.
+func TestInspectRequestRules(t *testing.T) {
+	mk := func(method string) *http.Request {
+		r, _ := http.NewRequest(method, "https://h.com/x", nil)
+		return r
 	}
-	if st.method != "GET" || st.path != "/" {
-		t.Errorf("head parse wrong: method=%q path=%q", st.method, st.path)
+	p := &Proxy{allowMethods: methodSet("GET, head")}
+	if r := p.inspectRequest(mk("GET"), []byte("GET /x HTTP/1.1\r\n\r\n"), 10); r != "" {
+		t.Errorf("GET allowed: got deny %q", r)
 	}
-
-	if r := (&Proxy{denyNeedles: []string{"SECRET"}}).inspect(&inspectState{host: "h.com"}, []byte("x SECRET y")); r != "needle" {
-		t.Errorf("needle: want deny, got %q", r)
+	if r := p.inspectRequest(mk("post"), []byte("post /x HTTP/1.1\r\n\r\n"), 10); r != "method:post" {
+		t.Errorf("lowercase post must be denied case-insensitively, got %q", r)
 	}
-
-	if r := (&Proxy{maxReqBytes: 100}).inspect(&inspectState{host: "h.com"}, make([]byte, 200)); r != "req-byte-cap" {
-		t.Errorf("byte cap: want deny, got %q", r)
+	if r := (&Proxy{}).inspectRequest(mk("DELETE"), []byte("DELETE /x HTTP/1.1\r\n\r\n"), 10); r != "" {
+		t.Errorf("empty allowlist must not restrict, got %q", r)
 	}
-
-	// Host-header vs CONNECT-host mismatch -> recorded finding (not a deny in sub-A)
-	st4 := &inspectState{host: "h.com"}
-	if r := allow.inspect(st4, []byte("POST /x HTTP/1.1\r\nHost: evil.com\r\n\r\n")); r != "" {
-		t.Errorf("host mismatch should not deny in sub-A, got %q", r)
+	if r := (&Proxy{denyNeedles: []string{"SECRET"}}).inspectRequest(mk("GET"), []byte("GET /x HTTP/1.1\r\nX: SECRET\r\n\r\n"), 10); r != "needle" {
+		t.Errorf("needle in serialised request must deny, got %q", r)
 	}
-	if !strings.Contains(st4.reason, "host-mismatch") {
-		t.Errorf("want host-mismatch finding, got reason=%q", st4.reason)
+	if r := (&Proxy{maxReqBytes: 100}).inspectRequest(mk("GET"), []byte("..."), 101); r != "req-byte-cap" {
+		t.Errorf("over-cap must deny, got %q", r)
 	}
-
-	// a needle split across two buffers is caught by the sliding window
-	pN := &Proxy{denyNeedles: []string{"ABCD"}}
-	stN := &inspectState{host: "h.com"}
-	pN.inspect(stN, []byte("zzzAB"))
-	if r := pN.inspect(stN, []byte("CDzzz")); r != "needle" {
-		t.Errorf("split needle: want deny, got %q", r)
+	if methodSet("  ") != nil || !methodSet("get,POST")["GET"] || !methodSet("get,POST")["POST"] {
+		t.Errorf("methodSet uppercase/nil-on-empty wrong")
 	}
 }
 
-// TestNeedleScanFragmentation (parsing/crypto audit, HIGH): a deny-needle must be caught however the
-// agent fragments its TLS records — 1 byte/record and across 3+ buffers (the old replaced-not-rolled
-// window missed these) — and a needle LONGER than the 256-byte floor must still be caught (the window
-// rolls up to the longest configured needle).
-func TestNeedleScanFragmentation(t *testing.T) {
-	feed := func(needles []string, chunks []string) string {
-		p := &Proxy{denyNeedles: needles}
-		st := &inspectState{host: "h.com"}
-		for _, c := range chunks {
-			if r := p.inspect(st, []byte(c)); r != "" {
-				return r
+// runInspect drives inspectRelay over net.Pipe: it writes requestBlob to the agent side and collects
+// exactly the bytes the proxy FORWARDED upstream (the security-relevant observable — a denied or smuggled
+// request must NOT appear there) plus the final verdict. A short idle timeout ends the request stream
+// (net.Pipe has no CloseWrite to half-close with).
+func runInspect(t *testing.T, p *Proxy, requestBlob string) (forwarded []byte, st *inspectState) {
+	t.Helper()
+	clientProxy, agent := net.Pipe()
+	upstreamProxy, upstream := net.Pipe()
+	p.idleTimeout = 250 * time.Millisecond
+	p.tunnelMax = 3 * time.Second
+
+	stCh := make(chan *inspectState, 1)
+	go func() { stCh <- p.inspectRelay(clientProxy, upstreamProxy, "h.com", "443") }()
+
+	var fwd bytes.Buffer
+	upDone := make(chan struct{})
+	go func() { // upstream: drain the forwarded requests; never respond (the response dir idles out)
+		defer close(upDone)
+		buf := make([]byte, 4096)
+		for {
+			_ = upstream.SetReadDeadline(time.Now().Add(time.Second))
+			n, err := upstream.Read(buf)
+			if n > 0 {
+				fwd.Write(buf[:n])
+			}
+			if err != nil {
+				return
 			}
 		}
-		return ""
-	}
-	bytewise := func(s string) []string {
-		out := make([]string, len(s))
-		for i := 0; i < len(s); i++ {
-			out[i] = s[i : i+1]
+	}()
+	go func() { // agent: send the request blob, then discard anything sent back
+		_, _ = agent.Write([]byte(requestBlob))
+		buf := make([]byte, 4096)
+		for {
+			_ = agent.SetReadDeadline(time.Now().Add(time.Second))
+			if _, err := agent.Read(buf); err != nil {
+				return
+			}
 		}
-		return out
-	}
+	}()
 
-	// "SECRETTOKEN" streamed one byte per record must be caught (the headline bypass).
-	if r := feed([]string{"SECRETTOKEN"}, bytewise("....SECRETTOKEN....")); r != "needle" {
-		t.Fatalf("1-byte/record fragmented needle must be caught, got %q", r)
+	st = <-stCh
+	_, _, _, _ = agent.Close(), upstream.Close(), clientProxy.Close(), upstreamProxy.Close()
+	<-upDone
+	return fwd.Bytes(), st
+}
+
+// TestInspectRelayPipelineBypass is the headline soundness test: the HTTP/1.1-pipelining bypass that sank
+// the first method-allowlist attempt is closed. With INSPECT_METHODS=GET, an agent that pipelines a
+// disallowed POST behind an allowed GET must have the POST DENIED and — critically — never forwarded.
+func TestInspectRelayPipelineBypass(t *testing.T) {
+	p := &Proxy{allowMethods: methodSet("GET")}
+	blob := "GET /ok HTTP/1.1\r\nHost: h.com\r\n\r\n" +
+		"POST /evil HTTP/1.1\r\nHost: h.com\r\nContent-Length: 5\r\n\r\nhello"
+	fwd, st := runInspect(t, p, blob)
+	if !bytes.Contains(fwd, []byte("GET /ok")) {
+		t.Errorf("the allowed GET should have been forwarded; upstream got: %q", fwd)
 	}
-	// split across 3 buffers.
-	if r := feed([]string{"SECRETTOKEN"}, []string{"xxSECR", "ETTO", "KENyy"}); r != "needle" {
-		t.Fatalf("3-buffer-split needle must be caught, got %q", r)
+	if bytes.Contains(fwd, []byte("POST")) || bytes.Contains(fwd, []byte("/evil")) || bytes.Contains(fwd, []byte("hello")) {
+		t.Fatalf("PIPELINING BYPASS: the disallowed POST reached upstream: %q", fwd)
 	}
-	// a clean stream is not flagged.
-	if r := feed([]string{"SECRETTOKEN"}, []string{"hello ", "world ", "nothing here"}); r != "" {
-		t.Fatalf("clean stream must not flag, got %q", r)
+	if !st.denied || st.reason != "method:POST" {
+		t.Errorf("want deny reason=method:POST, got denied=%v reason=%q", st.denied, st.reason)
 	}
-	// a needle LONGER than the 256-byte floor, streamed 1 byte/record, is still caught.
-	long := strings.Repeat("A", 300)
-	if r := feed([]string{long}, bytewise("zz"+long+"zz")); r != "needle" {
-		t.Fatalf("a 300-byte needle (> 256 floor) fragmented must be caught, got %q", r)
+}
+
+// TestInspectRelayChunkedNormalized: a chunked request body is re-serialised with canonical Content-Length
+// framing upstream (the proxy normalises framing — the smuggling defense), and the flow is allowed.
+func TestInspectRelayChunkedNormalized(t *testing.T) {
+	fwd, st := runInspect(t, &Proxy{}, "POST /u HTTP/1.1\r\nHost: h.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+	if st.denied {
+		t.Fatalf("clean chunked POST must be allowed, got deny %q", st.reason)
+	}
+	if !bytes.Contains(fwd, []byte("Content-Length: 5")) || bytes.Contains(fwd, []byte("chunked")) {
+		t.Errorf("chunked body must be re-serialised as Content-Length (no chunked) upstream: %q", fwd)
+	}
+	if !bytes.Contains(fwd, []byte("hello")) {
+		t.Errorf("the body should still reach upstream: %q", fwd)
+	}
+}
+
+// TestInspectRelayMalformedFailsClosed: an ambiguous request (conflicting Content-Length, a classic
+// smuggling vector) fails closed — denied by the parser, nothing forwarded.
+func TestInspectRelayMalformedFailsClosed(t *testing.T) {
+	fwd, st := runInspect(t, &Proxy{}, "GET /x HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nABCD")
+	if !st.denied || st.reason != "malformed-request" {
+		t.Errorf("conflicting Content-Length must fail closed, got denied=%v reason=%q", st.denied, st.reason)
+	}
+	if len(fwd) != 0 {
+		t.Errorf("nothing should be forwarded for a malformed request, got %q", fwd)
+	}
+}
+
+// TestInspectRelayNeedleInBody: a deny-needle anywhere in the request (here the body) is caught over the
+// complete buffered request — TLS-record fragmentation cannot split it (the whole request is buffered).
+func TestInspectRelayNeedleInBody(t *testing.T) {
+	p := &Proxy{denyNeedles: []string{"SECRETTOKEN"}}
+	fwd, st := runInspect(t, p, "POST /u HTTP/1.1\r\nHost: h.com\r\nContent-Length: 17\r\n\r\nxxSECRETTOKENxxxx")
+	if !st.denied || st.reason != "needle" {
+		t.Errorf("needle in body must deny, got denied=%v reason=%q", st.denied, st.reason)
+	}
+	if bytes.Contains(fwd, []byte("SECRETTOKEN")) {
+		t.Errorf("a needle request must not reach upstream: %q", fwd)
 	}
 }

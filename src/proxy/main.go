@@ -192,8 +192,9 @@ func main() {
 		p.tlsPorts = parsePorts(envOr("BULKHEAD_EGRESS_TLS_PORTS", "443"))
 		p.maxReqBytes = int64(envIntOr("BULKHEAD_EGRESS_MAX_REQ_BYTES", 1<<20))
 		p.denyNeedles = splitNonEmpty(os.Getenv("BULKHEAD_EGRESS_DENY_NEEDLES"))
-		log.Printf("egress-proxy: TLS-termination enabled (inspect tls-ports=%v max-req=%d needles=%d)",
-			keys(p.tlsPorts), p.maxReqBytes, len(p.denyNeedles))
+		p.allowMethods = methodSet(os.Getenv("BULKHEAD_EGRESS_INSPECT_METHODS"))
+		log.Printf("egress-proxy: TLS-termination enabled (inspect tls-ports=%v max-req=%d needles=%d methods=%v)",
+			keys(p.tlsPorts), p.maxReqBytes, len(p.denyNeedles), keys(p.allowMethods))
 	} else {
 		log.Printf("egress-proxy: no re-signing CA — inc1 boundary only (inspect-marked flows pass through, recorded)")
 	}

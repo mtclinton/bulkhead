@@ -12,6 +12,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -19,9 +20,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -172,7 +176,11 @@ func (p *Proxy) terminate(c, up net.Conn, host, port string) {
 		p.recordInspectDeny(host, port, "leaf-mint-fail")
 		return
 	}
-	clientTLS := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12})
+	// ALPN is pinned to http/1.1 on BOTH legs so the inspected stream is always HTTP/1.1 framing the
+	// proxy fully parses (sub-A scope). An agent that insists on h2 gets no h2 ALPN here and so speaks
+	// http/1.1; if it forces h2 anyway the request parse fails and the flow fails closed (R4), never
+	// relayed un-inspected.
+	clientTLS := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}})
 	if err := clientTLS.Handshake(); err != nil {
 		logd("MITM-FAIL", host, port, "agent handshake: "+err.Error())
 		p.recordInspectDeny(host, port, "tls-handshake-fail")
@@ -184,7 +192,7 @@ func (p *Proxy) terminate(c, up net.Conn, host, port string) {
 	if sni := clientTLS.ConnectionState().ServerName; sni != "" && !strings.EqualFold(sni, host) {
 		logd("MITM-SNI", host, port, "SNI "+sni+" != CONNECT host (CONNECT host wins)")
 	}
-	upstreamTLS := tls.Client(up, &tls.Config{ServerName: host, RootCAs: p.realRoots, MinVersion: tls.VersionTLS12})
+	upstreamTLS := tls.Client(up, &tls.Config{ServerName: host, RootCAs: p.realRoots, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}})
 	if err := upstreamTLS.Handshake(); err != nil {
 		logd("MITM-FAIL", host, port, "upstream verify: "+err.Error())
 		p.recordInspectDeny(host, port, "upstream-verify-fail")
@@ -201,74 +209,94 @@ func (p *Proxy) recordInspectDeny(host, port, reason string) {
 	}
 }
 
-// inspectState carries one terminated flow's parsed metadata + counters. The two relay goroutines
-// touch disjoint fields (the agent->upstream goroutine owns method/path/reqBytes/denied/reason/the
-// head buffer + needle window; the upstream->agent goroutine owns respBytes), and the final record
-// is read only after wg.Wait(), so no lock is needed.
+// inspectState carries one terminated flow's metadata + counters. The two relay goroutines touch
+// disjoint fields (the agent->upstream goroutine owns method/path/reqBytes/denied/reason; the
+// upstream->agent goroutine owns respBytes), and the final record is read only after wg.Wait(), so no
+// lock is needed. method/path hold the FIRST request's line (the per-flow signed record's granularity).
 type inspectState struct {
 	host      string
 	method    string
 	path      string
-	reqHost   string
 	reqBytes  int64
 	respBytes int64
 	denied    bool
 	reason    string
-	hdrParsed bool
-	hdrBuf    []byte
-	tail      []byte // sliding-window overlap so a needle can't split across buffers
 }
 
-const (
-	maxHeadBytes = 8 << 10 // bound the request-head accumulation
-	needleWindow = 256     // FLOOR for the needle-scan rolling window; inspect() raises it to the longest configured needle
-)
+// maxInspectBody hard-bounds how much of a single request body the proxy buffers when maxReqBytes is
+// unset (production sets it to 1<<20), so a missing knob can never turn the buffering relay into an
+// unbounded-memory sink.
+const maxInspectBody = 8 << 20
 
-// inspectRelay relays decrypted bytes between agent and upstream — identical to splice() in its
-// idle/total deadlines and CloseWrite half-close (a terminated flow cannot pin a concurrency slot
-// longer than a spliced one) — except each agent->upstream buffer passes through p.inspect BEFORE it
-// is written upstream, so a deny verdict drops the flow mid-stream. One signed Hook=inspect record is
-// appended after the flow (the connect-ALLOW already fail-closed-gated the destination before any byte).
-func (p *Proxy) inspectRelay(clientTLS, upstreamTLS net.Conn, host, port string) {
+// inspectRelay relays a TLS-terminated flow while keeping the agent->upstream direction HTTP/1.1-AWARE:
+// it PARSES each request, vets it whole against the request-side rule engine, and RE-SERIALISES it to the
+// upstream with canonical fixed-length framing. So the upstream's request boundaries are exactly the
+// proxy's — never the agent's raw bytes — which forecloses the request-smuggling / HTTP/1.1-pipelining
+// class that sank the first method-allowlist attempt (a rule on a one-shot first-line parse was bypassed
+// by pipelining a second request behind an allowed one; here EVERY request is framed and gated). Nothing
+// reaches the upstream until the WHOLE request is vetted (no partial-request leak; the needle scan sees
+// the complete request). The response direction stays a counted opaque relay (response inspection is a
+// later sub-B item). Idle/total deadlines + CloseWrite match splice() so a terminated flow cannot pin a
+// slot longer than a spliced one. A request the HTTP/1.1 parser cannot frame (garbage, ambiguous
+// smuggling framing, or a post-Upgrade/h2 byte stream) fails CLOSED (R4), never relayed un-inspected.
+func (p *Proxy) inspectRelay(clientTLS, upstreamTLS net.Conn, host, port string) *inspectState {
 	st := &inspectState{host: host}
 	deadline := time.Now().Add(p.tunnelMax)
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go func() { // agent -> upstream (inspected)
+	go func() { // agent -> upstream: HTTP/1.1-aware, sound framing
 		defer wg.Done()
-		buf := make([]byte, 32*1024)
+		defer closeWrite(upstreamTLS)
+		br := bufio.NewReader(&idleConn{Conn: clientTLS, idle: p.idleTimeout, total: deadline})
+		first := true
 		for {
-			now := time.Now()
-			if !now.Before(deadline) {
-				break
-			}
-			rd := now.Add(p.idleTimeout)
-			if rd.After(deadline) {
-				rd = deadline
-			}
-			_ = clientTLS.SetReadDeadline(rd)
-			n, err := clientTLS.Read(buf)
-			if n > 0 {
-				if reason := p.inspect(st, buf[:n]); reason != "" {
-					st.denied, st.reason = true, reason
-					break
-				}
-				if _, werr := upstreamTLS.Write(buf[:n]); werr != nil {
-					break
-				}
-			}
+			req, err := http.ReadRequest(br)
 			if err != nil {
-				break
+				if !isStreamEnd(err) {
+					st.denied, st.reason = true, "malformed-request"
+				}
+				return
 			}
-		}
-		if cw, ok := upstreamTLS.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
+			// Buffer the body (bounded), then re-serialise the WHOLE request with canonical fixed-length
+			// framing — dropping the agent's chunked/ambiguous framing — into one buffer we vet then forward.
+			body, capped := p.readInspectBody(req.Body)
+			req.Body.Close()
+			if capped {
+				st.denied, st.reason = true, "req-byte-cap"
+				return
+			}
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			req.ContentLength = int64(len(body))
+			req.TransferEncoding = nil
+			req.RequestURI = "" // required: req.Write writes from req.URL, not a server-side RequestURI
+			var out bytes.Buffer
+			if err := req.Write(&out); err != nil {
+				return // cannot canonically re-serialise -> drop rather than forward something ambiguous
+			}
+			st.reqBytes += int64(out.Len())
+			if first {
+				st.method, st.path, first = req.Method, req.URL.RequestURI(), false
+			}
+			// Host-header vs CONNECT-host coherence: a confused-deputy SIGNAL, recorded (sub-A semantics),
+			// not a deny (a legitimate virtual-host Host can differ from the CONNECT name).
+			if h := stripPort(req.Host); h != "" && !strings.EqualFold(h, st.host) && st.reason == "" {
+				st.reason = "finding:host-mismatch(" + h + ")"
+			}
+			if reason := p.inspectRequest(req, out.Bytes(), st.reqBytes); reason != "" {
+				st.denied, st.reason = true, reason
+				return
+			}
+			_ = upstreamTLS.SetWriteDeadline(deadline)
+			if _, err := upstreamTLS.Write(out.Bytes()); err != nil {
+				return
+			}
 		}
 	}()
 
-	go func() { // upstream -> agent (counted; response-direction inspection is sub-B)
+	go func() { // upstream -> agent (counted; response-direction inspection is a later sub-B item)
 		defer wg.Done()
+		defer closeWrite(clientTLS)
 		buf := make([]byte, 32*1024)
 		for {
 			now := time.Now()
@@ -291,9 +319,6 @@ func (p *Proxy) inspectRelay(clientTLS, upstreamTLS net.Conn, host, port string)
 				break
 			}
 		}
-		if cw, ok := clientTLS.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		}
 	}()
 
 	wg.Wait()
@@ -306,76 +331,96 @@ func (p *Proxy) inspectRelay(clientTLS, upstreamTLS net.Conn, host, port string)
 	}
 	logd("INSPECT", host, port, fmt.Sprintf("%s method=%s path=%s reqb=%d respb=%d %s",
 		decision, st.method, st.path, st.reqBytes, st.respBytes, reason))
+	return st
 }
 
-// inspect applies sub-A's small-but-real request-side ruleset to one decrypted agent->upstream
-// buffer and returns a deny reason ("" = allow). Sub-A rules: (1) a per-flow byte budget bounding
-// bulk exfil to an allowed endpoint; (2) Host-header vs CONNECT-host coherence (a confused-deputy
-// signal within an allowed TLS session — RECORDED in sub-A, not yet a deny); (3) an operator literal
-// needle denylist over a bounded sliding window so a match cannot split across buffers. Never logs
-// the body; only the parsed head + counters + verdict reach the signed record.
-func (p *Proxy) inspect(st *inspectState, buf []byte) string {
-	st.reqBytes += int64(len(buf))
-	if p.maxReqBytes > 0 && st.reqBytes > p.maxReqBytes {
+// inspectRequest applies the request-side rule engine to one fully-parsed, re-serialised inspected
+// request (`serialized` is exactly the bytes about to go upstream; `reqBytes` is the cumulative flow
+// total) and returns a deny reason ("" = allow). Because every request is framed by the proxy, these
+// rules CANNOT be bypassed by pipelining or smuggling:
+//   - method allowlist (inc2 sub-B): a method outside BULKHEAD_EGRESS_INSPECT_METHODS is denied,
+//     case-insensitively (a lowercase "post" cannot dodge a POST rule). Empty allowlist => no restriction.
+//   - per-flow byte cap: the cumulative request bytes bound bulk exfil to an allowed endpoint.
+//   - operator literal needle denylist over the COMPLETE serialised request — no rolling window needed,
+//     since the whole request is in `serialized`, so a needle can never split across reads.
+func (p *Proxy) inspectRequest(req *http.Request, serialized []byte, reqBytes int64) string {
+	if len(p.allowMethods) > 0 && !p.allowMethods[strings.ToUpper(req.Method)] {
+		return "method:" + req.Method
+	}
+	if p.maxReqBytes > 0 && reqBytes > p.maxReqBytes {
 		return "req-byte-cap"
 	}
-	if !st.hdrParsed {
-		if len(st.hdrBuf) < maxHeadBytes {
-			st.hdrBuf = append(st.hdrBuf, buf...)
+	for _, nd := range p.denyNeedles {
+		if bytes.Contains(serialized, []byte(nd)) {
+			return "needle"
 		}
-		if bytes.Contains(st.hdrBuf, []byte("\r\n\r\n")) || len(st.hdrBuf) >= maxHeadBytes {
-			st.parseHead()
-			if st.reqHost != "" && !strings.EqualFold(stripPort(st.reqHost), st.host) {
-				st.reason = "finding:host-mismatch(" + stripPort(st.reqHost) + ")"
-			}
-		}
-	}
-	// Needle denylist over a TRUE rolling window of the last `win` stream bytes. The window must be a
-	// genuine roll (NOT replaced by each buffer) AND >= the longest needle, or an agent — which controls
-	// its TLS plaintext record sizes — defeats the scan by fragmenting a needle across small records
-	// (e.g. 1 byte/record). `combined` is the prior window plus this buffer, built in a FRESH slice so it
-	// never aliases st.tail's backing; we scan it, then retain its last `win` bytes for the next overlap.
-	if len(p.denyNeedles) > 0 {
-		win := needleWindow
-		combined := make([]byte, 0, len(st.tail)+len(buf))
-		combined = append(combined, st.tail...)
-		combined = append(combined, buf...)
-		for _, nd := range p.denyNeedles {
-			if len(nd) > win {
-				win = len(nd) // a needle longer than the floor must still fit in one window span
-			}
-			if bytes.Contains(combined, []byte(nd)) {
-				return "needle"
-			}
-		}
-		if len(combined) > win {
-			combined = combined[len(combined)-win:]
-		}
-		st.tail = append(st.tail[:0], combined...)
 	}
 	return ""
 }
 
-// parseHead extracts METHOD, request-target, and the Host header from the accumulated HTTP/1.1
-// request head (sub-A scopes inspection to HTTP/1.1 request semantics; HTTP/2 is sub-B).
-func (st *inspectState) parseHead() {
-	st.hdrParsed = true
-	lines := bytes.Split(st.hdrBuf, []byte("\r\n"))
-	if len(lines) == 0 {
-		return
+// readInspectBody buffers a request body up to the byte cap (maxReqBytes, else a hard memory bound), so
+// the whole request can be vetted before any byte leaves. capped=true means the body alone exceeded the
+// cap — a bulk-exfil signal the caller denies (req-byte-cap).
+func (p *Proxy) readInspectBody(body io.Reader) (data []byte, capped bool) {
+	limit := p.maxReqBytes
+	if limit <= 0 || limit > maxInspectBody {
+		limit = maxInspectBody
 	}
-	if parts := bytes.Fields(lines[0]); len(parts) >= 2 {
-		st.method = string(parts[0])
-		st.path = string(parts[1])
+	data, _ = io.ReadAll(io.LimitReader(body, limit+1))
+	if int64(len(data)) > limit {
+		return data[:limit], true
 	}
-	for _, ln := range lines[1:] {
-		if len(ln) == 0 {
-			break // end of headers
+	return data, false
+}
+
+// methodSet parses a comma-list of HTTP methods into an UPPERCASE set so a lowercase method cannot dodge
+// a rule. Empty input => nil (no method restriction; the default). inc2 sub-B.
+func methodSet(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range strings.Split(s, ",") {
+		if m = strings.ToUpper(strings.TrimSpace(m)); m != "" {
+			out[m] = true
 		}
-		if i := bytes.IndexByte(ln, ':'); i > 0 && bytes.EqualFold(bytes.TrimSpace(ln[:i]), []byte("host")) {
-			st.reqHost = string(bytes.TrimSpace(ln[i+1:]))
-			break
-		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// idleConn bounds every Read with a fresh idle deadline capped by an absolute total deadline, so
+// http.ReadRequest (and the body reads behind it) over a terminated TLS conn honour the same idle/total
+// budget as a spliced tunnel — a slow or stalled request stream cannot pin a concurrency slot.
+type idleConn struct {
+	net.Conn
+	idle  time.Duration
+	total time.Time
+}
+
+func (ic *idleConn) Read(b []byte) (int, error) {
+	now := time.Now()
+	if !now.Before(ic.total) {
+		return 0, os.ErrDeadlineExceeded
+	}
+	rd := now.Add(ic.idle)
+	if rd.After(ic.total) {
+		rd = ic.total
+	}
+	_ = ic.Conn.SetReadDeadline(rd)
+	return ic.Conn.Read(b)
+}
+
+// isStreamEnd reports whether err is a clean end of the agent's request stream (EOF, a hit deadline, or a
+// closed conn) — the agent simply stopped sending. Any OTHER http.ReadRequest error is unparseable or
+// ambiguous framing and is treated as a deny (fail closed), never a silent clean end.
+func isStreamEnd(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, net.ErrClosed)
+}
+
+// closeWrite half-closes the write side after a relay direction drains (matches splice()).
+func closeWrite(c net.Conn) {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
 	}
 }
 

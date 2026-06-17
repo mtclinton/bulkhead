@@ -1,6 +1,6 @@
 # ADR-0034: Network egress: structural confinement + mediating proxy, not allowlist-as-boundary
 
-Status: Accepted — increment 1 (structural confinement) + increment 2 sub-A (selective TLS-termination + content inspection) shipped + live-verified; inc2 sub-B started (re-signing CA key TPM2-sealable on bare metal); sub-B remainder (rule-engine breadth, response inspection, HTTP/2, passthrough exception list) pending
+Status: Accepted — increment 1 (structural confinement) + increment 2 sub-A (selective TLS-termination + content inspection) shipped + live-verified; inc2 sub-B started (re-signing CA key TPM2-sealable on bare metal; the SOUND HTTP/1.1-aware request rule engine + method allowlist shipped); sub-B remainder (response-direction inspection + body DLP, HTTP/2 + websocket inspection, passthrough exception list) pending
 Date: 2026-06-07
 
 ## Implementation status
@@ -48,20 +48,24 @@ the disposition of UNMARKED allowlist entries from passthrough to inspect, so a 
 "every allowed host is TLS-terminated + content-inspected, or denied if it can't be" (the natural
 completion of the R4 inspect-fail-closed rule) with a single flag — an explicit per-entry mode still
 overrides, and unset keeps the inc1-compatible passthrough default (`verify-egress-mitm` ARM 4).
-The MITM leaf-cert cache is now bounded (a hard ceiling with cheap re-mint on eviction). An
-inspected-egress HTTP-method allowlist was shipped then **REVERTED**: a 2026-06-16 adversarial audit
-showed it was bypassable by HTTP/1.1 request **pipelining** — the method check ran only on the first
-request line of a raw byte relay (`inspect()` fired once, inside `if !st.hdrParsed`), so a compromised
-agent (the threat model) could write `GET /ok\r\n\r\nPOST /steal\r\n\r\n<secret>` into one terminated
-TLS record and the whole buffer, POST and body included, relayed upstream after only the GET was
-checked. A control a compromised agent trivially bypasses is a false guarantee, so it was removed
-rather than left. LESSON (recorded for the next attempt): a SOUND request-line rule engine
-(method/path/header allow-deny) requires the inspect path to become HTTP/1.1-AWARE — frame EACH
-request (Content-Length / Transfer-Encoding), apply the rules per-request, and fail closed on
-un-parseable framing OR non-HTTP/1.1 (e.g. HTTP/2); a byte-relay scan of the first line cannot
-enforce a content policy. STILL PENDING: that HTTP-aware rule engine + response-direction inspection +
-body DLP; HTTP/2 + websockets; the curated, audited pinned-cert/mTLS passthrough exception list (the
-open question below); an audit-chain volume review.
+The MITM leaf-cert cache is now bounded (a hard ceiling with cheap re-mint on eviction). An inspected-egress HTTP-method allowlist was shipped, **REVERTED**, then **RE-DONE SOUNDLY**
+(2026-06-17). The first cut (2026-06-16) was bypassable by HTTP/1.1 request **pipelining** — the method
+check ran once on the first request line of a raw byte relay (`inspect()` fired inside `if !st.hdrParsed`),
+so a compromised agent could write `GET /ok\r\n\r\nPOST /steal\r\n\r\n<secret>` and the POST + body
+relayed upstream after only the GET was checked. A control a compromised agent trivially bypasses is a
+false guarantee, so it was removed. The re-done version makes the inspect leg **HTTP/1.1-AWARE**: it
+PARSES each request (`http.ReadRequest`), vets it whole (method allowlist / byte cap / needle), and
+RE-SERIALISES it to the upstream with canonical fixed-length framing — so the upstream's request
+boundaries are exactly the proxy's, never the agent's raw bytes. That forecloses the pipelining/smuggling
+class BY CONSTRUCTION: every request is framed and gated, and nothing leaves until the whole request is
+vetted. The method allowlist (`BULKHEAD_EGRESS_INSPECT_METHODS`, case-insensitive) is its first rule;
+conflicting/ambiguous framing (e.g. duplicate Content-Length) and non-HTTP/1.1 (h2, post-Upgrade
+websockets) fail CLOSED (R4). `TestInspectRelayPipelineBypass` proves the old bypass is dead (the
+pipelined POST never reaches upstream); `verify-egress-mitm` ARM 5 live-proves the method deny (the
+agent's GET is refused, signed Hook=inspect deny reason=method:GET, the chain still verifies). STILL
+PENDING: response-direction inspection + body DLP; HTTP/2 + websocket inspection (currently fail-closed
+on inspect hosts); the curated, audited pinned-cert/mTLS passthrough exception list (the open question
+below). The audit-chain volume review is now done — bounded-retention segment rotation (ADR-0040).
 
 **Post-ship security review (2026-06-16).** An adversarial review of the shipped egress boundary
 closed two wiring gaps (record: `docs/security-reviews/2026-06-shipped-isolation-review.md`).

@@ -47,6 +47,10 @@ type Proxy struct {
 	tlsPorts    map[string]bool
 	maxReqBytes int64
 	denyNeedles []string
+	// inc2 sub-B (ADR-0034): the request-side rule engine over PARSED inspected requests. An empty
+	// allowMethods imposes no method restriction (the default). Enforced soundly per-request in
+	// inspectRelay (every request is framed by the proxy), not on a one-shot first-line parse.
+	allowMethods map[string]bool
 }
 
 // NewProxy builds the proxy. internalCIDRs are the ONLY internal (loopback / private /
