@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -114,6 +114,12 @@ verify-egress-reboot:
 # false-brick) and appends continue link-continuous across the seam. Needs a built wic.
 verify-audit-rotation:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-audit-rotation-check.py
+
+# Host-side (NOT the qemu harness — it has no nested KVM): ADR-0031 Firecracker HOSTILE-tier spike. Boots
+# a microVM with bulkhead's Yocto guest kernel under KVM and asserts host-surface collapse (a separate
+# guest kernel, 8/8). Needs a built wic (for the deploy bzImage) + firecracker ($FIRECRACKER) + /dev/kvm.
+verify-firecracker-spike:
+	sh $(BULKHEAD_ROOT)/scripts/fc-spike-check.sh
 
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the

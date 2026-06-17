@@ -1,6 +1,6 @@
 # ADR-0031: Isolation substrate: reimplemented-kernel default, Firecracker hostile tier, no hand-rolled VMM
 
-Status: Accepted (default tier) — runsc substrate integration slices 1-6 shipped + live-proven 2026-06-15: packaged → host-surface collapse → agent-under-Sentry → mediated egress → real agent loop → production runsc-run form → DEPLOYABLE bulkhead-agent-runsc@ unit
+Status: Accepted (default tier) — runsc substrate integration slices 1-6 shipped + live-proven 2026-06-15: packaged → host-surface collapse → agent-under-Sentry → mediated egress → real agent loop → production runsc-run form → DEPLOYABLE bulkhead-agent-runsc@ unit. HOSTILE tier (Firecracker) spiked GO 2026-06-17: a microVM boots bulkhead's Yocto guest kernel under KVM (host-surface collapse), reproducibly via scripts/fc-spike-check.sh; the in-image recipe + mediated legs + deployable unit are the remaining slices.
 Date: 2026-06-07
 Pillar: agent-isolation
 Relates to: ADR-0032 (interception primitive), ADR-0033 (io_uring broker), ADR-0034 (egress), ADR-0035 (action authorization), ADR-0036 (model-routing quarantine runs on this substrate), ADR-0037 (multi-agent domains reuse this substrate), ADR-0038 (confidential computing rejected); refines the agent-isolation pillar of ADR-0001.
@@ -106,6 +106,23 @@ runsc release-20260413:
 - **`mini-sentry`** (sibling prototype, ~5.6k LOC Go, ptrace-SYSEMU) validates the *concept*; runsc
   with Systrap is the production vehicle — exactly the "approach mini-sentry demonstrated, upgraded to
   Systrap" this ADR specifies.
+
+**Hostile-tier (Firecracker) spike — GO (2026-06-17).** The hostile tier's "can we even boot a microVM
+here" unknown is retired too, reproducibly (`scripts/fc-spike-check.sh`, `make verify-firecracker-spike`,
+8/8). Firecracker v1.15.1 boots a microVM on a KVM-capable host with bulkhead's OWN Yocto guest kernel
+(ELF vmlinux extracted from the deploy bzImage — Firecracker needs ELF, not the bzImage) and a minimal
+busybox rootfs: the guest reports kernel `6.6.127-yocto-standard`, a SEPARATE kernel from the host's 6.12
+— host-surface collapse, the hostile tier's load-bearing property, now a real KVM boundary rather than a
+reimplemented one. The stock qemux86-64 kernel already carries `VIRTIO_MMIO`/`VIRTIO_BLK`/`8250`, so no
+kernel reconfig was needed for the boot (a firecracker-tuned guest kernel with io_uring disabled per
+ADR-0033 is a later hardening slice). VERIFICATION SEAM: the spike is HOST-SIDE — the qemu verify harness
+runs `-cpu IvyBridge` with no nested KVM, so the microVM is proven on the build host (which has /dev/kvm +
+nested enabled), not inside the qemu-booted wic. Remaining slices mirror the runsc build-out: the in-image
+firecracker recipe (a single static binary, like runsc), the firecracker-tuned guest kernel + minimal
+agent rootfs, the mediated egress/router legs into the VM (vsock to the host proxy/router — the microVM
+gets no direct network), and a deployable `bulkhead-agent-firecracker@` unit mirroring
+`bulkhead-agent-runsc@`. `mini-firecracker` (sibling Go prototype) validated the concept; real Firecracker
+is the production vehicle, exactly as this ADR specifies.
 
 **Integration shape (deferred cost, est. M–L when scheduled).** runsc becomes the default-tier agent
 jail's OCI runtime; the namespace/E0–E3 tier is retained for trusted/low-threat (per *Migration*).
