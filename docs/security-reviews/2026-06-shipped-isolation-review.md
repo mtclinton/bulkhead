@@ -12,7 +12,9 @@ mechanism for one MED (R7, a router paid-call denial-of-wallet cap), and saw 17 
 refuted by independent skeptics. A SECOND, cross-cutting audit (interactions/sequences/races) then
 found three more the per-surface pass missed: R8 [HIGH] torn-tail fusion (**fixed**), R9 [HIGH] shared
 /data exhaustion (deferred — rotation design), R10 [MED] a GC cgroup-inode-recycle race (**fixed**),
-with 4 of 7 refuted.
+with 4 of 7 refuted. A THIRD, parsing/crypto audit then found R11 [HIGH] a deny-needle scan evaded by
+TLS-record fragmentation (**fixed**) and R12 [LOW] an unbounded startup chain read (documented), with
+7 of 10 refuted — the canonical-encoding/crypto and agent grammar holding up.
 
 ## Scope
 
@@ -296,6 +298,47 @@ eBPF egress filter holds independently); a stranded `.task` credential (0700-roo
 ProtectSystem/DynamicUser/empty-caps make it unreadable to the agent); the plaintext seed on `/data`
 (0600-root + the non-root confined agent's empty caps); and RAUC reactivating a vulnerable prior slot
 (the privileged signed-bundle install boundary gates the precondition).
+
+## Third audit: parsing/crypto lens (2026-06-16)
+
+A third lens — input-validation/parsing robustness + crypto/protocol correctness, where malformed or
+adversarial bytes meet a parser, encoder, or crypto primitive. 10 candidates → **3 survived, 7
+backstopped**. The canonical-encoding/crypto and the agent grammar held up; the content filter did not.
+
+### R11 [HIGH] — the deny-needle scan was evaded by TLS-record fragmentation (fixed)
+
+The operator deny-needle denylist (`BULKHEAD_EGRESS_DENY_NEEDLES`) scans decrypted agent→upstream
+bytes for literal needles across a sliding window. But `inspect()` REPLACED the window with each
+buffer (`st.tail = append(st.tail[:0], buf...)`) instead of ROLLING it, so a needle split across 3+
+small records was never scanned in one span — and an RCE'd agent controls its TLS plaintext record
+sizes (Go's `tls.Conn.Read` returns one record per call). Confirmed empirically: `SECRETTOKEN`
+streamed one byte per record slipped through, despite the comment claiming "a needle can't split
+across buffers". A needle longer than the fixed 256-byte window was also splittable. **Fixed**
+(`cf951ed`): a true rolling window (the last *win* bytes of prior-window ++ buffer, built in a fresh
+slice that never aliases the tail), with *win* raised to the longest configured needle.
+`TestNeedleScanFragmentation` covers 1-byte/record, a 3-buffer split, and a 300-byte needle. (The
+encoded/encrypted-exfil evasion is inherent to any literal denylist and out of scope; this closes the
+FRAGMENTATION of a *present plaintext* needle.)
+
+### R12 [LOW] — startup chain readers read the whole file unbounded (documented)
+
+`repairTornTail` (added in R8) and `lastChainHash` `os.ReadFile` the entire chain at open, unlike
+`verifyChainState`'s bounded scanner. The audit framed this as a multi-GB OOM, but `/data` is a
+`--fixed-size 100M` partition, so the chain cannot exceed ~100 MB — the read is wasteful (≈100 MB ×
+three services at boot is not free on a constrained appliance) but not the multi-GB OOM claimed. Fix
+shape: a bounded TAIL read (seek to end, read back a capped window for the last record/newline), O(one
+record). DEFERRED as a hygiene follow-up — it pairs naturally with R9's chain rotation (which also
+bounds the on-disk footprint) and applies to the three byte-identical copies.
+
+### Refuted (7)
+
+The parsers, grammar, protocol, and crypto largely held: the request-line bytes can't smuggle a
+newline (`bytes.Fields` strips CR/LF); the Host-coherence check is advisory-only (no deny to bypass);
+the quarantine DELEGATE classes are AND-clamped by the kernel-attested mask in the broker regardless
+of the in-agent gate; `varName`/`isIdent` rejects multi-token register smuggling; `delegGen` rides the
+pidfd-pinned attested cgroup path; the chain-domain binding comes from the root-owned image-baked unit;
+a mismatched re-signing CA key fails closed at the handshake. That 7/10 fell — and that the
+canonical-vs-json hash encoding (the highest-value forge target) held — is the assurance.
 
 ## Verification posture
 
