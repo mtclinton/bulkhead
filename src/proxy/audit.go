@@ -25,6 +25,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +59,13 @@ type auditLog struct {
 	prevHash []byte
 	seq      uint64
 	domain   string
+	// ADR-0038 segment rotation (all guarded by a.mu, set once in openAuditLog except segNext, bumped by
+	// rotate()). dir/base locate the chain; rotateBytes>0 enables rotation; segKeep is the retained window.
+	dir         string
+	base        string
+	rotateBytes int64
+	segKeep     int
+	segNext     uint64
 }
 
 // auditRecord is byte-identical to the collector's (the verifier unmarshals it); keep the json
@@ -92,8 +101,11 @@ func openAuditLog(domain, filename string) (*auditLog, error) {
 	if err := repairTornTail(chainPath); err != nil {
 		logd("AUDIT-REPAIR", chainPath, "", err.Error())
 	}
+	// Seed the cross-boot prevHash (F5) from the chain TIP, which after a rotation lives in the live file
+	// OR — in the rename->first-append window — the newest sealed segment (lastChainTip, ADR-0038), never a
+	// spurious genesis that would fork the chain.
 	prev := make([]byte, sha256.Size)
-	if h := lastChainHash(chainPath); h != nil {
+	if h := lastChainTip(dir, filename); h != nil {
 		prev = h
 	}
 	f, err := os.OpenFile(chainPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -105,7 +117,11 @@ func openAuditLog(domain, filename string) (*auditLog, error) {
 		f.Close()
 		return nil, err
 	}
-	a := &auditLog{f: f, path: f.Name(), priv: priv, prevHash: prev, domain: domain}
+	rotateBytes, segKeep := auditSegmentConfig()
+	a := &auditLog{
+		f: f, path: f.Name(), priv: priv, prevHash: prev, domain: domain,
+		dir: dir, base: filename, rotateBytes: rotateBytes, segKeep: segKeep, segNext: nextSegNum(dir, filename),
+	}
 	if err := os.WriteFile(filepath.Join(dir, "audit-pub.txt"), []byte(a.pubHex()+"\n"), 0o644); err != nil {
 		log.Printf("audit: export public key: %v", err)
 	}
@@ -202,6 +218,162 @@ func lastChainHash(path string) []byte {
 	return nil
 }
 
+// --- ADR-0038: bounded-retention segment rotation -------------------------------------------------
+// The signed chains share a fixed 100 MB /data partition; an unbounded append-only log lets one noisy
+// tier (egress) fill /data and starve every other chain into a fail-closed append DoS (security-review
+// R9). Rotation seals the live file into a numbered segment (<live>.NNNNNN) once it reaches a byte
+// threshold, keeps a bounded window of segments, and prunes older ones — capping each chain at
+// (segKeep+1)*rotateBytes. The seam is link-continuous (prevHash/seq are NOT reset across a rotation),
+// so verifySegmentedChain checks the retained segments + live file as ONE chain. segmentPath/listSegments
+// MUST stay byte-identical across src/collector, src/proxy, src/router (the collector's verifier reads the
+// segments the proxy/router produce); the "%s.%06d" naming is the shared contract.
+
+// segmentPath is the sealed-segment path for number n: <dir>/<base>.NNNNNN, zero-padded width-6 so the
+// lexical order of the names equals their numeric order (6 digits => up to 999999 segments per chain).
+func segmentPath(dir, base string, n uint64) string {
+	return filepath.Join(dir, fmt.Sprintf("%s.%06d", base, n))
+}
+
+// listSegments returns the existing sealed-segment numbers for <dir>/<base>, ascending. A sibling counts
+// as a segment IFF its name is exactly base + "." + an all-digit suffix — so the live file, audit-pub.txt,
+// a *.tmp, or another chain's files in a shared dir (control.jsonl beside provenance.jsonl) are excluded.
+func listSegments(dir, base string) []uint64 {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	prefix := base + "."
+	var nums []uint64
+	for _, e := range ents {
+		if e.IsDir() {
+			continue // a sealed segment is always a regular file; never try to verify a directory fd
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		suf := name[len(prefix):]
+		if suf == "" || strings.TrimLeft(suf, "0123456789") != "" {
+			continue // not an all-digit suffix
+		}
+		n, err := strconv.ParseUint(suf, 10, 64)
+		if err != nil {
+			continue
+		}
+		nums = append(nums, n)
+	}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
+	return nums
+}
+
+// nextSegNum returns the number the next sealed segment should get: one past the highest existing segment
+// (so a box that rotated, lost power, and rebooted never reuses a number or overwrites signed history), or
+// 1 on a chain that has never rotated.
+func nextSegNum(dir, base string) uint64 {
+	segs := listSegments(dir, base)
+	if len(segs) == 0 {
+		return 1
+	}
+	return segs[len(segs)-1] + 1
+}
+
+// lastChainTip returns the chain's current tip (last well-formed record hash): the LIVE file's tip, or —
+// if the live file is empty/absent (the rename->first-append window after a rotate, or a rotate that
+// crashed before its first new record) — the newest non-empty sealed segment's tip, else nil (genesis).
+// Used to seed the cross-boot prevHash (F5) and to bind the attest HEADs (ADR-0025) so a quote taken in
+// that window binds the newest-segment tip, not a spurious genesis. Per-file tolerance mirrors lastChainHash.
+func lastChainTip(dir, base string) []byte {
+	if h := lastChainHash(filepath.Join(dir, base)); h != nil {
+		return h
+	}
+	segs := listSegments(dir, base)
+	for i := len(segs) - 1; i >= 0; i-- {
+		if h := lastChainHash(segmentPath(dir, base, segs[i])); h != nil {
+			return h
+		}
+	}
+	return nil
+}
+
+// auditSegmentConfig reads the rotation knobs from the environment (ADR-0038). rotateBytes is 0 (rotation
+// DISABLED — the pre-R9 single-file behaviour, kept for dev/Buildroot/tests) unless
+// BULKHEAD_AUDIT_SEGMENT_BYTES is a positive integer; the appliance *-data.conf drop-ins set it. segKeep is
+// the number of sealed segments retained besides the live file (default 1, clamped to a MINIMUM of 1: the
+// verifier needs >=1 retained segment as the post-prune on-box anchor, and it keeps the live file always
+// linking to a present segment's tip — see verifySegmentedChain). Each chain is bounded at
+// (segKeep+1)*rotateBytes on disk (+ <1 record of slack per segment). APPLIANCE BUDGET INVARIANT: Σ over
+// the chains of (segKeep+1)*rotateBytes must stay below the /data partition (100 MB) — at 8 MiB / keep=1
+// the five chains use 5*(1+1)*8 = 80 MiB.
+func auditSegmentConfig() (rotateBytes int64, segKeep int) {
+	segKeep = 1
+	if v := os.Getenv("BULKHEAD_AUDIT_SEGMENT_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			rotateBytes = n
+		}
+	}
+	if v := os.Getenv("BULKHEAD_AUDIT_SEGMENTS_KEEP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			segKeep = n // a value < 1 is ignored: keep the safe default of 1
+		}
+	}
+	return rotateBytes, segKeep
+}
+
+// rotate seals the current live file as the next numbered segment and reopens an empty live file, WITHOUT
+// resetting a.prevHash/a.seq — so the first record in the fresh live file links to the sealed segment's tip
+// and CONTINUES the seq (the seam is link-continuous; verifySegmentedChain proves it via the existing
+// prev_hash check). It then prunes segments older than the retention window. Called from append() under
+// a.mu when the live file reaches rotateBytes.
+//
+// R1 (the critical invariant): rotation must NEVER convert a fill into the fail-closed append DoS R9 exists
+// to remove. So rotate() ALWAYS leaves a.f a usable handle: on Sync/Rename failure a.f is the unchanged,
+// still-open live file; on a reopen failure after a successful rename it un-renames so the old fd is
+// reachable as the live file again. append() treats any returned error as "log and keep writing the current
+// file", re-attempting the cap next append. A failed PRUNE is non-fatal (logged).
+func (a *auditLog) rotate() error {
+	if err := a.f.Sync(); err != nil {
+		return err // a.f still open on the live file; append continues on it (R1)
+	}
+	sealed := segmentPath(a.dir, a.base, a.segNext)
+	if err := os.Rename(a.path, sealed); err != nil {
+		return err // live file unmoved, a.f still open on it; append continues (R1)
+	}
+	// The live NAME is now free; the old fd (a.f) still writes the sealed inode. Open a fresh empty live
+	// file at a.path and swap to it BEFORE closing the old fd, so a.f is never observed as a closed handle.
+	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		// Could not create the new live file. Un-rename so a.f's inode is reachable as the live file again (R1).
+		if rerr := os.Rename(sealed, a.path); rerr != nil {
+			log.Printf("audit: rotate reopen failed AND un-rename failed (%s): %v / %v", a.path, err, rerr)
+		}
+		return err
+	}
+	old := a.f
+	a.f = f
+	a.segNext++
+	if cerr := old.Close(); cerr != nil {
+		log.Printf("audit: rotate: closing sealed segment %s: %v", sealed, cerr)
+	}
+	a.pruneSegments()
+	return nil
+}
+
+// pruneSegments unlinks sealed segments older than the retention window (keeps the newest segKeep). This is
+// the step that bounds /data — and the step that moves on-box tamper-detection of the PRUNED records
+// off-box (ADR-0038 detection-boundary trade). Best-effort and logged: a failed unlink NEVER fails an
+// append (R1); at worst the footprint cap is exceeded transiently and re-attempted on the next rotation.
+func (a *auditLog) pruneSegments() {
+	segs := listSegments(a.dir, a.base)
+	if len(segs) <= a.segKeep {
+		return
+	}
+	for _, n := range segs[:len(segs)-a.segKeep] {
+		if err := os.Remove(segmentPath(a.dir, a.base, n)); err != nil {
+			log.Printf("audit: prune segment %06d: %v", n, err)
+		}
+	}
+}
+
 // append signs one record and appends it, under the mutex. Transactional: in-memory chain state is
 // advanced ONLY after the record is durable, and a Write/Sync failure truncates the partial tail back
 // to the pre-append EOF — so a transient I/O error never leaves a gapped seq or forked prev_hash (either
@@ -235,6 +407,19 @@ func (a *auditLog) append(ev auditEvent) error {
 		return err
 	}
 	off := fi.Size()
+	// ADR-0038: seal the live file into a segment once it reaches the threshold, BEFORE writing this record
+	// (so each record lands whole in one file). The record links to a.prevHash, which rotate() preserves, so
+	// it becomes the link-continuous first record of the fresh live file. R1: a rotation error must not fail
+	// the append — keep writing the current file and re-attempt the cap next time.
+	if a.rotateBytes > 0 && off >= a.rotateBytes {
+		if rerr := a.rotate(); rerr != nil {
+			log.Printf("audit: segment rotation failed (continuing on current file): %v", rerr)
+		} else if nfi, serr := a.f.Stat(); serr == nil {
+			off = nfi.Size() // the fresh live file (0 bytes) is the new transactional rollback point
+		} else {
+			return serr
+		}
+	}
 	if _, err := a.f.Write(append(line, '\n')); err != nil {
 		a.rollback(off)
 		return err
