@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -48,10 +49,18 @@ import (
 )
 
 const (
-	afVSOCK       = 40 // AF_VSOCK
-	vmaddrCIDHost = 2  // VMADDR_CID_HOST — the guest always targets the host
+	afVSOCK        = 40 // AF_VSOCK
+	vmaddrCIDHost  = 2  // VMADDR_CID_HOST — the guest always targets the host
 	maxConnsPerLeg = 64 // per-leg concurrent-splice cap: fail-closed backpressure vs a flooding guest
-	idleTimeout   = 120 * time.Second
+)
+
+// idle/total splice deadlines (vars so tests can shrink them). A spliced flow idle longer than idleTimeout
+// OR open longer than tunnelMax is torn down — so a compromised guest that connects then goes silent (or
+// holds its write side open after the peer half-closes) cannot pin a conn-cap slot forever and wedge the
+// leg. Mirrors the egress proxy's idle/tunnel discipline.
+var (
+	idleTimeout = 120 * time.Second
+	tunnelMax   = time.Hour
 )
 
 // sockaddrVM is the 16-byte struct sockaddr_vm (hand-built: stdlib syscall has no SockaddrVM, and we keep
@@ -113,8 +122,8 @@ func serveHost(args []string) {
 			defer wg.Done()
 			sem := make(chan struct{}, maxConnsPerLeg)
 			for {
-				c, err := ln.Accept()
-				if err != nil {
+				c := acceptNext(ln)
+				if c == nil {
 					return
 				}
 				select {
@@ -156,6 +165,24 @@ func listenLegFresh(path string) (net.Listener, error) {
 	return net.Listen("unix", path)
 }
 
+// acceptNext returns the next accepted conn, or nil when the listener is permanently closed (so the caller
+// loop ends). A TRANSIENT accept error (EMFILE/ENFILE 'too many open files', ECONNABORTED, ...) is logged
+// and retried after a short backoff — never a silent `return` that kills the leg forever while the process
+// stays alive on its other legs (an unobservable loss of the mediated path).
+func acceptNext(ln net.Listener) net.Conn {
+	for {
+		c, err := ln.Accept()
+		if err == nil {
+			return c
+		}
+		if errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		log.Printf("fc-vsockmux: accept on %s: %v (retrying)", ln.Addr(), err)
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // --- GUEST forwarder (slice 2): UNIX leg path -> AF_VSOCK(host, port), byte-transparent splice ---
 
 func serveGuest(args []string) {
@@ -178,8 +205,8 @@ func serveGuest(args []string) {
 		go func(port uint32) {
 			defer wg.Done()
 			for {
-				c, err := ln.Accept()
-				if err != nil {
+				c := acceptNext(ln)
+				if c == nil {
 					return
 				}
 				go func() {
@@ -218,7 +245,9 @@ func probe(args []string) {
 			die("PROBE-FAIL: connect to (%d,%d) failed: %v", cid, port, err)
 		}
 		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			die("PROBE-FAIL: vsock conn does not support a deadline (fd not poller-adopted): %v", err)
+		}
 		if _, err := conn.Write([]byte("CONNECT example.com:443\n")); err != nil {
 			die("PROBE-FAIL: write CONNECT: %v", err)
 		}
@@ -270,8 +299,8 @@ func stub(args []string) {
 		die("stub listen: %v", err)
 	}
 	for {
-		c, err := ln.Accept()
-		if err != nil {
+		c := acceptNext(ln)
+		if c == nil {
 			return
 		}
 		go func() {
@@ -300,15 +329,22 @@ func mustPort(s string) uint32 {
 // net.Conn, because net.FileConn rejects AF_VSOCK fds; *os.File Read/Write issue read(2)/write(2) on the
 // socket, which is all the byte-transparent splice needs.
 func vsockDial(cid, port uint32) (*fileConn, error) {
-	fd, err := syscall.Socket(afVSOCK, syscall.SOCK_STREAM, 0)
+	fd, err := syscall.Socket(afVSOCK, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 	sa := sockaddrVM{Family: afVSOCK, Port: port, CID: cid}
-	_, _, e := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(&sa)), unsafe.Sizeof(sa))
-	if e != 0 {
+	if _, _, e := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(&sa)), unsafe.Sizeof(sa)); e != 0 {
 		syscall.Close(fd)
 		return nil, errors.New("vsock connect: " + e.Error())
+	}
+	// Make the fd non-blocking BEFORE os.NewFile so the runtime poller ADOPTS it — only then do
+	// SetReadDeadline/SetWriteDeadline work on the *os.File (a blocking fd yields ErrNoDeadline, which is
+	// what made splice's idle/total deadlines inert). The connect above is synchronous; a local host<->guest
+	// vsock connect completes (or resets) fast, so a blocking connect is fine.
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		syscall.Close(fd)
+		return nil, err
 	}
 	return &fileConn{f: os.NewFile(uintptr(fd), fmt.Sprintf("vsock:%d:%d", cid, port))}, nil
 }
@@ -317,11 +353,15 @@ func vsockDial(cid, port uint32) (*fileConn, error) {
 // CloseWrite that shutdown(SHUT_WR)s the socket so half-close works across the vsock leg.
 type fileConn struct{ f *os.File }
 
-func (c *fileConn) Read(b []byte) (int, error)  { return c.f.Read(b) }
-func (c *fileConn) Write(b []byte) (int, error) { return c.f.Write(b) }
-func (c *fileConn) Close() error                { return c.f.Close() }
+func (c *fileConn) Read(b []byte) (int, error)         { return c.f.Read(b) }
+func (c *fileConn) Write(b []byte) (int, error)        { return c.f.Write(b) }
+func (c *fileConn) Close() error                       { return c.f.Close() }
+func (c *fileConn) SetReadDeadline(t time.Time) error  { return c.f.SetReadDeadline(t) }
+func (c *fileConn) SetWriteDeadline(t time.Time) error { return c.f.SetWriteDeadline(t) }
 func (c *fileConn) SetDeadline(t time.Time) error {
-	_ = c.f.SetReadDeadline(t)
+	if err := c.f.SetReadDeadline(t); err != nil {
+		return err
+	}
 	return c.f.SetWriteDeadline(t)
 }
 func (c *fileConn) CloseWrite() error {
@@ -335,15 +375,27 @@ func (c *fileConn) CloseWrite() error {
 // halfCloser is the CloseWrite half-close both net.UnixConn and *fileConn provide.
 type halfCloser interface{ CloseWrite() error }
 
-// splice copies bytes both ways with PER-DIRECTION half-close (TCP-style): when one direction hits EOF it
-// CloseWrites the peer so the proxy's "OK"/relay and the router's HTTP response are never truncated by a
-// naive close-both-on-first-EOF. Both conns are closed once both directions drain.
-func splice(a, b io.ReadWriteCloser) {
+// deadlineConn is the subset of net.Conn the splice uses; both net.UnixConn (the host legs) and *fileConn
+// (the vsock leg, once its fd is non-blocking) satisfy it, so the idle/total deadlines actually take effect.
+type deadlineConn interface {
+	io.ReadWriteCloser
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+}
+
+// splice copies bytes both ways with a rolling IDLE deadline (re-armed per read) and an absolute TOTAL
+// deadline, and half-closes (CloseWrite) the finishing direction so the proxy's OK/relay and the router's
+// HTTP response are never truncated. Because each direction is bounded by idleTimeout/tunnelMax, a
+// connection that connects then goes SILENT cannot block a copy forever — wg.Wait() returns, both conns
+// close, and the per-leg cap slot is released. (Without these deadlines a silent guest connection pinned a
+// slot forever and the conn-cap became a self-inflicted DoS.)
+func splice(a, b deadlineConn) {
+	total := time.Now().Add(tunnelMax)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	cp := func(dst, src io.ReadWriteCloser) {
+	cp := func(dst, src deadlineConn) {
 		defer wg.Done()
-		io.Copy(dst, src)
+		copyIdle(dst, src, total)
 		if hc, ok := dst.(halfCloser); ok {
 			hc.CloseWrite()
 		}
@@ -353,4 +405,27 @@ func splice(a, b io.ReadWriteCloser) {
 	wg.Wait()
 	a.Close()
 	b.Close()
+}
+
+// copyIdle copies src->dst until EOF/error, re-arming a per-read idle deadline (capped by the total
+// deadline) so a stalled direction is torn down rather than blocking forever.
+func copyIdle(dst, src deadlineConn, total time.Time) {
+	buf := make([]byte, 32*1024)
+	for {
+		rd := time.Now().Add(idleTimeout)
+		if rd.After(total) {
+			rd = total
+		}
+		_ = src.SetReadDeadline(rd)
+		n, err := src.Read(buf)
+		if n > 0 {
+			_ = dst.SetWriteDeadline(time.Now().Add(idleTimeout))
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }

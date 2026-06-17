@@ -7,9 +7,58 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// TestFileConnDeadline: the non-blocking fd fix — SetReadDeadline must actually WORK on a fileConn (over a
+// poller-adopted non-blocking socket), so a read against a silent peer TIMES OUT instead of blocking
+// forever. A blocking fd (the bug) made deadlines inert ("file type does not support deadline").
+func TestFileConnDeadline(t *testing.T) {
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.SetNonblock(fds[0], true); err != nil { // mirror vsockDial's SetNonblock-before-NewFile
+		t.Fatal(err)
+	}
+	fc := &fileConn{f: os.NewFile(uintptr(fds[0]), "sp")}
+	defer fc.Close()
+	defer syscall.Close(fds[1])
+	if err := fc.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline must work on a non-blocking poller-adopted fd: %v", err)
+	}
+	start := time.Now()
+	if _, err := fc.Read(make([]byte, 8)); err == nil || !os.IsTimeout(err) { // peer never writes
+		t.Fatalf("read should time out (deadline working), got err=%v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("read blocked far past the deadline")
+	}
+}
+
+// TestSpliceIdleTeardown is the DoS-fix regression: a spliced connection that goes SILENT (both peers
+// connect but never send and never close) must be torn down within idleTimeout so its per-leg conn-cap slot
+// is released — before the fix splice's deadline-less io.Copy blocked forever and pinned the slot, turning
+// the cap into a self-inflicted DoS.
+func TestSpliceIdleTeardown(t *testing.T) {
+	old := idleTimeout
+	idleTimeout = 200 * time.Millisecond
+	defer func() { idleTimeout = old }()
+	dir := t.TempDir()
+	aHost, aPeer := unixPair(t, filepath.Join(dir, "a.sock"))
+	bHost, bPeer := unixPair(t, filepath.Join(dir, "b.sock"))
+	defer aPeer.Close()
+	defer bPeer.Close()
+	done := make(chan struct{})
+	go func() { splice(aHost, bHost); close(done) }() // both directions idle -> must return
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("splice did NOT tear down a silent connection within the idle timeout (the slot would be pinned forever)")
+	}
+}
 
 // TestSpliceHalfClose: splice must move bytes BOTH ways and, when one side finishes writing (CloseWrite),
 // propagate that EOF to the peer WITHOUT tearing down the other direction — so the proxy's OK/relay or the
