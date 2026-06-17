@@ -1,6 +1,6 @@
 # ADR-0041: Default-deny syscall allowlist for the privileged collector
 
-Status: Accepted — shipped; live-verify on the production image pending
+Status: Accepted — shipped + live-proven on the production image (2026-06-17, `make verify-attest` ALL PASS: the collector came up `active` under the allowlist, did `bpf()` map reads live under armed-E0, signed the chain HEADs, and the box reached the enforcing-TCB state / PCR-14 quote — with no systemd filter-parse warning)
 Date: 2026-06-17
 Pillar: action-authorization (the TCB)
 Relates to: ADR-0033 (io_uring banned from the substrate; this preserves that for the collector), ADR-0016 (the collector hosts the control-socket bpf()-write chokepoint), ADR-0011/0012 (the broker / SO_PEERPIDFD attestation), ADR-0008/0025 (the audit-signing seed the collector holds).
