@@ -1,6 +1,6 @@
 # ADR-0042: The Firecracker hostile-tier mediated channel (vsock legs, no direct network)
 
-Status: Accepted (design + slice 1 live-proven 2026-06-17: `make verify-firecracker-legs` 8/8 — a no-network microVM reaches a host endpoint ONLY through a provisioned vsock leg, an unprovisioned port is refused, no NIC). Slices 2–6 (in-guest forwarder → real proxy/router → jailer → in-image recipe → deployable unit) pending; in-image slices need the owner sign-off below.
+Status: Accepted (design + slices 1–2 live-proven 2026-06-17). Slice 1 (`make verify-firecracker-legs`, 8/8): a no-network microVM reaches a host endpoint ONLY through a provisioned vsock leg, an unprovisioned port is refused, no NIC. Slice 2 (`make verify-firecracker-agent`): the UNCHANGED `bulkhead-agent` probe in the microVM gets NOROUTE + ISOLATED + PROXY-OK through its UNIX leg → in-guest forwarder → vsock → host mux (the agent binary is byte-identical across tiers). Slices 3–6 (real proxy/router → jailer → in-image recipe → deployable unit) pending; in-image slices need the owner sign-off below.
 Date: 2026-06-17
 Pillar: agent-isolation
 Relates to: ADR-0031 (the hostile tier = reused Firecracker microVM; this is its mediated-channel realization, mirroring the runsc `--host-uds` legs), ADR-0033 (io_uring banned in the guest kernel + denied on the host bridge), ADR-0034 (the host egress proxy/router are the single mediated chokepoint this channel feeds), ADR-0040/0041 (the audit-chain + collector hardening the proxy/router carry, unmodified).
@@ -50,7 +50,7 @@ A guest AF_VSOCK connect to (host CID 2, port P) makes Firecracker connect INTO 
 ## Implementation slices (each live-verifiable host-side; the qemu suite has no nested KVM)
 
 1. **(DONE, live-proven)** the mux (`src/fc-vsockmux`, serve-host/probe/nonic/stub modes) + `scripts/fc-legs-check.sh` (`make verify-firecracker-legs`): no-network microVM reaches the host endpoint only via the provisioned leg, unprovisioned port refused, no NIC. 8/8.
-2. the real in-guest `bulkhead-vsock-legs` forwarder presenting the agent's UNIX legs + the UNCHANGED `bulkhead-agent` probe (NOROUTE/ISOLATED + a leg round-trip).
+2. **(DONE, live-proven)** the in-guest forwarder (`fc-vsockmux serve-guest`) presenting the agent's UNIX legs + the UNCHANGED `bulkhead-agent probe-egress` (`scripts/fc-agent-check.sh`): NOROUTE + ISOLATED + PROXY-OK through the leg→forwarder→vsock→mux. The guest init must mount `devtmpfs` on /dev — busybox backgrounds a job's stdin from `/dev/null`, so a minimal rootfs without it silently fails to start the forwarder (a lesson for the slice-6 production guest init).
 3. swap the stub for the REAL egress-proxy + router (loopback allowlist + mockchat upstream): an allowlisted fetch returns 200 and is signed into the chain (`verify-audit` passes; don't assert exact chain counts), a non-allowlisted dest is denied, a model call returns FINAL.
 4. Firecracker under the jailer + the mux as a hardened per-instance unit; assert (ss -x/lsof) the dir holds exactly the three sockets, the mux is the sole listener, and Firecracker holds no AF_INET/AF_PACKET socket.
 5. **(in-image, build-verified)** the firecracker Yocto recipe (pinned static firecracker+jailer), the FC-tuned guest kernel (io_uring off; drop VIRTIO_NET pending sign-off) + minimal agent rootfs.

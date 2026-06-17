@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -127,6 +127,13 @@ verify-firecracker-spike:
 # built wic + firecracker ($FIRECRACKER) + /dev/kvm; exits 2 INCONCLUSIVE where /dev/kvm is absent.
 verify-firecracker-legs:
 	sh $(BULKHEAD_ROOT)/scripts/fc-legs-check.sh
+
+# Host-side: ADR-0042 Firecracker mediated-channel SLICE 2. Boots a no-network microVM running the
+# UNCHANGED bulkhead-agent probe, its UNIX legs backed by the in-guest fc-vsockmux forwarder, and asserts
+# NOROUTE + ISOLATED (no direct net) + PROXY-OK (the agent reaches the host via leg->forwarder->vsock->mux)
+# — proving the agent binary is byte-identical across tiers. Needs a built wic + firecracker + /dev/kvm.
+verify-firecracker-agent:
+	sh $(BULKHEAD_ROOT)/scripts/fc-agent-check.sh
 
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
