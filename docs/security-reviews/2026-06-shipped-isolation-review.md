@@ -9,7 +9,10 @@ covers the whole shipped isolation architecture, network and syscall halves, not
 A follow-up multi-agent adversarial audit (2026-06-16, see below) then found + **reverted** one HIGH
 (R6, a pipelining bypass in this session's OWN just-shipped method-allowlist), shipped an opt-in
 mechanism for one MED (R7, a router paid-call denial-of-wallet cap), and saw 17 of 19 candidates
-refuted by independent skeptics.
+refuted by independent skeptics. A SECOND, cross-cutting audit (interactions/sequences/races) then
+found three more the per-surface pass missed: R8 [HIGH] torn-tail fusion (**fixed**), R9 [HIGH] shared
+/data exhaustion (deferred — rotation design), R10 [MED] a GC↔launch race (deferred — a design
+trade-off), with 4 of 7 refuted.
 
 ## Scope
 
@@ -236,6 +239,55 @@ native serial floor; HTTP/2 bypassing `parseHead` is mooted by the structural pr
 (uninspected like passthrough — not a NEW exploit). That 17/19 candidates fell to independent
 skeptics is itself the assurance: the boundaries the first pass confirmed hold up under a second,
 adversarial, multi-perspective look.
+
+## Second audit: cross-cutting lens (2026-06-16)
+
+The first audit was per-component; this one targeted what lives BETWEEN components — concurrency/TOCTOU,
+boot/shutdown sequencing, cross-component trust handoffs, state persistence/recovery, aggregate
+resource exhaustion — again refuting each candidate. 7 candidates → **3 survived, 4 backstopped**. It
+found three real issues the per-surface pass and the first review both missed.
+
+### R8 [HIGH] — torn-tail FUSION false-bricks the box (fixed)
+
+A power-loss can leave `append()`'s `"line\n"` written WITHOUT its `\n`. The verifier tolerates that
+fragment while it stays last, so the next boot comes up — but `openAuditLog` reopened `O_APPEND`
+without repairing the missing newline, so the first new append FUSED onto the fragment
+(`{frag…{seq:1…}\n`), a malformed two-records-on-one-line. Once a second record lands, the fused line
+is no longer last, so the boot AFTER fails verify-audit → the R1 fail-closed gate blocks the collector
++ every agent and withholds rauc-mark-good (a spurious A/B rollback of a good slot). A single unclean
+shutdown false-bricks the appliance two boots later; all five `/data` chains shared the pattern.
+Confirmed by end-to-end reproduction. **Fixed** (`cacfafe`): `openAuditLog` now truncates the un-acked
+partial tail before continuing the chain (NOT "append a separating newline" — the audit showed that
+bricks differently), applied byte-identically in collector/proxy/router. `TestTornTailNoFusionAcrossReopen`
+reproduces the exact power-loss→reopen→2-record→verify sequence against the real code.
+
+### R9 [HIGH] — a compromised agent can fill the shared 100 MB /data partition (deferred)
+
+All five signed chains share one `--fixed-size 100M` `/data` partition with no per-chain footprint
+bound and no per-tier isolation. A compromised agent generating egress/audit volume fills it; appends
+then fail and the fail-closed discipline denies service across tiers (and compounds R8). Fix shape: a
+per-chain on-disk footprint bound with **rotation that carries the tip hash forward** (seal+rename a
+chain over N MB so cross-boot `prev_hash` continuity survives the rotation, and the verifier handles
+rotated segments) + per-tier disk isolation. DEFERRED: rotating a hash-chained, signed, boot-gated log
+while preserving cross-boot verifiability is a substantial design increment — the owner's to scope.
+
+### R10 [MED] — GC manifest-prune races the agent launch (deferred)
+
+`gc.go` snapshots agent liveness (`liveAgentCgids()`) OUTSIDE `controlMu`, then prunes `egress_policy`
+under it. A child launched in that window (its manifest set under the lock) is absent from the
+pre-lock snapshot, so the GC prunes its manifest → the child runs with NO manifest → unrestricted at
+the BPF layer (netns-bounded, hence MED, not a full bypass). The simple fix (snapshot under the lock)
+**reverses a deliberate design choice** — the code comment keeps the cgroupfs scan out of the lock for
+latency; a cleaner variant re-checks each prune candidate's liveness under the lock. DEFERRED: the
+latency-vs-race trade-off is the owner's documented choice to revisit.
+
+### Refuted (4)
+
+Backstopped and refuted: a "collector-restart drops a live class" claim (the PID-1 systemd cgroup
+eBPF egress filter holds independently); a stranded `.task` credential (0700-root dir DAC +
+ProtectSystem/DynamicUser/empty-caps make it unreadable to the agent); the plaintext seed on `/data`
+(0600-root + the non-root confined agent's empty caps); and RAUC reactivating a vulnerable prior slot
+(the privileged signed-bundle install boundary gates the precondition).
 
 ## Verification posture
 
