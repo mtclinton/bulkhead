@@ -221,7 +221,7 @@ type inspectState struct {
 
 const (
 	maxHeadBytes = 8 << 10 // bound the request-head accumulation
-	needleWindow = 256     // overlap kept between buffers for the needle scan
+	needleWindow = 256     // FLOOR for the needle-scan rolling window; inspect() raises it to the longest configured needle
 )
 
 // inspectRelay relays decrypted bytes between agent and upstream — identical to splice() in its
@@ -330,15 +330,28 @@ func (p *Proxy) inspect(st *inspectState, buf []byte) string {
 			}
 		}
 	}
-	for _, nd := range p.denyNeedles {
-		if bytes.Contains(append(st.tail, buf...), []byte(nd)) {
-			return "needle"
+	// Needle denylist over a TRUE rolling window of the last `win` stream bytes. The window must be a
+	// genuine roll (NOT replaced by each buffer) AND >= the longest needle, or an agent — which controls
+	// its TLS plaintext record sizes — defeats the scan by fragmenting a needle across small records
+	// (e.g. 1 byte/record). `combined` is the prior window plus this buffer, built in a FRESH slice so it
+	// never aliases st.tail's backing; we scan it, then retain its last `win` bytes for the next overlap.
+	if len(p.denyNeedles) > 0 {
+		win := needleWindow
+		combined := make([]byte, 0, len(st.tail)+len(buf))
+		combined = append(combined, st.tail...)
+		combined = append(combined, buf...)
+		for _, nd := range p.denyNeedles {
+			if len(nd) > win {
+				win = len(nd) // a needle longer than the floor must still fit in one window span
+			}
+			if bytes.Contains(combined, []byte(nd)) {
+				return "needle"
+			}
 		}
-	}
-	if len(buf) >= needleWindow {
-		st.tail = append(st.tail[:0], buf[len(buf)-needleWindow:]...)
-	} else {
-		st.tail = append(st.tail[:0], buf...)
+		if len(combined) > win {
+			combined = combined[len(combined)-win:]
+		}
+		st.tail = append(st.tail[:0], combined...)
 	}
 	return ""
 }

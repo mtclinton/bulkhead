@@ -241,3 +241,45 @@ func TestInspectRules(t *testing.T) {
 		t.Errorf("split needle: want deny, got %q", r)
 	}
 }
+
+// TestNeedleScanFragmentation (parsing/crypto audit, HIGH): a deny-needle must be caught however the
+// agent fragments its TLS records — 1 byte/record and across 3+ buffers (the old replaced-not-rolled
+// window missed these) — and a needle LONGER than the 256-byte floor must still be caught (the window
+// rolls up to the longest configured needle).
+func TestNeedleScanFragmentation(t *testing.T) {
+	feed := func(needles []string, chunks []string) string {
+		p := &Proxy{denyNeedles: needles}
+		st := &inspectState{host: "h.com"}
+		for _, c := range chunks {
+			if r := p.inspect(st, []byte(c)); r != "" {
+				return r
+			}
+		}
+		return ""
+	}
+	bytewise := func(s string) []string {
+		out := make([]string, len(s))
+		for i := 0; i < len(s); i++ {
+			out[i] = s[i : i+1]
+		}
+		return out
+	}
+
+	// "SECRETTOKEN" streamed one byte per record must be caught (the headline bypass).
+	if r := feed([]string{"SECRETTOKEN"}, bytewise("....SECRETTOKEN....")); r != "needle" {
+		t.Fatalf("1-byte/record fragmented needle must be caught, got %q", r)
+	}
+	// split across 3 buffers.
+	if r := feed([]string{"SECRETTOKEN"}, []string{"xxSECR", "ETTO", "KENyy"}); r != "needle" {
+		t.Fatalf("3-buffer-split needle must be caught, got %q", r)
+	}
+	// a clean stream is not flagged.
+	if r := feed([]string{"SECRETTOKEN"}, []string{"hello ", "world ", "nothing here"}); r != "" {
+		t.Fatalf("clean stream must not flag, got %q", r)
+	}
+	// a needle LONGER than the 256-byte floor, streamed 1 byte/record, is still caught.
+	long := strings.Repeat("A", 300)
+	if r := feed([]string{long}, bytewise("zz"+long+"zz")); r != "needle" {
+		t.Fatalf("a 300-byte needle (> 256 floor) fragmented must be caught, got %q", r)
+	}
+}
