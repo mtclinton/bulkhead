@@ -9,7 +9,7 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
 # (BULKHEAD_ROUTER_UDS) so a confined agent in a no-route netns can reach the model leg with no
 # network. The signed routing-decision chain (src/router/audit.go) and the TCP listener are unchanged.
 # (Was 672fcea, the attestation-audit snapshot.)
-SRCREV = "42ac2803bebba8e74cbaa1c328c614957c704e6a"
+SRCREV = "8a7d12db36f7d03650636a10b263587503b1a5bd"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
