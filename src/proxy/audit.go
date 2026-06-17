@@ -59,7 +59,7 @@ type auditLog struct {
 	prevHash []byte
 	seq      uint64
 	domain   string
-	// ADR-0038 segment rotation (all guarded by a.mu, set once in openAuditLog except segNext, bumped by
+	// ADR-0040 segment rotation (all guarded by a.mu, set once in openAuditLog except segNext, bumped by
 	// rotate()). dir/base locate the chain; rotateBytes>0 enables rotation; segKeep is the retained window.
 	dir         string
 	base        string
@@ -102,7 +102,7 @@ func openAuditLog(domain, filename string) (*auditLog, error) {
 		logd("AUDIT-REPAIR", chainPath, "", err.Error())
 	}
 	// Seed the cross-boot prevHash (F5) from the chain TIP, which after a rotation lives in the live file
-	// OR — in the rename->first-append window — the newest sealed segment (lastChainTip, ADR-0038), never a
+	// OR — in the rename->first-append window — the newest sealed segment (lastChainTip, ADR-0040), never a
 	// spurious genesis that would fork the chain.
 	prev := make([]byte, sha256.Size)
 	if h := lastChainTip(dir, filename); h != nil {
@@ -218,7 +218,7 @@ func lastChainHash(path string) []byte {
 	return nil
 }
 
-// --- ADR-0038: bounded-retention segment rotation -------------------------------------------------
+// --- ADR-0040: bounded-retention segment rotation -------------------------------------------------
 // The signed chains share a fixed 100 MB /data partition; an unbounded append-only log lets one noisy
 // tier (egress) fill /data and starve every other chain into a fail-closed append DoS (security-review
 // R9). Rotation seals the live file into a numbered segment (<live>.NNNNNN) once it reaches a byte
@@ -295,7 +295,7 @@ func lastChainTip(dir, base string) []byte {
 	return nil
 }
 
-// auditSegmentConfig reads the rotation knobs from the environment (ADR-0038). rotateBytes is 0 (rotation
+// auditSegmentConfig reads the rotation knobs from the environment (ADR-0040). rotateBytes is 0 (rotation
 // DISABLED — the pre-R9 single-file behaviour, kept for dev/Buildroot/tests) unless
 // BULKHEAD_AUDIT_SEGMENT_BYTES is a positive integer; the appliance *-data.conf drop-ins set it. segKeep is
 // the number of sealed segments retained besides the live file (default 1, clamped to a MINIMUM of 1: the
@@ -360,7 +360,7 @@ func (a *auditLog) rotate() error {
 
 // pruneSegments unlinks sealed segments older than the retention window (keeps the newest segKeep). This is
 // the step that bounds /data — and the step that moves on-box tamper-detection of the PRUNED records
-// off-box (ADR-0038 detection-boundary trade). Best-effort and logged: a failed unlink NEVER fails an
+// off-box (ADR-0040 detection-boundary trade). Best-effort and logged: a failed unlink NEVER fails an
 // append (R1); at worst the footprint cap is exceeded transiently and re-attempted on the next rotation.
 func (a *auditLog) pruneSegments() {
 	segs := listSegments(a.dir, a.base)
@@ -407,7 +407,7 @@ func (a *auditLog) append(ev auditEvent) error {
 		return err
 	}
 	off := fi.Size()
-	// ADR-0038: seal the live file into a segment once it reaches the threshold, BEFORE writing this record
+	// ADR-0040: seal the live file into a segment once it reaches the threshold, BEFORE writing this record
 	// (so each record lands whole in one file). The record links to a.prevHash, which rotate() preserves, so
 	// it becomes the link-continuous first record of the fresh live file. R1: a rotation error must not fail
 	// the append — keep writing the current file and re-attempt the cap next time.

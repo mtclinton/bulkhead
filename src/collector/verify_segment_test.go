@@ -18,7 +18,7 @@ import (
 // then writes a final liveN records into the live file. Returns the live path + the verifying pubkey. This
 // proves verifySegmentedChain follows a real link-continuous seam INDEPENDENT of the signer's rotate(), so
 // the verifier is fielded-correct before any box produces a segment (the R8 "never meet a segment the
-// verifier can't follow" discipline / ADR-0038).
+// verifier can't follow" discipline / ADR-0040).
 func buildSegmentedChain(t *testing.T, dir string, perSeg, segs, liveN int) (string, ed25519.PublicKey) {
 	t.Helper()
 	const base = "provenance.jsonl"

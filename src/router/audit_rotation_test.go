@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestSegmentPathGolden pins the segment NAMING contract (ADR-0038). The collector's verifier enumerates
+// TestSegmentPathGolden pins the segment NAMING contract (ADR-0040). The collector's verifier enumerates
 // the router's segments by this exact "%s.%06d" pattern; any drift here silently makes verify-audit miss
 // or misread the router segments, so this fails CI first (mirrors the canonical() golden discipline).
 func TestSegmentPathGolden(t *testing.T) {

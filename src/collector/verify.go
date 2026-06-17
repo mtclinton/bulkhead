@@ -30,7 +30,7 @@ package main
 // prior-observed HEAD => fail-closed at the relying party). A forged tail is NOT tolerated:
 // it is well-formed JSON and so still fails the hash/sig/seq/prev checks.
 //
-// SEGMENTED CHAINS (R9 / ADR-0038). To bound /data, a chain rotates into sealed segments
+// SEGMENTED CHAINS (R9 / ADR-0040). To bound /data, a chain rotates into sealed segments
 // (<live>.NNNNNN) under a bounded retention window; verifySegmentedChain verifies the retained
 // segments + the live file as ONE continuous chain (the rotation seam is link-continuous, NOT a
 // per-boot reset). This extends boundary (a) by exactly one item: deletion/tamper of records in
@@ -65,7 +65,7 @@ func verifyChain(path string, pub ed25519.PublicKey, domain string) (int, error)
 }
 
 // chainSeed carries the running verification state ACROSS the files of a segmented chain (R9 /
-// ADR-0038). A segmented chain is a sequence of sealed segments (<live>.NNNNNN) followed by the live
+// ADR-0040). A segmented chain is a sequence of sealed segments (<live>.NNNNNN) followed by the live
 // file; verifySegmentedChain verifies them as ONE continuous chain by threading this seed from each file
 // into the next. For a single, un-segmented file the seed is the genesis anchor (prev=zeroHash,
 // expectSeq=0) with the torn tail tolerated — exactly the legacy single-file behavior.
@@ -77,7 +77,7 @@ type chainSeed struct {
 	allowTornTail bool   // tolerate an unparseable FINAL record — true ONLY for the live file
 	anchorFirst   bool   // ACCEPT this file's first record's prev/seq as the on-box anchor (head was PRUNED:
 	//                      its predecessor segment is gone, so its prev links to absent history — the
-	//                      cross-prune link is an OFF-BOX check, ADR-0038). Set ONLY on the oldest retained
+	//                      cross-prune link is an OFF-BOX check, ADR-0040). Set ONLY on the oldest retained
 	//                      file when the oldest segment number > 1; a still-present segment 000001 is
 	//                      genesis and stays strictly anchored at zero (head-subchain deletion still caught).
 }
@@ -133,7 +133,7 @@ func verifyChainSegment(path string, pub ed25519.PublicKey, domain string, since
 			continue
 		}
 		if first && in.anchorFirst {
-			// ADR-0038 retained-head anchor: this is the oldest retained file after head-PRUNING; its
+			// ADR-0040 retained-head anchor: this is the oldest retained file after head-PRUNING; its
 			// predecessor segment is gone, so its first record's prev links to absent (pruned) history we
 			// cannot check on-box (the cross-prune link is verified OFF-BOX against the attested HEADs).
 			// ACCEPT the record's own prev/seq as the anchor — the signature check below still binds this
@@ -149,7 +149,7 @@ func verifyChainSegment(path string, pub ed25519.PublicKey, domain string, since
 			expectSeq = r.Seq
 		} else {
 			// seq resets to 1 at a per-boot boundary; otherwise it increments. But prev_hash chains
-			// CONTINUOUSLY across boots (F5) AND across segment seams (ADR-0038) and is NOT reset here — so
+			// CONTINUOUSLY across boots (F5) AND across segment seams (ADR-0040) and is NOT reset here — so
 			// deleting a whole middle subchain OR a whole sealed segment breaks the link (the next record's
 			// prev_hash won't match the surviving prior record's hash). Genesis is the very first record of
 			// the OLDEST retained file (seq=1, prev=0); a rotation seam is link-continuous, not a reset.
@@ -223,12 +223,12 @@ func verifyChainState(path string, pub ed25519.PublicKey, domain string, since [
 }
 
 // verifySegmentedChain is the boot-gate / no-rewind driver over a possibly-segmented chain (R9 /
-// ADR-0038). It verifies the sealed segments (<livePath>.NNNNNN, numeric-ascending) followed by the live
+// ADR-0040). It verifies the sealed segments (<livePath>.NNNNNN, numeric-ascending) followed by the live
 // file as ONE continuous chain: the OLDEST retained file is anchored at prev=zeroHash and each file's
 // verified tip seeds the next file's prev, so deletion of a whole segment across the seam breaks the SAME
 // prev_hash linkage the single-file verifier already enforces (whole-subchain-deletion detection is
 // preserved across the seam). Torn-tail tolerance is scoped to the LIVE file only; a torn tail in a sealed
-// segment fails closed. ADR-0038 detection-boundary trade: tamper/deletion of records in PRUNED segments
+// segment fails closed. ADR-0040 detection-boundary trade: tamper/deletion of records in PRUNED segments
 // (older than the retained window, no longer on disk) is caught OFF-BOX (ADR-0025/0026 attested HEADs),
 // exactly as the tail-truncation boundary already is; WITHIN the retained window on-box detection is
 // unchanged. For a chain with NO sealed segments this verifies exactly the live file == legacy behavior.
@@ -241,7 +241,7 @@ func verifySegmentedChain(livePath string, pub ed25519.PublicKey, domain string,
 	total := 0
 	// Sealed segments first, oldest -> newest; each must be COMPLETE (no torn tail tolerated). The OLDEST
 	// retained file is the on-box anchor: if its segment number is > 1 the head was PRUNED, so accept its
-	// first record's prev (the cross-prune link is OFF-BOX, ADR-0038); if segment 000001 is still present
+	// first record's prev (the cross-prune link is OFF-BOX, ADR-0040); if segment 000001 is still present
 	// it IS genesis and stays strictly anchored at prev=zero (head-subchain deletion still caught).
 	for i, num := range segs {
 		seed.allowTornTail = false

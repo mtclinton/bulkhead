@@ -5,7 +5,9 @@ Date: 2026-06-06
 Relates to: ADR-0008 (the sealed audit seed + the F5 boot gate), ADR-0026 (the no-rewind /
 `--expect-tip` verdict — the OFF-BOX anchor), ADR-0027 (the router chain — the 4th verified chain),
 ADR-0028 (tpm2 sealing), ADR-0029 (the transactional append, whose in-process rollback this completes for
-the crash path). Closes the AVAILABILITY (false-brick) findings of the 2026-06-06 boot-gate audit; the
+the crash path), ADR-0040 (bounded-retention segment rotation extends this tail boundary to a bounded
+*head* — pruned segments are caught off-box exactly as tail truncation is). Closes the AVAILABILITY
+(false-brick) findings of the 2026-06-06 boot-gate audit; the
 gate's integrity core (unseal-ordering, 4-chain coverage, fail-closed-on-tamper) was audited SOUND and is
 unchanged.
 

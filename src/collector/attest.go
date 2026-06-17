@@ -545,7 +545,7 @@ func brokerAuditDir() string {
 // binds whatever was on disk, and the relying party checks its OWN prior-observed expected). A
 // genesis/empty/unreadable chain yields nil, which quoteExtraData maps to 32 zero bytes.
 //
-// ADR-0038: lastChainTip (not lastChainHash) resolves the tip as live-else-newest-segment, so a quote
+// ADR-0040: lastChainTip (not lastChainHash) resolves the tip as live-else-newest-segment, so a quote
 // taken in the rename->first-append window after a rotation binds the newest sealed segment's tip — the
 // true HEAD — rather than the momentarily-empty live file's spurious genesis.
 func attestChainHeads() (hColl, hCtrl, hBroker []byte) {

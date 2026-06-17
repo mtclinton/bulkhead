@@ -265,15 +265,23 @@ partial tail before continuing the chain (NOT "append a separating newline" — 
 bricks differently), applied byte-identically in collector/proxy/router. `TestTornTailNoFusionAcrossReopen`
 reproduces the exact power-loss→reopen→2-record→verify sequence against the real code.
 
-### R9 [HIGH] — a compromised agent can fill the shared 100 MB /data partition (deferred)
+### R9 [HIGH] — a compromised agent can fill the shared 100 MB /data partition (fixed, ADR-0040)
 
 All five signed chains share one `--fixed-size 100M` `/data` partition with no per-chain footprint
 bound and no per-tier isolation. A compromised agent generating egress/audit volume fills it; appends
-then fail and the fail-closed discipline denies service across tiers (and compounds R8). Fix shape: a
-per-chain on-disk footprint bound with **rotation that carries the tip hash forward** (seal+rename a
-chain over N MB so cross-boot `prev_hash` continuity survives the rotation, and the verifier handles
-rotated segments) + per-tier disk isolation. DEFERRED: rotating a hash-chained, signed, boot-gated log
-while preserving cross-boot verifiability is a substantial design increment — the owner's to scope.
+then fail and the fail-closed discipline denies service across tiers (and compounds R8). **Fixed** by
+bounded-retention segment rotation (ADR-0040), scoped against a three-way design panel and built
+verifier-first (the R8 discipline — no box may meet a segment its verifier can't follow). A chain seals
+its live file into numbered segments (`<live>.NNNNNN`) at a byte threshold, keeps a bounded window, and
+prunes the rest; rotation is **link-continuous** (prev_hash/seq are not reset), so the verifier checks
+the retained segments + live file as ONE chain — a deleted segment breaks the same prev_hash linkage
+that already catches a deleted middle subchain, and a *head*-pruned chain is anchored by accepting the
+oldest retained record's prev (the cross-prune link is the off-box check, extending ADR-0030's tail
+boundary to a bounded head). Per-tier caps `(keep+1)×8 MiB`: five chains = 80 MiB < 100 MB, so the
+egress tier physically cannot starve the others. R1 — a rotation fault degrades to "keep writing the
+current file", never a failed append, so rotation can never *become* the denial it removes. The one
+deliberate trade (pruned-segment tamper detection moves off-box) is owner-noted in ADR-0040. Live
+rotate-across-reboot verification on the production image is the remaining step.
 
 ### R10 [MED] — GC manifest-prune races cgroup-inode RECYCLE (fixed)
 
@@ -329,8 +337,10 @@ FRAGMENTATION of a *present plaintext* needle.)
 `--fixed-size 100M` partition, so the chain cannot exceed ~100 MB — the read is wasteful (≈100 MB ×
 three services at boot is not free on a constrained appliance) but not the multi-GB OOM claimed. Fix
 shape: a bounded TAIL read (seek to end, read back a capped window for the last record/newline), O(one
-record). DEFERRED as a hygiene follow-up — it pairs naturally with R9's chain rotation (which also
-bounds the on-disk footprint) and applies to the three byte-identical copies.
+record). DEFERRED as a hygiene follow-up — and now much smaller: R9's shipped rotation (ADR-0040) caps
+the live file at `rotateBytes` (8 MiB), so `lastChainTip`'s whole-file read is bounded to ~8 MiB per
+chain rather than ~100 MB, and the boot gate reads only the retained window (≤16 MiB/chain). The
+remaining win (an O(one-record) tail seek) applies to the three byte-identical copies.
 
 ### Refuted (7)
 
@@ -375,10 +385,11 @@ fixed), not broken guarantees.
 
 Four adversarial lenses over the shipped architecture, each candidate refuted before belief:
 per-component, cross-cutting (interactions/sequences), parsing/crypto, and invariants. Net outcome —
-**confirmed-and-fixed:** R7 (router paid-call cap), R8 (torn-tail brick), R10 (GC inode-recycle race),
-R11 (deny-needle fragmentation); **reverted:** R6 (the method-allowlist, unsound vs a compromised
-agent); **documented-deferred:** R5 (control-chain record-after-act, gated), R9 (/data exhaustion,
-needs chain rotation), R12 (unbounded startup read); plus the runsc OCI hardening. The final invariant
+**confirmed-and-fixed:** R7 (router paid-call cap), R8 (torn-tail brick), R9 (/data exhaustion →
+bounded-retention segment rotation, ADR-0040), R10 (GC inode-recycle race), R11 (deny-needle
+fragmentation); **reverted:** R6 (the method-allowlist, unsound vs a compromised agent);
+**documented-deferred:** R5 (control-chain record-after-act, gated), R12 (unbounded startup read, now
+≤8 MiB after R9's rotation); plus the runsc OCI hardening. The final invariant
 lens found **0 violations**. The signed-chain canonical encoding, the Dual-LLM quarantine, the router,
 and the BPF-LSM enforce all withstood adversarial scrutiny. (These audits are in addition to the
 earlier per-component review that fixed R1/R2/R4, reclassified R3, and scoped R5.)

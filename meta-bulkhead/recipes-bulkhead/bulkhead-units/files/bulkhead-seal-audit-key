@@ -42,7 +42,7 @@ CHAINS="$DATADIR/audit/provenance.jsonl $DATADIR/audit-broker/provenance.jsonl $
 refuse_if_chains_present() {
 	[ "${BULKHEAD_SEAL_FORCE_NEW:-0}" = 1 ] && return 0
 	for c in $CHAINS; do
-		# The live chain file AND any sealed rotation segments (<chain>.NNNNNN, ADR-0038) count as surviving
+		# The live chain file AND any sealed rotation segments (<chain>.NNNNNN, ADR-0040) count as surviving
 		# signed history: a box that rotated and then lost its seed has its signed records in the SEGMENTS,
 		# with the live file possibly small or empty. Checking only the live file would let such a box mint a
 		# fresh seed and brick on the surviving segments. (An unmatched .[0-9]* glob stays literal, so the
