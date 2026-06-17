@@ -7,8 +7,9 @@ re-examined four adjacent boundaries (the audit-chain verifier, the Dual-LLM qua
 model-routing leg, and the BPF-LSM action-auth enforce) and found them **gap-free** — so the pass
 covers the whole shipped isolation architecture, network and syscall halves, not only where it broke.
 A follow-up multi-agent adversarial audit (2026-06-16, see below) then found + **reverted** one HIGH
-(R6, a pipelining bypass in this session's OWN just-shipped method-allowlist), deferred one MED (R7,
-router denial-of-wallet), and saw 17 of 19 candidates refuted by independent skeptics.
+(R6, a pipelining bypass in this session's OWN just-shipped method-allowlist), shipped an opt-in
+mechanism for one MED (R7, a router paid-call denial-of-wallet cap), and saw 17 of 19 candidates
+refuted by independent skeptics.
 
 ## Scope
 
@@ -208,17 +209,22 @@ place. A sound request-line rule engine requires the inspect path to become HTTP
 each request by Content-Length/Transfer-Encoding, rule-check per request, fail closed on un-parseable
 framing or non-HTTP/1.1) — recorded in ADR-0034 as the requirement for a correct re-attempt.
 
-### R7 [MED] — the router has no per-agent rate/spend cap (denial-of-wallet residual) — deferred
+### R7 [MED] — the router has no paid-call volume cap (denial-of-wallet residual) — MECHANISM SHIPPED
 
-The router's only denial-of-wallet control is the per-request TIER gate (downgrade-only route + the
+The router's only denial-of-wallet control was the per-request TIER gate (downgrade-only route + the
 rune-length threshold to the paid path). Both are correct, but they gate one request's tier, not the
 VOLUME. A compromised agent reaching the router UDS with an attacker-controlled body can loop
 threshold-length, max-`max_tokens`, most-expensive-model requests — each a legitimate paid call — and
-nothing bounds the loop, so the operator's API bill grows without limit (the signed chain records
-every call but does not prevent the spend). Fix shape: a paid-path rate/spend bound (a token-bucket
-keyed on the UDS peer-credential, or a configurable paid-calls-per-window that fail-closes to 429).
-DEFERRED: the limit/window is a deployment POLICY choice (per-peer vs global, the threshold) — the
-owner's to set, not a mechanical default.
+nothing bounded the loop, so the operator's API bill grew without limit.
+
+The **mechanism** is now shipped: `BULKHEAD_ROUTER_PAID_RATE_PER_MIN=N` caps paid (RouteAPI) calls at
+N/minute via a global token bucket; once the budget is spent a paid request is refused with 429
+**before any upstream call** (and before the routing commit — a refusal is logged, not a signed
+routing decision). It is GLOBAL (a single-purpose appliance bounds its TOTAL spend, avoiding keying on
+the transient DynamicUser uids), and the local/free route is never throttled. Verified by an
+integration test driving the real `handleChat` path (cap=2 → the 3rd paid call gets 429, upstream hit
+only twice) + a token-bucket unit test. DEFAULT is `0` = unlimited (zero behaviour change): the cap is
+opt-in and the **rate N is the operator's policy** — the review shipped the tool, not the policy.
 
 ### Refuted (17) — high-confidence assurance
 

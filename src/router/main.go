@@ -43,6 +43,7 @@ type config struct {
 	LlamaURL           string
 	Threshold          int
 	DefaultRoute       Route
+	PaidRatePerMin     int    // R7: cap on paid (RouteAPI) calls/minute; 0 = unlimited (default)
 	APIProvider        string // default paid provider when the model matches no prefix
 	ClaudeModel        string
 	AnthropicBase      string
@@ -95,6 +96,7 @@ func configFromEnv() config {
 		LlamaURL:            strings.TrimRight(env("BULKHEAD_LLAMA_URL", "http://127.0.0.1:8081"), "/"),
 		Threshold:           thresholdFloor(envInt("BULKHEAD_THRESHOLD", 2000)),
 		DefaultRoute:        RouteLocal,
+		PaidRatePerMin:      envInt("BULKHEAD_ROUTER_PAID_RATE_PER_MIN", 0),
 		APIProvider:         env("BULKHEAD_API_PROVIDER", "anthropic"),
 		ClaudeModel:         env("BULKHEAD_CLAUDE_MODEL", "claude-sonnet-4-6"),
 		AnthropicBase:       strings.TrimRight(env("BULKHEAD_ANTHROPIC_BASE", "https://api.anthropic.com"), "/"),

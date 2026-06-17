@@ -22,6 +22,7 @@ type server struct {
 	defaultName string             // provider for an api request whose model matches no prefix
 	http        *http.Client       // shared no-redirect client (proxyLocal + every backend)
 	audit       *auditLog          // ADR-0027 signed routing-decision chain; nil in unit tests (audit skipped)
+	paidLimiter *rateLimiter       // R7: paid-call volume cap; nil = unlimited (default)
 }
 
 func newServer(cfg config, providers map[string]Backend, hc *http.Client) *server {
@@ -29,7 +30,7 @@ func newServer(cfg config, providers map[string]Backend, hc *http.Client) *serve
 	if def == "" {
 		def = "anthropic"
 	}
-	return &server{cfg: cfg, providers: providers, defaultName: def, http: hc}
+	return &server{cfg: cfg, providers: providers, defaultName: def, http: hc, paidLimiter: newRateLimiter(cfg.PaidRatePerMin)}
 }
 
 func (s *server) routes() http.Handler {
@@ -89,6 +90,17 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	d := decide(&req, s.cfg.Threshold, s.cfg.DefaultRoute)
 	w.Header().Set("X-Bulkhead-Route", string(d.Route))
+
+	// R7 (security review): bound paid-call VOLUME (denial-of-wallet). decide() bounds whether ONE
+	// request is paid; this bounds how MANY. A compromised agent looping threshold-length requests is
+	// refused once the per-minute budget is spent — BEFORE any upstream paid call and before the routing
+	// commit (a refused request is not a routing decision, so it is logged, not signed). Off by default
+	// (paidLimiter nil => allow). The local/free route is never throttled.
+	if d.Route == RouteAPI && !s.paidLimiter.allow() {
+		log.Printf("route=api REFUSED: paid-call rate cap exceeded (%d/min)", s.cfg.PaidRatePerMin)
+		writeError(w, http.StatusTooManyRequests, "paid-call rate limit exceeded")
+		return
+	}
 
 	// ADR-0027: record the routing decision in the signed chain BEFORE acting on it. The provider (the
 	// outbound destination for an api route) is selectProvider(model) — deterministic at decide-time, so

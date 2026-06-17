@@ -24,6 +24,11 @@ RestartSec=2
 # The local inference backend is reached on loopback.
 Environment=BULKHEAD_LISTEN=127.0.0.1:8080
 Environment=BULKHEAD_LLAMA_URL=http://127.0.0.1:8081
+# Denial-of-wallet bound (security-review R7). 0 = unlimited (the default — the per-request tier gate
+# is the only paid-path control). Set to N to cap PAID (api-route) calls at N/minute: a compromised
+# agent looping threshold-length requests is refused with 429 once the budget is spent, before any
+# upstream paid call. The local/free route is never throttled. The operator sets N for their budget.
+Environment=BULKHEAD_ROUTER_PAID_RATE_PER_MIN=0
 # The Anthropic key is delivered at runtime via a systemd credential drop-in
 # (see deploy/anthropic-credential.md) so 'api' routes work; absent it, 'api'
 # routes return 503 and 'local' routes still work. The key is never in the image.
