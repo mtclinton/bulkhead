@@ -33,6 +33,11 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# Parity with the sibling TCB units (egress-proxy/router): a transport-only UNIX splicer needs no
+# devices, no realtime scheduling, and no suid/sgid exec — deny them too.
+PrivateDevices=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
@@ -46,5 +51,8 @@ SystemCallArchitectures=native
 # @system-service — the io-uring-jail-deny lesson) and @raw-io: a host-side io_uring/raw-io path on the
 # mux would bypass the egress proxy entirely since the host has a real network (ADR-0042 must-fix).
 SystemCallFilter=@system-service
-SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register @raw-io
+# Deny io_uring BY NAME (allowed via @aio in @system-service — the io-uring-jail-deny lesson) AND adopt the
+# sibling TCB deny set (@resources/@privileged/@mount/… that @system-service still permits) so the mux's
+# floor is a strict SUPERSET of egress-proxy/router — it carries the tightest hardening, as its header claims.
+SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register @resources @privileged @obsolete @cpu-emulation @mount @reboot @swap @raw-io @module
 SystemCallErrorNumber=EPERM

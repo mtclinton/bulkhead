@@ -25,15 +25,24 @@ do_compile() {
 	python3 - "${DEPLOY_DIR_IMAGE}/bzImage" "${B}/vmlinux" <<'PYEOF'
 import sys, zlib, re
 data = open(sys.argv[1], 'rb').read()
+best = None
+# Scan every gzip member (magic 1f 8b 08; the kernel's payload is CONFIG_KERNEL_GZIP) and inflate each.
+# Accept ONLY a COMPLETE stream: d.eof True means the gzip CRC/ISIZE trailer was consumed, so a truncated or
+# corrupt bzImage can't silently yield a partial vmlinux with a valid ELF header but a missing tail (which
+# would only fail to boot on real hardware, where it is hardest to debug). Keep the LARGEST qualifying ELF
+# member, robust to any other embedded gzip blob being scanned first.
 for m in re.finditer(b'\x1f\x8b\x08', data):
+    d = zlib.decompressobj(zlib.MAX_WBITS | 16)
     try:
-        out = zlib.decompressobj(zlib.MAX_WBITS | 16).decompress(data[m.start():])
+        out = d.decompress(data[m.start():]) + d.flush()
     except Exception:
         continue
-    if out[:4] == b'\x7fELF' and len(out) > 1_000_000:
-        open(sys.argv[2], 'wb').write(out)
-        sys.exit(0)
-sys.exit('bulkhead-fc-guestkernel: no ELF vmlinux found in bzImage')
+    if d.eof and out[:4] == b'\x7fELF' and len(out) > 1_000_000:
+        if best is None or len(out) > len(best):
+            best = out
+if best is None:
+    sys.exit('bulkhead-fc-guestkernel: no COMPLETE ELF vmlinux found in bzImage (truncated/corrupt deploy image?)')
+open(sys.argv[2], 'wb').write(best)
 PYEOF
 }
 

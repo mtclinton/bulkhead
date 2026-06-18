@@ -36,7 +36,7 @@ A guest AF_VSOCK connect to (host CID 2, port P) makes Firecracker connect INTO 
 **The adversarial break (channel-confusion lens), and the control it forced.** Firecracker resolves `<uds-base>_<P>` LAZILY at connect time and FOLLOWS SYMLINKS. So the invariant does NOT rest on "unprovisioned ports reset" — it rests on the per-instance dir containing EXACTLY `{vsock.uds, vsock.uds_2222, vsock.uds_2223}`, all owned by the per-instance uid, with no other `<base>_<digits>` socket and no symlink. Otherwise a post-VMM-escape attacker at the Firecracker uid could pre-plant a symlink/stale socket that redirects a leg to an arbitrary host socket (the collector control socket, dbus, …). This is therefore a **LOAD-BEARING control**, not incidental hardening:
 
 - The mux REFUSES to bind a leg path that is a symlink or non-socket (O_NOFOLLOW-equivalent; unit-tested `TestListenLegRefusesSymlink`).
-- The launcher gives the mux a FRESH, EMPTY per-instance dir (`RuntimeDirectory` mode 0700) of which it is the sole writer; ExecStopPost unlinks `vsock.uds` and every `<base>_*` before the dir can be reused.
+- The mux unit gives it a FRESH, EMPTY per-instance dir (systemd `RuntimeDirectory=bulkhead-fc/%i` mode 0700) of which it is the sole writer; systemd creates it empty at start and removes it (and every socket in it) at stop, so each instance starts clean with no leftover `vsock.uds`/`<base>_*` to reuse — no ExecStopPost needed.
 - A verify-time + runtime assertion (slice 4) that the dir holds exactly those three sockets and the mux is the sole listener.
 
 ## Other must-fixes from the adversarial pass

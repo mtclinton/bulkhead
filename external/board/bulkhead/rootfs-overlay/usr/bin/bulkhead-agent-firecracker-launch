@@ -28,10 +28,22 @@ base="/run/bulkhead-fc-vm/${inst}"
 rootfs="${base}/rootfs"
 mux_uds="/run/bulkhead-fc/${inst}/vsock.uds"   # the bulkhead-fc-vsockmux@<inst> mux listens on <uds>_<port>
 
-# Firecracker is the vsock CLIENT for guest-initiated flows, so the mux must already be listening.
-for i in $(seq 1 50); do [ -S "${mux_uds}_2222" ] && break; sleep 0.1; done
+# Firecracker is the vsock CLIENT for guest-initiated flows, so the mux must already be listening. systemd
+# Requires=/After= only orders *start* (Type=exec = "exec'd", not "bound"), and the mux can be transiently
+# down under Restart=on-failure — so poll for BOTH legs, then FAIL CLOSED if either never appears. Booting a
+# hostile VM with a half-wired mediated channel would defeat the mediated+signed guarantee with no failure
+# signal; refusing makes the documented precondition load-bearing (the agent unit has no Restart= → it shows
+# as `failed`). Egress already fails closed regardless (an absent leg => vsock connection-refused, no bytes).
+for i in $(seq 1 50); do { [ -S "${mux_uds}_2222" ] && [ -S "${mux_uds}_2223" ]; } && break; sleep 0.1; done
+for leg in 2222 2223; do
+	[ -S "${mux_uds}_${leg}" ] || { echo "fc-launch: mux leg ${mux_uds}_${leg} never appeared; refusing to boot hostile VM" >&2; exit 1; }
+done
 
-rm -rf "${base}"; mkdir -p "${rootfs}/bin" "${rootfs}/usr/lib" "${rootfs}/proc" "${rootfs}/dev" "${rootfs}/run"
+rm -rf "${base}"
+# 0700 base: it holds the guest rootfs.ext4 (the injected task) + vm.json — don't regress the mux's 0700
+# least-privilege floor by leaving the per-instance dir world-traversable.
+(umask 077; mkdir -p "${base}")
+mkdir -p "${rootfs}/bin" "${rootfs}/usr/lib" "${rootfs}/proc" "${rootfs}/dev" "${rootfs}/run"
 ln -sf usr/lib "${rootfs}/lib"   # usrmerge: let the loader find libs under both /lib and /usr/lib
 cp "$(command -v busybox)" "${rootfs}/bin/busybox"
 cp /usr/bin/bulkhead-fc-vsockmux "${rootfs}/bin/fc-vsockmux"   # static (CGO_ENABLED=0): no libs needed
@@ -65,7 +77,9 @@ BULKHEAD_AGENT_TASK="$(/bin/busybox cat /run/agent-task 2>/dev/null)" \
 INIT
 chmod +x "${rootfs}/init"
 dd if=/dev/zero of="${base}/rootfs.ext4" bs=1M count=128 status=none
-"$(command -v mkfs.ext4 || echo /sbin/mkfs.ext4)" -F -q -d "${rootfs}" "${base}/rootfs.ext4"
+mke2fs="$(command -v mkfs.ext4 || echo /sbin/mkfs.ext4)"
+[ -x "${mke2fs}" ] || { echo "fc-launch: mkfs.ext4 not found at ${mke2fs} (e2fsprogs-mke2fs)" >&2; exit 1; }
+"${mke2fs}" -F -q -d "${rootfs}" "${base}/rootfs.ext4"
 
 cat > "${base}/vm.json" <<EOF
 {"boot-source":{"kernel_image_path":"${vmlinux}","boot_args":"console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda init=/init"},

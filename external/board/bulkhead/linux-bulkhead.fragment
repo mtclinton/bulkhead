@@ -62,7 +62,7 @@ CONFIG_EXPERT=y
 # differs — the media subdriver filter goes off (dragging in DVB/tuner/radio), and a batch of HID/input/
 # rfkill drivers + DEBUG_MEMORY_INIT flip off. Pin them back (MEDIA_SUPPORT_FILTER reverts the media block).
 CONFIG_MEDIA_SUPPORT_FILTER=y
-CONFIG_MEDIA_HIDE_ANCILLARY_SUBDRV=y
+# (MEDIA_HIDE_ANCILLARY_SUBDRV not pinned — `depends on !EXPERT`, inert under EXPERT; FILTER handles it.)
 CONFIG_DEBUG_MEMORY_INIT=y
 CONFIG_INPUT_FF_MEMLESS=y
 CONFIG_RFKILL_INPUT=y

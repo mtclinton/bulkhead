@@ -22,3 +22,21 @@ ExecStart=/usr/bin/bulkhead-agent-firecracker-launch %i
 ExecStopPost=-/bin/sh -c 'rm -rf /run/bulkhead-fc-vm/%i'
 TimeoutStopSec=20
 NoNewPrivileges=yes
+# Defense-in-depth for a root unit on a networked host (the VMM/jailer is the real boundary, but the host
+# launcher process is still root). Only directives that do NOT interfere with /dev/kvm, the /run rootfs
+# build, or the jailer follow-up are applied. DELIBERATELY OMITTED until bare-metal validation / the jailer:
+# PrivateDevices (needs /dev/kvm), ProtectControlGroups + RestrictNamespaces (the jailer creates the agent's
+# cgroup + empty netns), MemoryDenyWriteExecute + an empty CapabilityBoundingSet (un-boot-testable against
+# firecracker in this no-nested-KVM harness — defer rather than risk bricking the tier).
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

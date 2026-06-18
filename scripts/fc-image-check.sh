@@ -83,13 +83,19 @@ for u in "$MUX" "$AGT"; do
 	fi
 done
 
-# (6) the mux unit keeps its hardening floor
+# (6) the mux unit keeps its FULL hardening floor (a strict superset of the egress-proxy/router siblings).
+# io_uring/@raw-io/@resources must be on a DENY (~) line — assert the direction, not mere presence.
 if have "$MUX"; then
 	UB="$(slurp "$MUX")"
-	printf '%s' "$UB" | grep -q 'RestrictAddressFamilies=AF_UNIX'      && ok "mux: AF_UNIX-only"                 || bad "mux: AF_UNIX-only floor missing"
-	printf '%s' "$UB" | grep -q 'io_uring_setup'                       && ok "mux: io_uring denied by name"      || bad "mux: io_uring deny missing"
-	printf '%s' "$UB" | grep -q 'DynamicUser=yes'                      && ok "mux: DynamicUser"                  || bad "mux: DynamicUser missing"
-	printf '%s' "$UB" | grep -q 'RuntimeDirectoryMode=0700'            && ok "mux: 0700 per-instance dir"        || bad "mux: 0700 RuntimeDirectory missing"
+	printf '%s' "$UB" | grep -q  'RestrictAddressFamilies=AF_UNIX'        && ok "mux: AF_UNIX-only"             || bad "mux: AF_UNIX-only floor missing"
+	printf '%s' "$UB" | grep -Eq 'SystemCallFilter=~[^=]*io_uring_setup'  && ok "mux: io_uring denied (~ line)" || bad "mux: io_uring not on a deny line"
+	printf '%s' "$UB" | grep -Eq 'SystemCallFilter=~[^=]*@raw-io'         && ok "mux: @raw-io denied"           || bad "mux: @raw-io deny missing"
+	printf '%s' "$UB" | grep -Eq 'SystemCallFilter=~[^=]*@resources'      && ok "mux: @resources denied"        || bad "mux: @resources deny missing"
+	printf '%s' "$UB" | grep -q  'DynamicUser=yes'                        && ok "mux: DynamicUser"              || bad "mux: DynamicUser missing"
+	printf '%s' "$UB" | grep -q  'RuntimeDirectoryMode=0700'              && ok "mux: 0700 per-instance dir"    || bad "mux: 0700 RuntimeDirectory missing"
+	printf '%s' "$UB" | grep -qE '^CapabilityBoundingSet=$'               && ok "mux: empty CapabilityBoundingSet" || bad "mux: CapabilityBoundingSet not emptied"
+	printf '%s' "$UB" | grep -q  'MemoryDenyWriteExecute=yes'             && ok "mux: W^X (MemoryDenyWriteExecute)" || bad "mux: MemoryDenyWriteExecute missing"
+	printf '%s' "$UB" | grep -q  'PrivateDevices=yes'                     && ok "mux: PrivateDevices"           || bad "mux: PrivateDevices missing"
 fi
 
 # (7) the agent unit gates on the mux + proxy + the fail-closed selftest
