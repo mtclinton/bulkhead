@@ -26,6 +26,8 @@ IMAGE_INSTALL += " \
     llama-cpp \
     tailscale \
     runsc \
+    firecracker \
+    bulkhead-fc-vsockmux \
     nftables \
     curl \
     ca-certificates \
