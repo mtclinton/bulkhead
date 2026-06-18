@@ -151,6 +151,14 @@ verify-firecracker-proxy:
 verify-firecracker-jail:
 	sh $(BULKHEAD_ROOT)/scripts/fc-jail-check.sh
 
+# ADR-0042 IN-IMAGE landing gate (slices 5-6). NOT a boot check (needs no /dev/kvm): asserts the deployable
+# tier actually shipped into the built bulkhead-image rootfs and is well-formed — the three binaries +
+# the ELF guest vmlinux + mkfs.ext4 present; the launcher parses + keeps its no-NIC/no-ldd invariants; both
+# @.service templates present + well-formed; the mux unit keeps its hardening floor; the agent unit gates on
+# the mux + proxy + selftest. Inspects the rootfs dir (or the deployed tar.bz2); exits 2 without a built image.
+verify-firecracker-image:
+	sh $(BULKHEAD_ROOT)/scripts/fc-image-check.sh
+
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
 # router's local backend + the proxy allowlist at a loopback mockchat, runs the confined agent on
