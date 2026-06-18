@@ -1,0 +1,2 @@
+# the compiled mux is a Yocto build output (bulkhead-fc-vsockmux recipe does `go build`); never commit it
+/fc-vsockmux

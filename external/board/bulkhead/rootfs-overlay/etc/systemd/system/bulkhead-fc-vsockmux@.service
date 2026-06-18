@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# ADR-0042: the per-instance Firecracker mediated-channel HOST mux. For guest-initiated vsock flows
+# firecracker is the CLIENT that connects INTO this mux's host UNIX listeners at /run/bulkhead-fc/%i/
+# vsock.uds_<port>; the mux splices each to the FIXED egress-proxy / router UDS (never a guest-chosen
+# target). It is a transport-only component in the post-compromise blast radius (the "mediation fabric"
+# surface), so it carries the tightest hardening floor: AF_UNIX-only, empty caps, io_uring + raw-io denied
+# by name, a fresh 0700 per-instance RuntimeDirectory of which it is the sole writer.
+#
+# The mux MUST be listening before the jailed firecracker dials (firecracker is the vsock client), so the
+# bulkhead-agent-firecracker@%i unit Requires= + After= this instance.
+[Unit]
+Description=bulkhead Firecracker vsock mux (instance %i)
+Documentation=https://github.com/mtclinton/bulkhead
+Requires=bulkhead-egress-proxy.service
+After=bulkhead-egress-proxy.service bulkhead-router.service
+
+[Service]
+Type=exec
+# Per-instance dynamic uid (distinct from the firecracker/jailer uid so a VMM escape cannot inherit the
+# mux's open proxy/router fds — ADR-0042 owner sign-off). The fresh 0700 RuntimeDirectory is the
+# load-bearing channel-confusion control: exactly {vsock.uds, _2222, _2223}, mux the sole writer.
+DynamicUser=yes
+RuntimeDirectory=bulkhead-fc/%i
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/bulkhead-fc-vsockmux serve-host /run/bulkhead-fc/%i/vsock.uds 2222=/run/bulkhead-egress/egress.sock 2223=/run/bulkhead-router/router.sock
+Restart=on-failure
+RestartSec=1
+# It only ever speaks AF_UNIX (the legs + the proxy/router sockets); it must hold NO host network primitive.
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# It connects to the proxy/router sockets (the dirs are otherwise read-only under ProtectSystem=strict).
+ReadOnlyPaths=/run/bulkhead-egress /run/bulkhead-router
+SystemCallArchitectures=native
+# @system-service is the default-deny base; subtract io_uring BY NAME (it is allowed via @aio in
+# @system-service — the io-uring-jail-deny lesson) and @raw-io: a host-side io_uring/raw-io path on the
+# mux would bypass the egress proxy entirely since the host has a real network (ADR-0042 must-fix).
+SystemCallFilter=@system-service
+SystemCallFilter=~io_uring_setup io_uring_enter io_uring_register @raw-io
+SystemCallErrorNumber=EPERM

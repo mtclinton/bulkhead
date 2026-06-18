@@ -1,0 +1,76 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# ADR-0042 slice 6: launch a bulkhead agent inside a Firecracker microVM (the hostile tier, ADR-0031).
+# Builds a minimal per-instance guest (busybox + the agent + the in-VM vsock forwarder + an init), writes a
+# per-instance Firecracker config (a vsock leg to the host mux, and NO network-interfaces stanza => the
+# guest has NO NIC), and boots it. The microVM's ONLY way out is the vsock leg -> the per-instance
+# bulkhead-fc-vsockmux@<inst> mux -> the host egress proxy/router (mediated + signed, ADR-0034). The whole
+# mechanism is LIVE-PROVEN host-side (slices 1-4: fc-legs/agent/proxy/jail-check).
+#
+# HARDENING FOLLOW-UP (needs a root + nested-KVM env to develop/validate, so NOT wired here): wrap
+# firecracker under /usr/bin/jailer (per-instance uid/chroot/empty-netns/cgroup). The jailer chroots
+# firecracker, so the mux's leg dir must be coordinated INTO the chroot — that cross-process socket layout
+# is the only un-validated piece. Until then firecracker runs bare under the (root) unit; the
+# no-direct-network + only-mediated-egress invariants hold regardless (device-model: no NIC at all; the mux
+# is the sole reachable host endpoint), and slice 4 proved firecracker holds no host network socket.
+set -eu
+inst="${1:?usage: bulkhead-agent-firecracker-launch <instance>}"
+# %i is operator/unit-controlled, but reject anything but an identifier so a hostile id can never escape the
+# /run paths or inject into the JSON config (mirrors the runsc launcher's guard).
+case "${inst}" in ""|*[!A-Za-z0-9_-]*) echo "fc-launch: invalid instance id: ${inst}" >&2; exit 2 ;; esac
+
+task="${BULKHEAD_AGENT_TASK:-Report your egress manifest over the mediated leg, then finish.}"
+vmlinux="${BULKHEAD_FC_VMLINUX:-/usr/share/bulkhead/fc/vmlinux}"
+cid="${BULKHEAD_FC_CID:-3}"   # per-instance vsock CID; distinct per live VM (multi-instance allocation is a follow-up)
+[ -f "${vmlinux}" ] || { echo "fc-launch: no guest vmlinux at ${vmlinux} (bulkhead-fc-guestkernel)" >&2; exit 1; }
+
+base="/run/bulkhead-fc-vm/${inst}"
+rootfs="${base}/rootfs"
+mux_uds="/run/bulkhead-fc/${inst}/vsock.uds"   # the bulkhead-fc-vsockmux@<inst> mux listens on <uds>_<port>
+
+# Firecracker is the vsock CLIENT for guest-initiated flows, so the mux must already be listening.
+for i in $(seq 1 50); do [ -S "${mux_uds}_2222" ] && break; sleep 0.1; done
+
+rm -rf "${base}"; mkdir -p "${rootfs}/bin" "${rootfs}/usr/lib" "${rootfs}/proc" "${rootfs}/dev" "${rootfs}/run"
+ln -sf usr/lib "${rootfs}/lib"   # usrmerge: let the loader find libs under both /lib and /usr/lib
+cp "$(command -v busybox)" "${rootfs}/bin/busybox"
+cp /usr/bin/bulkhead-fc-vsockmux "${rootfs}/bin/fc-vsockmux"   # static (CGO_ENABLED=0): no libs needed
+cp /usr/bin/bulkhead-agent "${rootfs}/bin/bulkhead-agent"      # static (CGO_ENABLED=0): no libs needed
+# busybox is a dynamic PIE and the minimal image carries NO ldd/readelf to discover its deps at runtime, so
+# copy its loader + the NEEDED glibc libs (libc/libm) by FIXED name. The sonames + the x86-64 loader name are
+# ABI-stable; a static-busybox guest (one recipe, zero libs) is the clean follow-up. mirror.sh-free: resolve
+# each from wherever the host carries it (/lib or /usr/lib under usrmerge).
+for lib in ld-linux-x86-64.so.2 libc.so.6 libm.so.6; do
+	src=""
+	for p in "/usr/lib/${lib}" "/lib/${lib}"; do [ -e "${p}" ] && { src="${p}"; break; }; done
+	[ -n "${src}" ] || { echo "fc-launch: missing guest glibc lib ${lib}" >&2; exit 1; }
+	cp -L "${src}" "${rootfs}/usr/lib/${lib}"
+done
+ln -sf busybox "${rootfs}/bin/sh"
+printf '%s' "${task}" > "${rootfs}/run/agent-task"; chmod 0400 "${rootfs}/run/agent-task"   # injection-safe (file CONTENT)
+cat > "${rootfs}/init" <<'INIT'
+#!/bin/busybox sh
+/bin/busybox mount -t proc proc /proc 2>/dev/null
+/bin/busybox mount -t devtmpfs dev /dev 2>/dev/null   # /dev/null is needed: busybox backgrounds bg-jobs' stdin from it
+/bin/busybox mkdir -p /run/bulkhead-egress /run/bulkhead-router
+# the in-guest forwarder presents the agent's UNIX legs, bridged over vsock to the host mux
+/bin/fc-vsockmux serve-guest /run/bulkhead-egress/egress.sock=2222 /run/bulkhead-router/router.sock=2223 &
+for i in $(/bin/busybox seq 1 50); do [ -S /run/bulkhead-egress/egress.sock ] && break; /bin/busybox sleep 1; done
+BULKHEAD_EGRESS_SOCK=/run/bulkhead-egress/egress.sock \
+BULKHEAD_ROUTER_UDS=/run/bulkhead-router/router.sock \
+BULKHEAD_AGENT_TASK="$(/bin/busybox cat /run/agent-task 2>/dev/null)" \
+  /bin/bulkhead-agent fc
+/bin/busybox sync
+/bin/busybox poweroff -f
+INIT
+chmod +x "${rootfs}/init"
+dd if=/dev/zero of="${base}/rootfs.ext4" bs=1M count=128 status=none
+"$(command -v mkfs.ext4 || echo /sbin/mkfs.ext4)" -F -q -d "${rootfs}" "${base}/rootfs.ext4"
+
+cat > "${base}/vm.json" <<EOF
+{"boot-source":{"kernel_image_path":"${vmlinux}","boot_args":"console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda init=/init"},
+ "drives":[{"drive_id":"rootfs","path_on_host":"${base}/rootfs.ext4","is_root_device":true,"is_read_only":false}],
+ "vsock":{"guest_cid":${cid},"uds_path":"${mux_uds}"},
+ "machine-config":{"vcpu_count":1,"mem_size_mib":256}}
+EOF
+exec /usr/bin/firecracker --no-api --config-file "${base}/vm.json"

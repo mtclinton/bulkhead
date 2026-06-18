@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# ADR-0042 slice 6: the DEPLOYABLE Firecracker hostile-tier agent (instance %i), the sibling of
+# bulkhead-agent-runsc@. `systemctl start bulkhead-agent-firecracker@<inst>` boots a microVM running a
+# bulkhead agent whose ONLY way out is the mediated vsock leg -> the per-instance mux -> the host egress
+# proxy/router. The microVM (a separate guest kernel) is the isolation boundary; the host unit stays minimal.
+#
+# Build-verified (the qemu suite has no nested KVM to live-boot a microVM); the mechanism is live-proven
+# host-side (slices 1-4). Runtime needs /dev/kvm (bare metal / a nested-KVM host). The jailer confinement of
+# the VMM is the documented hardening follow-up (see the launcher).
+[Unit]
+Description=bulkhead agent in a Firecracker microVM (instance %i)
+Documentation=https://github.com/mtclinton/bulkhead
+# The per-instance mux must be up (listening) before firecracker (the vsock client) dials; the fail-closed
+# selftest gate must pass before any agent tier starts.
+Requires=bulkhead-fc-vsockmux@%i.service bulkhead-egress-proxy.service bulkhead-selftest.service
+After=bulkhead-fc-vsockmux@%i.service bulkhead-egress-proxy.service bulkhead-selftest.service
+
+[Service]
+Type=exec
+# Runs as root: firecracker needs /dev/kvm (and the hardening-follow-up jailer needs root to confine the VMM).
+ExecStart=/usr/bin/bulkhead-agent-firecracker-launch %i
+ExecStopPost=-/bin/sh -c 'rm -rf /run/bulkhead-fc-vm/%i'
+TimeoutStopSec=20
+NoNewPrivileges=yes
