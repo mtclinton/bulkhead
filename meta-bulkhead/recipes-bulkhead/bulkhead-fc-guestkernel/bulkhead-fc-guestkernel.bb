@@ -38,4 +38,7 @@ do_install() {
 	install -Dm0644 ${B}/vmlinux ${D}${datadir}/bulkhead/fc/vmlinux
 }
 
+# The extracted vmlinux is the kernel's own (already-stripped) ELF; it is a boot payload, not a debuggable
+# package binary, so QA's strip check does not apply (same posture as the prebuilt firecracker binaries).
+INSANE_SKIP:${PN} += "already-stripped"
 FILES:${PN} = "${datadir}/bulkhead/fc/vmlinux"
