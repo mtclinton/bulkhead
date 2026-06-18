@@ -7,9 +7,12 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/GPL-2.0-only;md5=801f80980d171d
 # Firecracker boots an uncompressed ELF vmlinux, NOT the gzip'd bzImage ("Invalid Elf magic number"). This
 # extracts vmlinux from the appliance kernel's deploy bzImage at BUILD time (the same extraction the
 # ADR-0031 spike + ADR-0042 slices did at runtime) and ships it at /usr/share/bulkhead/fc/vmlinux for the
-# firecracker launcher. The hostile-tier guest reuses the appliance kernel for now; a firecracker-TUNED
-# guest kernel (io_uring disabled per ADR-0033, CONFIG_VIRTIO_NET dropped for defense-in-depth) is a
-# follow-up — the no-NIC guarantee already rests on omitting the firecracker network stanza, not the kernel.
+# firecracker launcher. The hostile-tier guest reuses the appliance kernel, which now has io_uring
+# COMPILED OUT (CONFIG_IO_URING off in the shared bulkhead-security fragment, ADR-0033 amendment) — so the
+# guest inherits no in-VM io_uring (verify-firecracker-agent's IOURING probe sees ENOSYS). The remaining
+# FC-tuning item, dropping CONFIG_VIRTIO_NET, is deferred: it needs a SEPARATE guest kernel (un-boot-testable
+# without nested KVM) for marginal gain, since no-NIC already rests structurally on omitting the firecracker
+# network stanza, not the kernel.
 DEPENDS = "virtual/kernel"
 do_compile[depends] += "virtual/kernel:do_deploy"
 

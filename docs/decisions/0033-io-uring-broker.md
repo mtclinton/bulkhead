@@ -1,6 +1,6 @@
 # ADR-0033: io_uring: disable inside the sandbox, broker async I/O
 
-Status: Accepted — the agent-side io_uring denial (per-sandbox seccomp) is SHIPPED + live-verified; the async-I/O broker and the default-tier (Sentry) enforcement point are pending
+Status: Accepted (amended 2026-06-18) — io_uring denial is SHIPPED + verified at TWO layers: per-sandbox seccomp (agent jails) AND kernel-level compile-out (`CONFIG_IO_URING` off appliance-wide, which also disarms it in the ADR-0042 Firecracker guest). This amendment reverses the original "deliberately not a global kernel kill" stance in favour of secure-by-default; see the kernel-level note below. The async-I/O broker and the default-tier (Sentry) enforcement point remain pending.
 Date: 2026-06-07
 Pillar: agent-isolation
 Relates to: ADR-0031/0032 (substrate & interception whose observability this preserves), ADR-0034 (same broker-don't-expose pattern), ADR-0035 (brokered I/O rides the resource-auth layer).
@@ -16,16 +16,33 @@ systemd set, so the three syscalls are denied by name. The confined egress probe
 `io_uring_setup` returns EPERM from inside the jail (the `IOURING` check, run by both
 `make verify-egress-proxy` and `make verify-egress-reboot`).
 
-Enforcement is **per-sandbox seccomp, deliberately not a global `kernel.io_uring_disabled`
-kernel kill**: open question (2) below leaves room for the trusted broker to use io_uring
-*internally* (gaining its performance while keeping rings out of the agent), which a system-wide
-disable would foreclose. Denying at the sandbox boundary keeps that design space open.
+**Kernel-level compile-out — SHIPPED + VERIFIED (2026-06-18).** The appliance kernel is now built
+with `CONFIG_IO_URING` off (`# CONFIG_IO_URING is not set`, requiring `CONFIG_EXPERT=y` since the
+symbol is `bool "..." if EXPERT default y`; the EXPERT side-effects are pinned back so the net config
+change is io_uring-only — see the bulkhead-security.cfg / linux-bulkhead.fragment block). This makes
+the per-sandbox seccomp denial a *belt over a structural floor*: io_uring is simply absent from the
+kernel, so even a misconfigured jail filter hits `ENOSYS`, and — because the ADR-0042 Firecracker
+guest extracts its vmlinux from this kernel — the hostile-tier guest has no in-VM io_uring either
+(`make verify-firecracker-agent`'s `IOURING` probe now reports `io_uring_setup` → ENOSYS in-guest;
+the host appliance still boots clean + passes the selftest/verify-audit gates, `make
+verify-yocto-router`).
+
+This **reverses** this ADR's original "per-sandbox seccomp, deliberately *not* a global kernel kill"
+stance — that stance kept host io_uring available so the open-question-(2) broker could use it
+internally for performance. We chose the stronger secure-by-default posture instead: io_uring is a
+recurring kernel-memory-safety CVE generator (rationale below), so it is OFF everywhere by default,
+removing that surface from the most-privileged host kernel too (KSPP-aligned). This does not
+permanently foreclose the broker option — open question (2)'s alternative (a broker on *discrete,
+observable* syscalls) is the more-observable choice and needs no io_uring; and were a future broker to
+genuinely need rings, re-enabling is a one-line fragment flip (`CONFIG_IO_URING=y` + drop the disable)
+scoped to the host, not the agent. The agent never holds a ring in either case.
 
 **Pending:** the async-I/O **broker** that services agent I/O via discrete, observable syscalls
 (the "broker, don't expose" half of the decision); and the **default-tier (Sentry) enforcement
 point** (ADR-0031/0032), which is unbuilt — until the Sentry ships, the namespace-tier seccomp
-denial above is the live control. The hostile-tier guest-kernel `io_uring`-off build is also a
-later guest-image hardening item.
+denial above is the live control. (The hostile-tier guest-kernel `io_uring`-off build — formerly a
+later guest-image hardening item — is now SHIPPED via the kernel-level compile-out above, since the
+ADR-0042 guest reuses the appliance kernel.)
 
 ## Context and problem statement
 
@@ -70,7 +87,7 @@ bulkhead WILL **disable io_uring inside the agent across BOTH the default (Sentr
 
 ## Confidence & open questions
 
-High confidence on the structural rationale: the seccomp/ptrace/EDR blindness is a design property, not a bug, and the verification on report #6 was clean (32/32) [#6]. Open questions: (1) which async patterns the broker must expose to keep real agent workloads functional without re-importing ring semantics; (2) whether the broker should itself use io_uring internally (gaining performance while keeping it out of the agent) or stay on discrete syscalls for its own observability; (3) the precise enforcement point for the denial — Sentry-level vs. seccomp scalar pre-filter [#4].
+High confidence on the structural rationale: the seccomp/ptrace/EDR blindness is a design property, not a bug, and the verification on report #6 was clean (32/32) [#6]. Open questions: (1) which async patterns the broker must expose to keep real agent workloads functional without re-importing ring semantics; (2) whether the broker should itself use io_uring internally (gaining performance while keeping it out of the agent) or stay on discrete syscalls for its own observability — **now resolved-by-default to discrete syscalls**: the 2026-06-18 kernel-level compile-out removes io_uring from the host kernel, so a broker gets none unless that host disable is deliberately reverted (the more-observable discrete-syscall path is preferred regardless); (3) the precise enforcement point for the denial — Sentry-level vs. seccomp scalar pre-filter [#4].
 
 ## Evidence (source reports)
 
