@@ -28,6 +28,8 @@ IMAGE_INSTALL += " \
     runsc \
     firecracker \
     bulkhead-fc-vsockmux \
+    bulkhead-fc-guestkernel \
+    e2fsprogs-mke2fs \
     nftables \
     curl \
     ca-certificates \

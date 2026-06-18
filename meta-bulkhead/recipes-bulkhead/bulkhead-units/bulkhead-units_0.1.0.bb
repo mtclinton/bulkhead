@@ -20,6 +20,10 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
            file://audit-cred-tpm2.conf \
            file://seal-tpm2-mode.conf \
            file://rauc-mark-good-gate.conf"
+# Re-pinned to cb0960e (ADR-0042 slice 6): the overlay now also carries the deployable Firecracker
+# hostile-tier surface — bulkhead-fc-vsockmux@.service (the per-instance host mux), the
+# bulkhead-agent-firecracker@.service template, and bulkhead-agent-firecracker-launch (the launcher,
+# installed below). The two @.service templates install via the *.service glob in do_install.
 # Pinned to 0c6c8fc (ADR-0033 io_uring deny + ADR-0034 router-UDS AF_UNIX fix): the overlay carries the
 # structural-egress units (bulkhead-egress-proxy.service incl. its StateDirectory/audit base config, the
 # bulkhead-agent-confined@ PrivateNetwork jail template, the router UDS, egress-allow.conf). Both agent
@@ -27,7 +31,7 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
 # router now lists AF_UNIX in RestrictAddressFamilies so it can create its UDS instead of crash-looping
 # (without it the confined agent's model leg never existed). The bulkhead-egress-proxy-data.conf drop-in
 # (files/) persists the proxy's signed chain on /data + the sealed seed; verify-audit gates the egress chain.
-SRCREV = "fd1bb721bf0b4f2747b647e233d249a5c98f703b"
+SRCREV = "cb0960e35b96c35226a11677d89b28e29b0b007f"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
@@ -103,6 +107,9 @@ do_install() {
 	install -Dm0755 ${OV}/usr/bin/bulkhead-agent-run ${D}${bindir}/bulkhead-agent-run
 	# ADR-0031: the gVisor-substrate agent launcher (ExecStart of bulkhead-agent-runsc@.service)
 	install -Dm0755 ${OV}/usr/bin/bulkhead-agent-runsc-launch ${D}${bindir}/bulkhead-agent-runsc-launch
+	# ADR-0042: the Firecracker hostile-tier launcher (ExecStart of bulkhead-agent-firecracker@.service).
+	# The bulkhead-fc-vsockmux@ + bulkhead-agent-firecracker@ template units install via the *.service glob above.
+	install -Dm0755 ${OV}/usr/bin/bulkhead-agent-firecracker-launch ${D}${bindir}/bulkhead-agent-firecracker-launch
 
 	# Yocto-only: persist the collector audit log on /data (RO rootfs -> /var is volatile)
 	install -d ${D}${systemd_system_unitdir}/bulkhead-collector.service.d
@@ -187,6 +194,7 @@ FILES:${PN} = "\
     ${systemd_system_unitdir} \
     ${bindir}/bulkhead-agent-run \
     ${bindir}/bulkhead-agent-runsc-launch \
+    ${bindir}/bulkhead-agent-firecracker-launch \
     ${bindir}/bulkhead-seal-audit-key \
     ${sysconfdir}/nftables.conf \
     ${sysconfdir}/bulkhead \
