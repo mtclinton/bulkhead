@@ -40,3 +40,12 @@ jobs:
         run: go test -race -count=1 ./...
         env:
           CGO_ENABLED: '1'
+  floor-lint:
+    name: security-floor-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Static guard (no qemu/hardware) over the shipped units + kernel fragments for the load-bearing
+      # seccomp/hardening invariants the ADRs require; carries its own negative self-test.
+      - name: floor-lint
+        run: sh scripts/floor-lint.sh --selftest

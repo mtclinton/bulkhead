@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -164,6 +164,13 @@ verify-firecracker-image:
 # (boot the wic, poll it, truncate a chain -> alert) is verify-chain-monitor-live. See deploy/chain-monitor.md.
 verify-chain-monitor:
 	cd $(BULKHEAD_ROOT)/src/chain-monitor && go vet ./... && go test -count=1 ./...
+
+# Build-time security-floor lint (no qemu/hardware): static guard over the shipped units + kernel fragments
+# for load-bearing invariants the ADRs require but had no automated check — seccomp jails deny io_uring by
+# name, the kernel compiles it out (EXPERT-gated, both fragments), the mux floor is a superset of its
+# siblings, and the mediation units carry the hardening floor. Runs its own negative self-test.
+verify-floor-lint:
+	sh $(BULKHEAD_ROOT)/scripts/floor-lint.sh --selftest
 
 # LIVE arm: boot the wic under swtpm, run the monitor BINARY off-box against the booted appliance over a
 # guest-exec bridge (fresh-nonce quote -> verify -> pin the control HEAD = GREEN), then truncate the chain's
