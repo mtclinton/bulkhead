@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-fc-escape verify-fc-jailer menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -201,6 +201,12 @@ verify-fc-escape:
 # Needs real /dev/kvm + the docker group (root context).
 verify-fc-jailer:
 	sh $(BULKHEAD_ROOT)/scripts/fc-jailer-check.sh
+
+# ADR-0042 two-instance cross-isolation under the jailer, LIVE on real /dev/kvm: boots TWO jailed microVMs
+# and asserts they run as distinct non-root uids in mode-0700 per-uid chroots — so two hostile tenants cannot
+# reach each other's jail. Needs real /dev/kvm + the docker group.
+verify-fc-jailer-iso:
+	sh $(BULKHEAD_ROOT)/scripts/fc-jailer-iso-check.sh
 
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
