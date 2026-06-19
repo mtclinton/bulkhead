@@ -129,8 +129,8 @@ func (a Alert) String() string {
 type Verifier interface {
 	AKPub(envPath string) (pinHex string, err error)              // attest akpub -> TOFU pin
 	ExpectedD(collectorBin string) (dHex string, err error)        // attest expected-d <bin>
-	VerifyQuote(envPath, expectedD, nonceHex, akPinHex string) error // attest verify (5 checks); err => fail
-	VerifyChain(chainPath, auditPub, sinceHead, expectTip string) error // verify-audit --since --expect-tip
+	VerifyQuote(envPath, expectedD, nonceHex, akPinHex string) error          // attest verify (5 checks); err => fail
+	VerifyChain(chainPath, auditPub, domain, sinceHead, expectTip string) error // verify-audit --since --expect-tip
 }
 
 type collectorVerifier struct{ bin string }
@@ -158,7 +158,7 @@ func (c collectorVerifier) VerifyQuote(envPath, expectedD, nonceHex, akPinHex st
 	return err
 }
 
-func (c collectorVerifier) VerifyChain(chainPath, auditPub, sinceHead, expectTip string) error {
+func (c collectorVerifier) VerifyChain(chainPath, auditPub, domain, sinceHead, expectTip string) error {
 	args := []string{"verify-audit", chainPath}
 	if auditPub != "" {
 		args = append(args, auditPub)
@@ -169,8 +169,18 @@ func (c collectorVerifier) VerifyChain(chainPath, auditPub, sinceHead, expectTip
 	if expectTip != "" {
 		args = append(args, "--expect-tip="+expectTip)
 	}
-	_, err := c.run(args...)
-	return err
+	cmd := exec.Command(c.bin, args...)
+	// Make the chain domain EXPLICIT rather than letting verify-audit infer it from our generic temp path —
+	// the domain is bound into the signed record encoding, so a wrong guess fails every signature. chainDomain
+	// honors BULKHEAD_AUDIT_DOMAIN first.
+	if domain != "" {
+		cmd.Env = append(os.Environ(), "BULKHEAD_AUDIT_DOMAIN="+domain)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("verify-audit %s: %w: %s", chainPath, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // lastHexToken returns the last whitespace-token that looks like a hex blob (the tools print a hex result,
@@ -315,7 +325,7 @@ func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 			continue
 		}
 		prior := st.Chains[ch.Domain].PinnedHead // "" on first observation => no --since anchor yet
-		if cerr := v.VerifyChain(logPath, dev.AuditPub, prior, quoted); cerr != nil {
+		if cerr := v.VerifyChain(logPath, dev.AuditPub, ch.Domain, prior, quoted); cerr != nil {
 			// verify-audit fails closed on: bad signature/hash, a deleted interior record, the prior HEAD not
 			// being an ancestor (REWOUND/FORKED), or tip != the attested HEAD (withheld/truncated tail).
 			alerts = append(alerts, Alert{Device: dev.Name, Kind: "chain-rewind-or-fail", Domain: ch.Domain, Detail: cerr.Error()})
@@ -375,7 +385,13 @@ func runOnce(cfg *Config, v Verifier, tr Transport) int {
 			total++
 		}
 		if len(alerts) == 0 {
-			fmt.Printf("OK device=%s attested + %d chains continuous\n", dev.Name, len(dev.Chains))
+			if st.Misses > 0 {
+				// a silent poll BELOW the missed threshold is not an alert yet, but it is NOT "continuous" —
+				// say so honestly rather than printing OK on a box we could not reach.
+				fmt.Printf("WARN device=%s silent poll %d/%d (no verifiable quote this cycle)\n", dev.Name, st.Misses, cfg.MissedThreshold)
+			} else {
+				fmt.Printf("OK device=%s attested + %d chains continuous\n", dev.Name, len(dev.Chains))
+			}
 		}
 	}
 	return total

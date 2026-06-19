@@ -20,7 +20,7 @@ type fakeVerifier struct {
 func (f *fakeVerifier) AKPub(string) (string, error)            { f.akpubCalls++; return f.pin, nil }
 func (f *fakeVerifier) ExpectedD(string) (string, error)        { return "d0d0", nil }
 func (f *fakeVerifier) VerifyQuote(_, _, _, _ string) error     { return f.quoteErr }
-func (f *fakeVerifier) VerifyChain(path, pub, since, expect string) error {
+func (f *fakeVerifier) VerifyChain(path, pub, domain, since, expect string) error {
 	f.lastSince, f.lastExpect = since, expect
 	if f.chainErrFn != nil {
 		return f.chainErrFn(path, pub, since, expect)
