@@ -39,6 +39,7 @@ type Config struct {
 	StateDir        string   `json:"state_dir"`        // durable per-device pins (TOFU anchors) live here
 	CollectorBin    string   `json:"collector_bin"`    // path to the relying-party `bulkhead-collector` verifier
 	AlertCmd        string   `json:"alert_cmd"`        // optional: `sh -c` run per alert with $BH_ALERT_* in the env
+	MetricsOut      string   `json:"metrics_out"`      // optional: write a Prometheus-text exposition here each cycle (atomic)
 	Devices         []Device `json:"devices"`
 }
 
@@ -65,6 +66,21 @@ type deviceState struct {
 	Chains   map[string]chainState `json:"chains"`     // domain -> last verified-and-attested HEAD
 	LastOK   int64                 `json:"last_ok_unix"`
 	Misses   int                   `json:"misses"`
+	Metrics  *pollMetrics          `json:"-"` // transient: this cycle's derived metrics (never persisted)
+}
+
+// pollMetrics is the OBSERVABILITY surface derived from a poll — read-only, from the tamper-evident chains +
+// the attestation, NOT from any service self-report (a compromised service could lie; the signed chain can't).
+// Closes the "no operational metrics" gap without adding any attack surface to the TCB.
+type pollMetrics struct {
+	Reachable int // 1 if the device produced a quote this cycle
+	AttestOK  int // 1 if that quote verified (AK-pinned, expected-D, PCR-14)
+	Chains    map[string]chainMetric
+}
+
+type chainMetric struct {
+	Records  int // record count of the fetched chain log
+	VerifyOK int // 1 if verify-audit (--since/--expect-tip) passed this cycle
 }
 
 type chainState struct {
@@ -248,6 +264,7 @@ func (e quoteEnvelope) head(field string) string {
 // its injected verifier/transport/nonce/now — no global clock or RNG inside (that is the caller's job).
 func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transport, nonce string, now int64, workDir string) []Alert {
 	var alerts []Alert
+	st.Metrics = &pollMetrics{Chains: map[string]chainMetric{}}
 
 	// (1) fetch a fresh-nonce quote. A silent/erroring device is a candidate missed-attestation.
 	envBytes, err := tr.Fetch(dev.QuoteCmd, map[string]string{"nonce": nonce})
@@ -262,6 +279,7 @@ func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 		}
 		return alerts
 	}
+	st.Metrics.Reachable = 1
 
 	envPath := filepath.Join(workDir, "env.json")
 	if werr := os.WriteFile(envPath, envBytes, 0o600); werr != nil {
@@ -305,6 +323,7 @@ func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 	// quote verified -> the device is live + attesting. Reset the miss counter regardless of chain outcomes.
 	st.Misses = 0
 	st.LastOK = now
+	st.Metrics.AttestOK = 1
 
 	// (4) per chain: prove the shipped log is the one attested (--expect-tip) and that the prior-pinned HEAD
 	// is still a verified ancestor (--since => no rewind/fork/truncation). Then advance the pin.
@@ -324,13 +343,21 @@ func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 			alerts = append(alerts, Alert{Device: dev.Name, Kind: "fetch-failed", Domain: ch.Domain, Detail: werr.Error()})
 			continue
 		}
+		records := 0
+		for _, ln := range strings.Split(string(logBytes), "\n") {
+			if strings.TrimSpace(ln) != "" {
+				records++
+			}
+		}
 		prior := st.Chains[ch.Domain].PinnedHead // "" on first observation => no --since anchor yet
 		if cerr := v.VerifyChain(logPath, dev.AuditPub, ch.Domain, prior, quoted); cerr != nil {
 			// verify-audit fails closed on: bad signature/hash, a deleted interior record, the prior HEAD not
 			// being an ancestor (REWOUND/FORKED), or tip != the attested HEAD (withheld/truncated tail).
+			st.Metrics.Chains[ch.Domain] = chainMetric{Records: records, VerifyOK: 0}
 			alerts = append(alerts, Alert{Device: dev.Name, Kind: "chain-rewind-or-fail", Domain: ch.Domain, Detail: cerr.Error()})
 			continue // do NOT advance the pin — keep the last-good anchor
 		}
+		st.Metrics.Chains[ch.Domain] = chainMetric{Records: records, VerifyOK: 1}
 		st.Chains[ch.Domain] = chainState{PinnedHead: quoted, LastUpdate: now}
 	}
 	return alerts
@@ -370,12 +397,14 @@ func runOnce(cfg *Config, v Verifier, tr Transport) int {
 	for i := range cfg.Devices {
 		byName[cfg.Devices[i].Name] = &cfg.Devices[i]
 	}
+	collected := map[string]*deviceState{}
 	for _, name := range names {
 		dev := byName[name]
 		st := loadState(cfg.StateDir, dev.Name)
 		work, _ := os.MkdirTemp("", "bh-chain-mon-")
 		alerts := pollDevice(cfg, dev, st, v, tr, nonceHex(), time.Now().Unix(), work)
 		os.RemoveAll(work)
+		collected[name] = st
 		if err := saveState(cfg.StateDir, dev.Name, st); err != nil {
 			fmt.Fprintf(os.Stderr, "WARN device=%s state save failed: %v\n", dev.Name, err)
 		}
@@ -394,7 +423,61 @@ func runOnce(cfg *Config, v Verifier, tr Transport) int {
 			}
 		}
 	}
+	if cfg.MetricsOut != "" {
+		if err := writeMetrics(cfg.MetricsOut, collected, time.Now().Unix()); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN metrics write failed: %v\n", err)
+		}
+	}
 	return total
+}
+
+// renderMetrics emits a Prometheus-text exposition derived from this cycle's per-device state — read-only,
+// from the tamper-evident chains + the attestation, so it scrapes cleanly into a dashboard/alert pipeline
+// (e.g. a node-exporter textfile collector) over the management plane without touching the appliance.
+func renderMetrics(states map[string]*deviceState, now int64) string {
+	var b strings.Builder
+	b.WriteString("# HELP bulkhead_device_reachable Device produced an attestation quote this cycle (1) or not (0).\n# TYPE bulkhead_device_reachable gauge\n")
+	b.WriteString("# HELP bulkhead_attestation_ok The fresh-nonce quote verified (AK-pinned, expected-D, PCR-14).\n# TYPE bulkhead_attestation_ok gauge\n")
+	b.WriteString("# HELP bulkhead_device_missed_polls Consecutive polls with no verifiable quote.\n# TYPE bulkhead_device_missed_polls gauge\n")
+	b.WriteString("# HELP bulkhead_chain_records Record count of the fetched audit chain this cycle.\n# TYPE bulkhead_chain_records gauge\n")
+	b.WriteString("# HELP bulkhead_chain_verify_ok verify-audit (--since/--expect-tip) passed for the chain (1) or failed/rewound (0).\n# TYPE bulkhead_chain_verify_ok gauge\n")
+	names := make([]string, 0, len(states))
+	for n := range states {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		st := states[name]
+		reach, attest := 0, 0
+		if st.Metrics != nil {
+			reach, attest = st.Metrics.Reachable, st.Metrics.AttestOK
+		}
+		fmt.Fprintf(&b, "bulkhead_device_reachable{device=%q} %d\n", name, reach)
+		fmt.Fprintf(&b, "bulkhead_attestation_ok{device=%q} %d\n", name, attest)
+		fmt.Fprintf(&b, "bulkhead_device_missed_polls{device=%q} %d\n", name, st.Misses)
+		if st.Metrics != nil {
+			doms := make([]string, 0, len(st.Metrics.Chains))
+			for d := range st.Metrics.Chains {
+				doms = append(doms, d)
+			}
+			sort.Strings(doms)
+			for _, d := range doms {
+				cm := st.Metrics.Chains[d]
+				fmt.Fprintf(&b, "bulkhead_chain_records{device=%q,chain=%q} %d\n", name, d, cm.Records)
+				fmt.Fprintf(&b, "bulkhead_chain_verify_ok{device=%q,chain=%q} %d\n", name, d, cm.VerifyOK)
+			}
+		}
+	}
+	fmt.Fprintf(&b, "bulkhead_monitor_last_run_unixtime %d\n", now)
+	return b.String()
+}
+
+func writeMetrics(path string, states map[string]*deviceState, now int64) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(renderMetrics(states, now)), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path) // atomic: a scraper never reads a half-written exposition
 }
 
 func fireAlertCmd(cmd string, a Alert) {

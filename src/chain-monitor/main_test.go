@@ -3,6 +3,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -183,6 +184,60 @@ func TestRecoveryAfterMiss(t *testing.T) {
 	al := pollDevice(cfg(), dev, st, v, tr, "n", 700, t.TempDir())
 	if len(al) != 0 || st.Misses != 0 {
 		t.Fatalf("a good poll must clear misses + not alert: misses=%d alerts=%v", st.Misses, kinds(al))
+	}
+}
+
+func TestMetricsDerivedFromPoll(t *testing.T) {
+	// green: reachable + attested + chain verified; record count derived from the fetched log.
+	v := &fakeVerifier{pin: "ak"}
+	tr := &fakeTransport{quote: env("c", "t1", "b"), log: []byte("r1\nr2\nr3\n")}
+	st := &deviceState{AKPinHex: "ak", Chains: map[string]chainState{"control": {PinnedHead: "t0"}}}
+	pollDevice(cfg(), ctrlDevice(), st, v, tr, "n", 100, t.TempDir())
+	if st.Metrics == nil || st.Metrics.Reachable != 1 || st.Metrics.AttestOK != 1 {
+		t.Fatalf("green: reachable/attest not set: %+v", st.Metrics)
+	}
+	if cm := st.Metrics.Chains["control"]; cm.Records != 3 || cm.VerifyOK != 1 {
+		t.Fatalf("green: chain metric wrong: %+v", cm)
+	}
+
+	// rewind: chain verify fails -> VerifyOK 0; still reachable + attested.
+	v2 := &fakeVerifier{pin: "ak", chainErrFn: func(_, _, _, _ string) error { return fmt.Errorf("REWOUND") }}
+	st2 := &deviceState{AKPinHex: "ak", Chains: map[string]chainState{"control": {PinnedHead: "t0"}}}
+	pollDevice(cfg(), ctrlDevice(), st2, v2, &fakeTransport{quote: env("c", "t1", "b"), log: []byte("r1\nr2\n")}, "n", 100, t.TempDir())
+	if cm := st2.Metrics.Chains["control"]; cm.VerifyOK != 0 || cm.Records != 2 {
+		t.Fatalf("rewind chain metric: %+v", cm)
+	}
+	if st2.Metrics.AttestOK != 1 {
+		t.Fatalf("rewind should still record AttestOK=1")
+	}
+
+	// missed: no quote -> reachable 0, attest 0.
+	st3 := &deviceState{AKPinHex: "ak", Chains: map[string]chainState{}}
+	pollDevice(cfg(), ctrlDevice(), st3, &fakeVerifier{pin: "ak"}, &fakeTransport{quoteErr: fmt.Errorf("down")}, "n", 100, t.TempDir())
+	if st3.Metrics.Reachable != 0 || st3.Metrics.AttestOK != 0 {
+		t.Fatalf("missed: %+v", st3.Metrics)
+	}
+}
+
+func TestRenderMetrics(t *testing.T) {
+	states := map[string]*deviceState{
+		"box1": {Misses: 0, Metrics: &pollMetrics{Reachable: 1, AttestOK: 1, Chains: map[string]chainMetric{"control": {Records: 9, VerifyOK: 1}}}},
+		"box2": {Misses: 2, Metrics: &pollMetrics{Reachable: 0, AttestOK: 0, Chains: map[string]chainMetric{}}},
+	}
+	out := renderMetrics(states, 1234)
+	for _, want := range []string{
+		`bulkhead_device_reachable{device="box1"} 1`,
+		`bulkhead_attestation_ok{device="box1"} 1`,
+		`bulkhead_chain_records{device="box1",chain="control"} 9`,
+		`bulkhead_chain_verify_ok{device="box1",chain="control"} 1`,
+		`bulkhead_device_reachable{device="box2"} 0`,
+		`bulkhead_device_missed_polls{device="box2"} 2`,
+		`bulkhead_monitor_last_run_unixtime 1234`,
+		"# TYPE bulkhead_chain_verify_ok gauge",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderMetrics missing line: %s", want)
+		}
 	}
 }
 

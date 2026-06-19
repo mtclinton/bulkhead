@@ -129,8 +129,10 @@ try:
         "rc,_,body=d.partition(b'\\n'); sys.stdout.buffer.write(body); sys.exit(int(rc or 1))\n")
 
     state_dir = os.path.join(work, "state")
+    metricsfile = os.path.join(work, "metrics.prom")
     cfg = {
         "interval_seconds": 1, "missed_threshold": 2, "state_dir": state_dir, "collector_bin": COLLECTOR,
+        "metrics_out": metricsfile,
         "devices": [{
             "name": "qemu-box", "expected_d": D, "audit_pub": "@" + pubfile,
             "quote_cmd": f"python3 {client} 'bulkhead-collector attest quote {{nonce}}'",
@@ -153,6 +155,16 @@ try:
         pinned = json.load(open(sf)).get("chains", {}).get("control", {}).get("pinned_head_hex", "")
     check(rc1 == 0 and "OK device=qemu-box" in o1 and re.fullmatch(r"[0-9a-f]{64}", pinned or "") is not None,
           f"POLL 1 GREEN: monitor verified a fresh-nonce quote off-box + pinned the control HEAD ({pinned[:16]}…)")
+
+    # the metrics exposition reflects the REAL chain (records>0, verify+attest ok) — observability, derived
+    # read-only from the tamper-evident chain + the attestation.
+    mtx = open(metricsfile).read() if os.path.exists(metricsfile) else ""
+    out("\n[metrics.prom]\n" + mtx)
+    mrec = re.search(r'bulkhead_chain_records\{device="qemu-box",chain="control"\} (\d+)', mtx)
+    check(mrec is not None and int(mrec.group(1)) > 0
+          and 'bulkhead_chain_verify_ok{device="qemu-box",chain="control"} 1' in mtx
+          and 'bulkhead_attestation_ok{device="qemu-box"} 1' in mtx,
+          f"metrics exported: chain_records={mrec.group(1) if mrec else '?'}, verify_ok=1, attestation_ok=1 (Prometheus textfile)")
 
     # TRUNCATE the control chain's tail on the box (drop the last record): a withheld/rewound tail.
     _, trc = guest(f"sed '$d' {CTLCHAIN} > {CTLCHAIN}.t && cat {CTLCHAIN}.t > {CTLCHAIN} && rm -f {CTLCHAIN}.t; echo OK")

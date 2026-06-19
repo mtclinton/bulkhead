@@ -5,6 +5,7 @@
   "state_dir": "/var/lib/bulkhead-chain-monitor",
   "collector_bin": "/usr/local/bin/bulkhead-collector",
   "alert_cmd": "logger -t bulkhead-chain-monitor \"$BH_ALERT_KIND device=$BH_ALERT_DEVICE chain=$BH_ALERT_DOMAIN: $BH_ALERT_DETAIL\"",
+  "metrics_out": "/var/lib/bulkhead-chain-monitor/metrics.prom",
   "devices": [
     {
       "name": "appliance-01",

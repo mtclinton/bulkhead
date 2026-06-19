@@ -40,6 +40,16 @@ bulkhead-chain-monitor -config /etc/bulkhead/chain-monitor.json -once      # one
 
 See `deploy/chain-monitor.example.json` for the config shape.
 
+## Metrics / observability
+
+Set `metrics_out` to a file path and each cycle the monitor writes a Prometheus-text exposition there
+(atomic rename), derived **read-only** from the tamper-evident chains + the attestation — so it closes the
+"no operational metrics" gap without adding any attack surface to the appliance (a compromised service could
+lie about its own metrics; the signed chain cannot). Point a node-exporter textfile collector (or any
+scraper) at it. Series: `bulkhead_device_reachable` / `bulkhead_attestation_ok` /
+`bulkhead_device_missed_polls` (per device) and `bulkhead_chain_records` / `bulkhead_chain_verify_ok` (per
+device+chain), plus `bulkhead_monitor_last_run_unixtime`.
+
 ## Limitations / follow-ups
 
 - **Segmented (rotated) chains (ADR-0040):** the example `fetch_chain_cmd` ships only the live
