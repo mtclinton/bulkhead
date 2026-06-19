@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [collector, router, agent]
+        module: [collector, router, agent, chain-monitor]
     defaults:
       run:
         working-directory: src/${{ matrix.module }}

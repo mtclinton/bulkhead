@@ -1,0 +1,22 @@
+{
+  "_comment": "Off-box audit-chain monitor config (bulkhead-chain-monitor). Runs on the operator's MANAGEMENT host, NOT on the appliance. Reaches each device over the tailnet (SSH-as-uid-0 is the documented transport, threat-model.md). See deploy/chain-monitor.md.",
+  "interval_seconds": 300,
+  "missed_threshold": 2,
+  "state_dir": "/var/lib/bulkhead-chain-monitor",
+  "collector_bin": "/usr/local/bin/bulkhead-collector",
+  "alert_cmd": "logger -t bulkhead-chain-monitor \"$BH_ALERT_KIND device=$BH_ALERT_DEVICE chain=$BH_ALERT_DOMAIN: $BH_ALERT_DETAIL\"",
+  "devices": [
+    {
+      "name": "appliance-01",
+      "quote_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=10 root@appliance-01 'bulkhead-collector attest quote {nonce}'",
+      "fetch_chain_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=10 root@appliance-01 'cat {chain}'",
+      "collector_bin_for_d": "/etc/bulkhead/released/bulkhead-collector",
+      "audit_pub": "@/etc/bulkhead/appliance-01-audit-pub.txt",
+      "chains": [
+        {"domain": "collector", "remote_path": "/data/bulkhead/audit/provenance.jsonl",        "head_field": "head_collector_hex"},
+        {"domain": "control",   "remote_path": "/data/bulkhead/audit/control.jsonl",            "head_field": "head_control_hex"},
+        {"domain": "broker",    "remote_path": "/data/bulkhead/audit-broker/provenance.jsonl",  "head_field": "head_broker_hex"}
+      ]
+    }
+  ]
+}

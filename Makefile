@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -158,6 +158,12 @@ verify-firecracker-jail:
 # the mux + proxy + selftest. Inspects the rootfs dir (or the deployed tar.bz2); exits 2 without a built image.
 verify-firecracker-image:
 	sh $(BULKHEAD_ROOT)/scripts/fc-image-check.sh
+
+# Off-box audit-chain monitor (bulkhead-chain-monitor) — host-side proof of the pin/advance/rewind-detect/
+# missed-attestation state machine via injected fakes (no qemu, no /dev/kvm). The live end-to-end arm
+# (boot the wic, poll it, truncate a chain -> alert) is verify-chain-monitor-live. See deploy/chain-monitor.md.
+verify-chain-monitor:
+	cd $(BULKHEAD_ROOT)/src/chain-monitor && go vet ./... && go test -count=1 ./...
 
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
