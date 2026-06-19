@@ -46,6 +46,14 @@ func main() {
 		os.Exit(runRomountProbe())
 	}
 
+	// `bulkhead-agent probe-escape` is the HOSTILE-payload live vehicle (PRODUCTION-READINESS [6]): the agent
+	// actively ATTEMPTS to break out of its jail across every vector a malicious agent would reach for
+	// (io_uring, setuid, capset, new-userns, ptrace, module-load, raw-io, direct egress, FS write, the control
+	// socket) and reports the outcome. Exits 0 iff every attempt was CONTAINED. Test/diagnostic only.
+	if len(os.Args) >= 2 && os.Args[1] == "probe-escape" {
+		os.Exit(runEscapeProbe())
+	}
+
 	inst := "?"
 	if len(os.Args) >= 2 {
 		inst = os.Args[1]

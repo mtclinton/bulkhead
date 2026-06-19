@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -178,6 +178,13 @@ verify-floor-lint:
 # built wic + swtpm + a host Go toolchain.
 verify-chain-monitor-live:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-chain-monitor-check.py
+
+# HOSTILE-agent containment proof (PRODUCTION-READINESS [6]): boots the wic and runs the agent's
+# `probe-escape` vehicle inside the REAL confined jail — the agent actively attempts io_uring / setuid /
+# capset / new-userns / ptrace / module-load / raw-io / direct-egress / FS-write / control-socket escapes —
+# and asserts EVERY vector is contained and E0+E2 survive the assault. Needs a built wic.
+verify-hostile-agent:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-hostile-agent-check.py
 
 # Yocto: a REAL bulkhead agent runtime inside the ADR-0034 confined jail (the inc1 follow-up that
 # replaces the probe-egress vehicle with the actual tool-using loop). Boots the wic, points the
