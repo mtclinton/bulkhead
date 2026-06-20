@@ -199,6 +199,7 @@ FILES:${PN} = "\
     ${bindir}/bulkhead-agent-run \
     ${bindir}/bulkhead-agent-runsc-launch \
     ${bindir}/bulkhead-agent-firecracker-launch \
+    ${bindir}/bulkhead-agent-tier-launch \
     ${bindir}/bulkhead-seal-audit-key \
     ${sysconfdir}/nftables.conf \
     ${sysconfdir}/bulkhead \
