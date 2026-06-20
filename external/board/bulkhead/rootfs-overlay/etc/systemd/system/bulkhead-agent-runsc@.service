@@ -4,7 +4,7 @@
 # under runsc/gVisor — the Sentry interposes a reimplemented application kernel, collapsing the host
 # syscall surface and making io_uring unavailable (ENOSYS) for free. The agent's only ways out are the
 # host egress-proxy + router UDS legs, reached across the Sentry via host-uds passthrough; the task is
-# delivered as a 0400 credential (injection-safe). Instantiate as bulkhead-agent-runsc@<inst> with
+# delivered as a credential (injection-safe). Instantiate as bulkhead-agent-runsc@<inst> with
 # BULKHEAD_AGENT_TASK set (env or a drop-in). Not [Install]-enabled: started on demand.
 [Unit]
 Description=bulkhead agent under the gVisor substrate (%i)
@@ -16,6 +16,17 @@ Requires=bulkhead-egress-proxy.service
 # A bulkhead agent is a bounded perceive->decide->act run, not a daemon: runsc run blocks until the
 # agent exits and propagates its exit code, so oneshot fits and `systemctl start` reflects the result.
 Type=oneshot
+# Per-instance resource bounds (PRODUCTION-READINESS [81]). runsc runs rootless with --ignore-cgroups, so
+# the SYSTEMD unit cgroup is the resource boundary: under gVisor the in-sandbox agent's memory and threads
+# are backed by the Sentry+gofer HOST processes, which live in THIS unit's cgroup-v2 slice — so these caps
+# bound a runaway/hostile substrate agent (memory bomb, fork bomb, CPU spin) to its OWN per-instance slice
+# and the host survives (the kernel OOM-kills within the slice; the host PID 1 + other tiers keep running).
+# Tunable per deployment via a drop-in. Proven live by verify-runsc-limits (probe-memhog is OOM-contained).
+MemoryMax=512M
+MemoryHigh=448M
+MemorySwapMax=0
+TasksMax=512
+CPUQuota=200%
 ExecStart=/usr/bin/bulkhead-agent-runsc-launch %i
 # Reap the container + the transient bundle when the run ends (best-effort; the launcher also
 # pre-reaps a stale id on the next start).

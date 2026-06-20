@@ -202,6 +202,33 @@ func romountOutcome(err error) string {
 	}
 }
 
+// runMemhogProbe is the resource-limit live vehicle (PRODUCTION-READINESS [81]). It allocates and TOUCHES
+// memory in 16 MiB chunks up to BULKHEAD_PROBE_MEMHOG_MB (default 4096), holding every chunk live. A
+// per-instance cgroup MemoryMax must OOM-kill it long before the target — containing a runaway/hostile
+// substrate agent to its OWN slice while the host survives. Under gVisor the guest pages are backed by the
+// Sentry on the host, so the unit's host cgroup limit is what bites (the Sentry is killed, the sandbox torn
+// down, `runsc run` exits non-zero, the oneshot unit goes failed). If it EVER reaches the target unkilled it
+// prints MEMHOG-UNBOUNDED and exits 0 — which the harness treats as a FAILURE (no effective cap). Test only.
+func runMemhogProbe() int {
+	targetMB := envInt("BULKHEAD_PROBE_MEMHOG_MB", 4096)
+	const chunkMB = 16
+	fmt.Printf("MEMHOG-START: allocating up to %dMB in %dMB chunks\n", targetMB, chunkMB)
+	blocks := make([][]byte, 0, targetMB/chunkMB+1)
+	for touched := 0; touched < targetMB; touched += chunkMB {
+		b := make([]byte, chunkMB<<20)
+		for i := 0; i < len(b); i += 4096 { // dirty every page so the host actually backs it
+			b[i] = 0xff
+		}
+		blocks = append(blocks, b)
+		if (touched+chunkMB)%128 == 0 {
+			fmt.Printf("MEMHOG: touched %dMB\n", touched+chunkMB)
+		}
+	}
+	// len(blocks) keeps every chunk reachable to here, so the GC cannot reclaim them mid-loop.
+	fmt.Printf("MEMHOG-UNBOUNDED: reached %dMB (%d chunks) without being killed (no effective memory cap)\n", targetMB, len(blocks))
+	return 0
+}
+
 func exitCode(ok bool) int {
 	if ok {
 		return 0

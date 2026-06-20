@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-runsc-kvm-nonroot verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-runsc-kvm-nonroot verify-runsc-limits verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -271,6 +271,13 @@ verify-runsc-run:
 # bundle reaped on stop. Needs a built wic (re-pin bulkhead-units).
 verify-runsc-unit:
 	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-unit-check.py
+
+# Yocto: ADR-0031 PER-INSTANCE RESOURCE LIMITS ([81]). The bulkhead-agent-runsc@ template carries
+# MemoryMax/MemoryHigh/MemorySwapMax/TasksMax/CPUQuota; this asserts they are configured AND that they BITE —
+# `bulkhead-agent-runsc@probe-memhog` runs the agent's memory bomb under the real unit cgroup and the
+# per-instance MemoryMax OOM-kills it within its own slice while the host + sibling tiers survive. Built wic.
+verify-runsc-limits:
+	python3 $(BULKHEAD_ROOT)/scripts/qemu-runsc-limits-check.py
 
 # Yocto: capstone — the two flagship defenses compose. An ADR-0036 CaMeL-quarantine agent run UNDER
 # the ADR-0031 gVisor substrate: a prompt injection in fetched content is inert (control-flow

@@ -54,6 +54,15 @@ func main() {
 		os.Exit(runEscapeProbe())
 	}
 
+	// `bulkhead-agent probe-memhog` is the resource-limit live vehicle (PRODUCTION-READINESS [81]): it
+	// allocates+touches memory up to a target so a per-instance cgroup MemoryMax must OOM-kill it before
+	// it gets there — proving a runaway/hostile agent is contained to its own slice, not the host. Because
+	// this dispatches on os.Args[1] before the instance path, `bulkhead-agent-runsc@probe-memhog` runs it
+	// under the REAL launcher + unit cgroup with no test hook. Test/diagnostic only.
+	if len(os.Args) >= 2 && os.Args[1] == "probe-memhog" {
+		os.Exit(runMemhogProbe())
+	}
+
 	inst := "?"
 	if len(os.Args) >= 2 {
 		inst = os.Args[1]
