@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-runsc-kvm-nonroot verify-runsc-limits verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-runsc-kvm-nonroot verify-runsc-limits verify-tier-policy verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -171,6 +171,13 @@ verify-chain-monitor:
 # siblings, and the mediation units carry the hardening floor. Runs its own negative self-test.
 verify-floor-lint:
 	sh $(BULKHEAD_ROOT)/scripts/floor-lint.sh --selftest
+
+# ADR-0031 tier-SELECTION policy ([81], no qemu/hardware): proves the workload-class -> isolation-tier
+# resolver (bulkhead-agent-tier-launch) is FAIL-CLOSED — an unknown/unvetted class never lands in the
+# weakest (confined) tier, `default` is sanitized up to at least runsc, firecracker degrades to runsc
+# without KVM, and an explicit class->confined opt-in is honored. Exercises the shipped + crafted policies.
+verify-tier-policy:
+	sh $(BULKHEAD_ROOT)/scripts/tier-policy-check.sh
 
 # LIVE arm: boot the wic under swtpm, run the monitor BINARY off-box against the booted appliance over a
 # guest-exec bridge (fresh-nonce quote -> verify -> pin the control HEAD = GREEN), then truncate the chain's

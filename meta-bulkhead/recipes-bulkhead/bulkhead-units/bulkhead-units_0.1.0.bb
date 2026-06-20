@@ -110,6 +110,8 @@ do_install() {
 	# ADR-0042: the Firecracker hostile-tier launcher (ExecStart of bulkhead-agent-firecracker@.service).
 	# The bulkhead-fc-vsockmux@ + bulkhead-agent-firecracker@ template units install via the *.service glob above.
 	install -Dm0755 ${OV}/usr/bin/bulkhead-agent-firecracker-launch ${D}${bindir}/bulkhead-agent-firecracker-launch
+	# ADR-0031 [81]: the workload-class -> isolation-tier resolver/dispatcher + its fail-closed policy.
+	install -Dm0755 ${OV}/usr/bin/bulkhead-agent-tier-launch ${D}${bindir}/bulkhead-agent-tier-launch
 
 	# Yocto-only: persist the collector audit log on /data (RO rootfs -> /var is volatile)
 	install -d ${D}${systemd_system_unitdir}/bulkhead-collector.service.d
@@ -185,6 +187,8 @@ do_install() {
 
 	# ADR-0034: the egress-proxy allowlist (governs the bulkhead-agent-confined@ class only)
 	install -Dm0644 ${OV}/etc/bulkhead/egress-allow.conf ${D}${sysconfdir}/bulkhead/egress-allow.conf
+	# ADR-0031 [81]: the workload-class -> isolation-tier selection policy (fail-closed default)
+	install -Dm0644 ${OV}/etc/bulkhead/tier-policy.conf ${D}${sysconfdir}/bulkhead/tier-policy.conf
 
 	# model mount point (filled from the persistent data partition at boot)
 	install -d ${D}${localstatedir}/lib/bulkhead/models

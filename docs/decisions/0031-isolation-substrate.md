@@ -151,6 +151,19 @@ So the default-tier substrate is **integrated and operator-deployable**: a real 
 
 **Post-ship security review (2026-06-16) — R3 + a clarified containment fact.** The mediated UDS legs are now bind-mounted **read-only** (least-privilege; `connect()` is unaffected). A live `rw` counterfactual in `make verify-runsc-run` then reclassified the original "rw → cross-tier socket-unlink DoS" finding: the write is refused **even with the leg `rw`**, because in `--rootless` the sandbox's uid 0 maps via the user namespace to **host-nobody** for files owned by uids outside the mapping — so it cannot write the egress-proxy's own `RuntimeDirectory` (`/run/bulkhead-egress`, mode `0755`) regardless of the mount flag. This pins down the "(currently uid 0, gVisor-contained)" parenthetical above: the userns DAC is the load-bearing control, and the `ro` mount is defense-in-depth that becomes load-bearing only for a non-rootless / root-gofer tier. gVisor surfaces such refusals as `EACCES`/`EPERM`, not Linux's `EROFS`. Record: `docs/security-reviews/2026-06-shipped-isolation-review.md`.
 
+## Tier-selection policy — fail-closed class→tier routing (2026-06-20)
+
+The three jails — `bulkhead-agent-confined@` (shared-kernel netns + seccomp), `bulkhead-agent-runsc@` (gVisor Sentry), `bulkhead-agent-firecracker@` (KVM microVM) — are an isolation ladder, weakest→strongest: **confined < runsc < firecracker**. *Which* jail a given workload gets is now an explicit, mechanized policy rather than an operator picking a unit by hand (PRODUCTION-READINESS [81], closing the *Migration* "selection policy" item).
+
+`/usr/bin/bulkhead-agent-tier-launch` resolves a workload **class** to a **tier** via `/etc/bulkhead/tier-policy.conf` (`class = tier`), then `systemctl start bulkhead-agent-<tier>@<inst>`. The resolver is **fail-closed**, and these are enforced in code, not just convention:
+
+- an **unmapped or invalidly-mapped** class gets the policy `default`;
+- the `default` is **sanitized to never be weaker than `runsc`** — so an unknown/unvetted workload can never fall through to the weakest shared-kernel tier, *even if the policy file says `default = confined`*;
+- `firecracker` **degrades to `runsc`** when `/dev/kvm` is absent (the strongest AVAILABLE tier, never below runsc) — so the policy is portable to a non-KVM target without silently weakening to confined;
+- an **explicit** `class = confined` mapping IS honored — an operator's deliberate opt-in for a vetted, low-risk class (the only way confined is ever selected).
+
+The shipped policy: `default = runsc` (strong, universal — gVisor needs no KVM), `hostile = firecracker`, `untrusted = runsc`, `internal = confined`. Proven by `make verify-tier-policy` (`scripts/tier-policy-check.sh`, **20/20**, host-side/no-qemu so it runs in CI): the full resolution matrix including every fail-closed invariant above, plus a dry-run dispatch that maps each class to the correct `bulkhead-agent-<tier>@<inst>` unit. The remaining selection nuance — *automatically* classifying a workload's trust level (vs an operator/orchestrator passing the class) — is a policy-input concern above this boundary (ADR-0035/0037), not the routing mechanism.
+
 ## Evidence (source reports)
 
 - [#1] Syscall-interception sandbox architectures: reimplement vs forward vs filter (~350→68 collapse; bounded gap).
