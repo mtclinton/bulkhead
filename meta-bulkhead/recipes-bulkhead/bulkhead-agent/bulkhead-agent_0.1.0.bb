@@ -5,10 +5,10 @@ LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
 SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;destsuffix=git"
-# Pinned to 0c6c8fc (ADR-0033): the confined probe-egress now also asserts io_uring_setup is
-# seccomp-denied from inside the jail (the IOURING check), on top of the ADR-0034 inc1 mediated
-# egress client (src/agent/egress.go — router UDS + CONNECT-tunnel through the egress proxy).
-SRCREV = "ace07e6c1c96d4e1db0eb0489a382d397b13fef4"
+# Pinned to 9f6226d ([81]): probe-egress gained a CRED self-test (the non-root in-sandbox agent reads
+# its task credential) and a probe-memhog resource-limit vehicle (allocates+touches memory so the
+# per-instance cgroup MemoryMax OOM-kills it), on top of the ADR-0034 inc1 mediated egress client.
+SRCREV = "9f6226d4626ddcb09688c9676e99ea3631c3950a"
 S = "${WORKDIR}/git"
 
 DEPENDS = "go-native"
