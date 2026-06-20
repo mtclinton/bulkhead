@@ -73,8 +73,8 @@ try:
     # Host survives the contained OOM: a sibling tier and PID 1 are still up.
     check("active" in run("systemctl is-active bulkhead-egress-proxy.service 2>&1"),
           "a SIBLING tier (egress proxy) survived the contained OOM — the kill was scoped to the agent's slice")
-    check("HOSTUP=yes" in run("echo HOSTUP=$(systemctl is-system-running --wait 2>/dev/null >/dev/null; [ -d /proc/1 ] && echo yes || echo no)"),
-          "host PID 1 alive after the contained OOM (the bomb did not take down the host)")
+    check("HOSTUP=yes" in run("echo HOSTUP=$([ -d /proc/1 ] && systemctl is-active bulkhead-router.service >/dev/null 2>&1 && echo yes || echo no)"),
+          "host PID 1 + router tier alive after the contained OOM (the bomb did not take down the host)")
 
     run("systemctl reset-failed bulkhead-agent-runsc@probe-memhog.service 2>/dev/null; true")
     run("runsc --rootless --ignore-cgroups delete -force probe-memhog 2>/dev/null; true")
