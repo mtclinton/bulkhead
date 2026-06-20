@@ -29,6 +29,12 @@ def login(c):
     if i == 0: c.sendline(""); c.expect(r"@qemux86-64:~#", timeout=30)
     c.sendline(f"export PS1='{PS}'"); c.expect(PS, timeout=30); c.expect(PS, timeout=30)
 # The secure minimal-rootfs OCI config (one line; only the agent + UDS legs are bind-mounted in).
+# uid 0 in-sandbox is DELIBERATE here (not production fidelity): the R3 romount sub-test below is an
+# ADVERSARIAL worst-case — in-sandbox root removes the rootless-userns DAC so the read-only MOUNT alone must
+# be what refuses the socket-unlink DoS (and the rw counterfactual's write must be ALLOWED to attribute the
+# refusal to the mount, which non-root dir-DAC would mask). "Production runtime form" = the `runsc run`-over-OCI
+# MECHANISM (vs `runsc do`). The production launcher runs the agent NON-ROOT (uid 65534) — proven by
+# verify-runsc-kvm-nonroot (real KVM, 15/15) + verify-runsc-unit (deployed unit, full loop).
 CONFIG = ('{"ociVersion":"1.0.0","process":{"user":{"uid":0,"gid":0},'
     '"args":["/usr/bin/bulkhead-agent","runscjob"],'
     '"env":["PATH=/usr/bin:/bin","BULKHEAD_ROUTER_UDS=/run/bulkhead-router/router.sock",'
