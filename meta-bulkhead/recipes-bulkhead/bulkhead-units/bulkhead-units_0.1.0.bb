@@ -31,7 +31,7 @@ SRC_URI = "git://github.com/mtclinton/bulkhead.git;protocol=https;branch=main;de
 # router now lists AF_UNIX in RestrictAddressFamilies so it can create its UDS instead of crash-looping
 # (without it the confined agent's model leg never existed). The bulkhead-egress-proxy-data.conf drop-in
 # (files/) persists the proxy's signed chain on /data + the sealed seed; verify-audit gates the egress chain.
-SRCREV = "9f6226d4626ddcb09688c9676e99ea3631c3950a"
+SRCREV = "9d28460f187ba56ccfc946313f7cf008424abe22"
 S = "${WORKDIR}/git"
 
 inherit systemd allarch
