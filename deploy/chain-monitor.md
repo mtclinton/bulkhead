@@ -16,14 +16,27 @@ tailnet (SSH-as-uid-0 is the documented transport).
 2. Verifies it with the **same** verifier the appliance ships — `bulkhead-collector attest verify`
    (AK-pinned, expected-D, PCR 14). No crypto is re-implemented in the monitor, so there is zero drift.
 3. Reads the three chain HEADs the quote cryptographically binds (ADR-0025).
-4. For each chain, runs `bulkhead-collector verify-audit <log> --since=<prior-pinned-HEAD>
-   --expect-tip=<quoted-HEAD>` (ADR-0026). This proves the shipped log **is** the attested one
-   (`--expect-tip`) and that the prior-pinned HEAD is still a verified ancestor (`--since` ⇒ no
-   rewind / fork / truncated tail), then advances the pin.
+4. For each chain — **every poll, whether or not the quote verified** (PRODUCTION-READINESS [73]) — runs
+   `bulkhead-collector verify-audit <log> --since=<prior-pinned-HEAD> [--expect-tip=<quoted-HEAD>]`
+   (ADR-0026). The `--since` no-rewind check proves the prior-pinned HEAD is still a verified ancestor (no
+   rewind / fork / tail-truncation); `--expect-tip` is added **only when a fresh quote bound the HEAD**, tying
+   the verified log to the attestation. On success the pin is advanced to the verify-audit-**authenticated**
+   tip (its `tip=` line). Because the chain is witnessed independent of attestation, a box that **stops
+   attesting** but serves a withheld/truncated tail is still caught within one interval.
 5. **Alerts** on: a missed attestation (silent ≥ `missed_threshold` polls), a quote-verify failure,
    or a chain rewind / verify-fail / tip-mismatch. A rewound chain does **not** advance the pin (the
    last-good anchor is kept). Alerts go to stdout and, if `alert_cmd` is set, to that command with
    `$BH_ALERT_{DEVICE,KIND,DOMAIN,DETAIL}` in the environment.
+
+> **OPERATING ASSUMPTION — set the poll interval below the device's segment-prune cadence.** The witness's
+> soundness rests on the prior-pinned HEAD always still being in the ADR-0040 retained window at the next
+> poll (the monitor re-pins to the current tip each cycle). If a device is **unreachable** long enough for
+> rotation to prune the anchor across the gap, the recovered chain yields a `REWOUND` verdict that is on-box
+> **indistinguishable** from a real tail-truncation — so the monitor **fails closed** (alarms + keeps the
+> last-good anchor) and the `chain-rewind-or-fail` detail names the dual cause (truncation **or** a benign
+> rotation gap; correlate with the device's reachability/missed-attestation). After confirming the gap was
+> benign, **clear the device's state file** to re-anchor. Size `interval_seconds` so a healthy device is
+> polled several times per `BULKHEAD_AUDIT_SEGMENT_BYTES`-worth of writes.
 
 The per-device AK pin and per-chain HEADs are **trust-on-first-use** and persisted under `state_dir`
 (atomic writes). **Cross-check the TOFU AK pin out-of-band** on first enrollment — a device already
@@ -47,8 +60,9 @@ Set `metrics_out` to a file path and each cycle the monitor writes a Prometheus-
 "no operational metrics" gap without adding any attack surface to the appliance (a compromised service could
 lie about its own metrics; the signed chain cannot). Point a node-exporter textfile collector (or any
 scraper) at it. Series: `bulkhead_device_reachable` / `bulkhead_attestation_ok` /
-`bulkhead_device_missed_polls` (per device) and `bulkhead_chain_records` / `bulkhead_chain_verify_ok` (per
-device+chain), plus `bulkhead_monitor_last_run_unixtime`.
+`bulkhead_device_missed_polls` (per device) and `bulkhead_chain_records` / `bulkhead_chain_witnessed`
+(the HEAD was ingested + verify-audit run this cycle, independent of attestation) / `bulkhead_chain_verify_ok`
+(per device+chain), plus `bulkhead_monitor_last_run_unixtime`.
 
 ## Limitations / follow-ups
 

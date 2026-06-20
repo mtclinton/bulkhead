@@ -142,8 +142,14 @@ try:
     }
     cfgfile = os.path.join(work, "cfg.json"); open(cfgfile, "w").write(json.dumps(cfg))
 
-    def monitor_once():
-        p = subprocess.run([MONITOR, "-config", cfgfile, "-once"], capture_output=True, text=True)
+    # a SECOND config whose quote command FAILS (the attestation responder is "down") but whose chain fetch
+    # still works — to prove the [73] HEAD witness catches a truncation WITHOUT a fresh quote.
+    cfg2 = json.loads(json.dumps(cfg))
+    cfg2["devices"][0]["quote_cmd"] = f"python3 {client} 'false'"  # 'false' fails (rc1) WITHOUT exiting the guest shell
+    cfg2file = os.path.join(work, "cfg-noquote.json"); open(cfg2file, "w").write(json.dumps(cfg2))
+
+    def monitor_once(conf=cfgfile):
+        p = subprocess.run([MONITOR, "-config", conf, "-once"], capture_output=True, text=True)
         out("\n[monitor]\n" + p.stdout + p.stderr + f"\n[exit {p.returncode}]\n")
         return p.returncode, p.stdout + p.stderr
 
@@ -180,6 +186,29 @@ try:
     # the rewound chain must NOT advance the pin (keep the last-good anchor).
     pinned2 = json.load(open(sf)).get("chains", {}).get("control", {}).get("pinned_head_hex", "") if os.path.exists(sf) else ""
     check(pinned2 == pinned, "monitor kept the last-good HEAD anchor (did not advance the pin on a rewind)")
+
+    # POLL 3 ([73] core) — the attestation responder is DOWN (quote_cmd fails) but the chain is still served +
+    # still truncated. The monitor's independent HEAD witness (verify-audit --since=<pinned>, no --expect-tip)
+    # must STILL detect the truncation and fire chain-rewind-or-fail — a box that stopped attesting can't hide
+    # a withheld tail from the off-box witness.
+    rc3, o3 = monitor_once(cfg2file)
+    check(rc3 != 0 and "chain-rewind-or-fail" in o3 and "control" in o3,
+          "POLL 3 ALERT (no fresh quote): the independent HEAD witness detected the truncation via --since alone — attestation-down does not blind the witness")
+
+    # [73] requirement — a MIDDLE-subchain/record deletion (not just the tail) fails verify-audit on-box: the
+    # prev_hash linkage breaks. Prove both directions on a copy with the domain pinned (so it's the linkage, not
+    # a domain-mismatch artifact): the unmodified copy verifies OK, the middle-deleted copy fails closed.
+    guest(f"cp {CTLCHAIN} /tmp/mid.jsonl")
+    okc, _ = guest("BULKHEAD_AUDIT_DOMAIN=control bulkhead-collector verify-audit /tmp/mid.jsonl @"
+                   "/data/bulkhead/audit/audit-pub.txt >/dev/null 2>&1; echo RC=$?")
+    nmid, _ = guest("wc -l < /tmp/mid.jsonl"); nmid = int((nmid.strip() or "0"))
+    # delete an INTERIOR record (line 2 when >=3 records; else the genesis line) and re-verify.
+    delln = "2" if nmid >= 3 else "1"
+    guest(f"sed '{delln}d' /tmp/mid.jsonl > /tmp/mid.t && mv /tmp/mid.t /tmp/mid.jsonl")
+    badc, _ = guest("BULKHEAD_AUDIT_DOMAIN=control bulkhead-collector verify-audit /tmp/mid.jsonl @"
+                    "/data/bulkhead/audit/audit-pub.txt >/dev/null 2>&1; echo RC=$?")
+    check("RC=0" in okc and "RC=0" not in badc,
+          f"middle deletion fails verify-audit on-box (clean copy {okc.strip()}, deleted-line-{delln} copy {badc.strip()} — prev_hash linkage break)")
 
     out("\n=== off-box chain monitor LIVE: %d passed, %d failed ===\n" %
         (sum(1 for v in results.values() if v), sum(1 for v in results.values() if not v)))

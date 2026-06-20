@@ -6,15 +6,26 @@
 // tamper-EVIDENT on-box, but on-box you cannot detect whole-file erasure or a rewound tail — that needs an
 // external party that pinned the prior HEAD. This is that party.
 //
-// Per interval, per device it: (1) pulls a FRESH-NONCE attestation quote, (2) verifies it with the SAME
-// `bulkhead-collector attest verify` the appliance ships (AK-pinned, expected-D — no crypto re-implemented
-// here, so zero drift), (3) reads the three HEADs the quote cryptographically binds (ADR-0025), and (4) runs
-// `bulkhead-collector verify-audit <log> --since=<prior-pinned-HEAD> --expect-tip=<quoted-HEAD>` (ADR-0026)
-// to prove the shipped log is the attested one AND that the prior-pinned HEAD is still a verified ancestor
-// (no rewind/fork/truncation). It durably pins each chain's HEAD (trust-on-first-use, like the AK pin) and
-// ALERTS on: a missed attestation (device silent N intervals), a quote-verify failure, or a chain
-// rewind/verify-fail/tip-mismatch. The verifier + transport are interfaces so the pin/advance/rewind/missed
-// state machine is deterministically unit-tested; the shipped impls shell out to bulkhead-collector and ssh.
+// Per interval, per device it runs TWO independent halves. ATTESTATION: (1) pulls a FRESH-NONCE quote, (2)
+// verifies it with the SAME `bulkhead-collector attest verify` the appliance ships (AK-pinned, expected-D — no
+// crypto re-implemented here, so zero drift), reading the three HEADs the quote cryptographically binds
+// (ADR-0025). HEAD WITNESS (PRODUCTION-READINESS [73]): EVERY poll, regardless of attestation, it runs
+// `bulkhead-collector verify-audit <log> --since=<prior-pinned-HEAD> [--expect-tip=<quoted-HEAD>]` (ADR-0026)
+// over each chain — proving the prior-pinned HEAD is still a verified ancestor (no rewind/tail-truncation) and,
+// when a fresh quote bound the HEAD, that the log IS the attested one. It then advances the pin to the
+// verify-audit-AUTHENTICATED tip (its `tip=` line), so the --since anchor stays inside the ADR-0040 retained
+// window (rotation can't prune it before the next check) and a genuine tail-truncation surfaces as REWOUND
+// within one interval — even on a box that has STOPPED attesting. OPERATING ASSUMPTION (soundness depends on
+// it): the poll interval MUST be shorter than the device's segment-prune cadence (BULKHEAD_AUDIT_SEGMENT_BYTES
+// × keep ÷ write-rate), so a pinned HEAD is never pruned between polls. The only time the witness loses its
+// anchor is when the device was UNREACHABLE long enough for rotation to prune it across the gap — on-box
+// indistinguishable from a truncation, so the monitor FAILS CLOSED (alarms + keeps the last-good anchor) and
+// names the dual cause; an operator clears the device state to re-anchor after confirming the gap was benign.
+// It durably pins each chain's HEAD
+// (trust-on-first-use, like the AK pin) and ALERTS on: a missed attestation (device silent N intervals), a
+// quote-verify failure, or a chain rewind/verify-fail/tip-mismatch. The verifier + transport are interfaces so
+// the pin/advance/rewind/missed state machine is deterministically unit-tested; the shipped impls shell out to
+// bulkhead-collector and ssh.
 package main
 
 import (
@@ -44,13 +55,13 @@ type Config struct {
 }
 
 type Device struct {
-	Name          string  `json:"name"`
-	QuoteCmd      string  `json:"quote_cmd"`        // fetch a quote envelope (JSON) to stdout; {nonce} is substituted
-	FetchChainCmd string  `json:"fetch_chain_cmd"`  // fetch a chain log to stdout; {chain} = the chain's remote path
-	ExpectedD     string  `json:"expected_d"`       // expected TCB digest hex; OR set CollectorBinForD to derive it
-	CollectorBinForD string `json:"collector_bin_for_d"` // released collector binary -> `attest expected-d` computes D
-	AuditPub      string  `json:"audit_pub"`        // audit pubkey hex or @file for verify-audit (else sibling audit-pub.txt)
-	Chains        []Chain `json:"chains"`
+	Name             string  `json:"name"`
+	QuoteCmd         string  `json:"quote_cmd"`           // fetch a quote envelope (JSON) to stdout; {nonce} is substituted
+	FetchChainCmd    string  `json:"fetch_chain_cmd"`     // fetch a chain log to stdout; {chain} = the chain's remote path
+	ExpectedD        string  `json:"expected_d"`          // expected TCB digest hex; OR set CollectorBinForD to derive it
+	CollectorBinForD string  `json:"collector_bin_for_d"` // released collector binary -> `attest expected-d` computes D
+	AuditPub         string  `json:"audit_pub"`           // audit pubkey hex or @file for verify-audit (else sibling audit-pub.txt)
+	Chains           []Chain `json:"chains"`
 }
 
 type Chain struct {
@@ -79,8 +90,9 @@ type pollMetrics struct {
 }
 
 type chainMetric struct {
-	Records  int // record count of the fetched chain log
-	VerifyOK int // 1 if verify-audit (--since/--expect-tip) passed this cycle
+	Records   int // record count of the fetched chain log
+	Witnessed int // 1 if the HEAD was ingested + verify-audit run this cycle (independent of attestation, [73])
+	VerifyOK  int // 1 if verify-audit (--since/--expect-tip) passed this cycle
 }
 
 type chainState struct {
@@ -126,10 +138,10 @@ func saveState(dir, dev string, st *deviceState) error {
 // ---- alerts -------------------------------------------------------------------------------------------
 
 type Alert struct {
-	Device   string
-	Kind     string // missed-attestation | quote-verify-failed | chain-rewind-or-fail | fetch-failed
-	Domain   string // chain domain, when applicable
-	Detail   string
+	Device string
+	Kind   string // missed-attestation | quote-verify-failed | chain-rewind-or-fail | fetch-failed
+	Domain string // chain domain, when applicable
+	Detail string
 }
 
 func (a Alert) String() string {
@@ -143,10 +155,10 @@ func (a Alert) String() string {
 // ---- verifier (the crypto engine; real impl shells out to bulkhead-collector) -------------------------
 
 type Verifier interface {
-	AKPub(envPath string) (pinHex string, err error)              // attest akpub -> TOFU pin
-	ExpectedD(collectorBin string) (dHex string, err error)        // attest expected-d <bin>
-	VerifyQuote(envPath, expectedD, nonceHex, akPinHex string) error          // attest verify (5 checks); err => fail
-	VerifyChain(chainPath, auditPub, domain, sinceHead, expectTip string) error // verify-audit --since --expect-tip
+	AKPub(envPath string) (pinHex string, err error)                                                 // attest akpub -> TOFU pin
+	ExpectedD(collectorBin string) (dHex string, err error)                                          // attest expected-d <bin>
+	VerifyQuote(envPath, expectedD, nonceHex, akPinHex string) error                                 // attest verify (5 checks); err => fail
+	VerifyChain(chainPath, auditPub, domain, sinceHead, expectTip string) (tipHex string, err error) // verify-audit --since --expect-tip; returns the authenticated tip
 }
 
 type collectorVerifier struct{ bin string }
@@ -174,7 +186,7 @@ func (c collectorVerifier) VerifyQuote(envPath, expectedD, nonceHex, akPinHex st
 	return err
 }
 
-func (c collectorVerifier) VerifyChain(chainPath, auditPub, domain, sinceHead, expectTip string) error {
+func (c collectorVerifier) VerifyChain(chainPath, auditPub, domain, sinceHead, expectTip string) (string, error) {
 	args := []string{"verify-audit", chainPath}
 	if auditPub != "" {
 		args = append(args, auditPub)
@@ -194,9 +206,30 @@ func (c collectorVerifier) VerifyChain(chainPath, auditPub, domain, sinceHead, e
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("verify-audit %s: %w: %s", chainPath, err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("verify-audit %s: %w: %s", chainPath, err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	// verify-audit prints "... tip=<64hex>" on its OK line. The tip is the hash of the LAST record the tool
+	// just verified (sig/hash/seq/prev), so the off-box witness pins it as an AUTHENTICATED HEAD without
+	// re-implementing any chain crypto ([73]). A pass with no parseable tip is itself a (format) failure.
+	tip := tipFromVerifyOutput(string(out))
+	if tip == "" {
+		return "", fmt.Errorf("verify-audit %s: passed but emitted no tip= HEAD: %s", chainPath, strings.TrimSpace(string(out)))
+	}
+	return tip, nil
+}
+
+// tipFromVerifyOutput extracts the authenticated tip HEAD from a successful verify-audit run, whose OK line is
+// `verify-audit: OK — N record(s) verified ... tip=<64hex>` (collector verify.go). Returns "" if absent/malformed.
+func tipFromVerifyOutput(s string) string {
+	for _, f := range strings.Fields(s) {
+		if v := strings.TrimPrefix(f, "tip="); v != f {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if len(v) == 64 && isHex(v) {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // lastHexToken returns the last whitespace-token that looks like a hex blob (the tools print a hex result,
@@ -261,11 +294,23 @@ func (e quoteEnvelope) head(field string) string {
 }
 
 // pollDevice runs one poll cycle for one device. It mutates st and returns any alerts. Deterministic given
-// its injected verifier/transport/nonce/now — no global clock or RNG inside (that is the caller's job).
+// its injected verifier/transport/nonce/now — no global clock or RNG inside (that is the caller's job). It is
+// TWO independent halves: the attestation poll (the quote), and the off-box HEAD witness over the chains. The
+// witness runs EVERY poll regardless of attestation, so a box that stops attesting but still serves a
+// TRUNCATED chain is still caught within one interval (PRODUCTION-READINESS [73]).
 func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transport, nonce string, now int64, workDir string) []Alert {
-	var alerts []Alert
 	st.Metrics = &pollMetrics{Chains: map[string]chainMetric{}}
+	quoteOK, reachable, env, alerts := attestPoll(cfg, dev, st, v, tr, nonce, now, workDir)
+	alerts = append(alerts, witnessChains(dev, st, v, tr, now, workDir, quoteOK, reachable, env)...)
+	return alerts
+}
 
+// attestPoll is the attestation half of a poll: fetch + TOFU-AK + verify a fresh-nonce quote. It mutates
+// st.Misses/LastOK/AKPinHex/Metrics and returns whether the quote verified (=> env carries the attested
+// HEADs, the strongest --expect-tip binding), whether the box answered at all (reachable), the parsed env,
+// and any attestation alerts. It deliberately does NOT short-circuit the caller's chain witness — a failed or
+// absent attestation must still let the HEAD witness run ([73]).
+func attestPoll(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transport, nonce string, now int64, workDir string) (quoteOK, reachable bool, env quoteEnvelope, alerts []Alert) {
 	// (1) fetch a fresh-nonce quote. A silent/erroring device is a candidate missed-attestation.
 	envBytes, err := tr.Fetch(dev.QuoteCmd, map[string]string{"nonce": nonce})
 	if err != nil || len(envBytes) == 0 {
@@ -277,14 +322,14 @@ func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 			}
 			alerts = append(alerts, Alert{Device: dev.Name, Kind: "missed-attestation", Detail: detail})
 		}
-		return alerts
+		return false, false, env, alerts
 	}
 	st.Metrics.Reachable = 1
 
 	envPath := filepath.Join(workDir, "env.json")
 	if werr := os.WriteFile(envPath, envBytes, 0o600); werr != nil {
 		alerts = append(alerts, Alert{Device: dev.Name, Kind: "fetch-failed", Detail: "cannot stage envelope: " + werr.Error()})
-		return alerts
+		return false, true, env, alerts
 	}
 
 	// (2) trust-on-first-use: capture the AK pin out of the first envelope. (Operator must cross-check this
@@ -294,7 +339,7 @@ func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 		if perr != nil || pin == "" {
 			st.Misses++
 			alerts = append(alerts, Alert{Device: dev.Name, Kind: "quote-verify-failed", Detail: "AK pin capture failed: " + errStr(perr)})
-			return alerts
+			return false, true, env, alerts
 		}
 		st.AKPinHex = pin
 		fmt.Printf("NOTICE device=%s TOFU AK pin captured: %s (cross-check out-of-band)\n", dev.Name, short(pin))
@@ -308,34 +353,41 @@ func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 			expectedD = d
 		} else {
 			alerts = append(alerts, Alert{Device: dev.Name, Kind: "quote-verify-failed", Detail: "expected-D derivation failed: " + derr.Error()})
-			return alerts
+			return false, true, env, alerts
 		}
 	}
 	if qerr := v.VerifyQuote(envPath, expectedD, nonce, st.AKPinHex); qerr != nil {
 		st.Misses++ // a box that can't produce a verifiable quote is as bad as a silent one
 		alerts = append(alerts, Alert{Device: dev.Name, Kind: "quote-verify-failed", Detail: qerr.Error()})
-		return alerts
+		return false, true, env, alerts
 	}
 
-	var env quoteEnvelope
 	_ = json.Unmarshal(envBytes, &env)
-
 	// quote verified -> the device is live + attesting. Reset the miss counter regardless of chain outcomes.
 	st.Misses = 0
 	st.LastOK = now
 	st.Metrics.AttestOK = 1
+	return true, true, env, alerts
+}
 
-	// (4) per chain: prove the shipped log is the one attested (--expect-tip) and that the prior-pinned HEAD
-	// is still a verified ancestor (--since => no rewind/fork/truncation). Then advance the pin.
+// witnessChains is the OFF-BOX HEAD WITNESS (PRODUCTION-READINESS [73]). It runs EVERY poll, independent of
+// attestation: for each chain it fetches the log and runs verify-audit with --since=<prior-pinned HEAD> (the
+// no-rewind anchor) and, when a fresh quote verified this cycle, --expect-tip=<attested HEAD> (the strongest
+// binding). It advances the pin to the verify-audit-AUTHENTICATED tip on success, so the --since anchor stays
+// within the retained window and ADR-0040 rotation can never prune it out from under us (operators size the
+// poll interval below the segment-prune cadence). A genuine TAIL-TRUNCATION makes the last-pinned HEAD vanish
+// from the chain => verify-audit returns REWOUND within one interval; a clean chain advances the pin. The pin
+// only ratchets FORWARD (advance only on a full PASS), so a rewind keeps the last-good anchor for the next poll.
+func witnessChains(dev *Device, st *deviceState, v Verifier, tr Transport, now int64, workDir string, quoteOK, reachable bool, env quoteEnvelope) []Alert {
+	var alerts []Alert
 	for _, ch := range dev.Chains {
-		quoted := env.head(ch.HeadField)
-		if quoted == "" {
-			alerts = append(alerts, Alert{Device: dev.Name, Kind: "chain-rewind-or-fail", Domain: ch.Domain, Detail: "quote bound no HEAD for field " + ch.HeadField})
-			continue
-		}
 		logBytes, ferr := tr.Fetch(dev.FetchChainCmd, map[string]string{"chain": ch.RemotePath})
 		if ferr != nil {
-			alerts = append(alerts, Alert{Device: dev.Name, Kind: "fetch-failed", Domain: ch.Domain, Detail: ferr.Error()})
+			// Flag a chain-fetch failure only when the box otherwise answered (reachable): a fully silent box
+			// is already covered by missed-attestation, so do not double-alarm every chain every poll.
+			if reachable {
+				alerts = append(alerts, Alert{Device: dev.Name, Kind: "fetch-failed", Domain: ch.Domain, Detail: ferr.Error()})
+			}
 			continue
 		}
 		logPath := filepath.Join(workDir, "chain-"+sanitize(ch.Domain)+".jsonl")
@@ -349,16 +401,38 @@ func pollDevice(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 				records++
 			}
 		}
+		// The strongest binding (the cryptographically-attested HEAD) is used ONLY when a fresh quote verified
+		// this cycle; otherwise the chain is witnessed via --since alone (which still catches a tail-truncation
+		// of any previously-observed HEAD — the [73] gap a quote-gated check left open). A verified quote that
+		// binds no HEAD for this chain (env.head == "") is NOT an error — it just means no --expect-tip this
+		// cycle, so we witness via --since exactly as on an unattested poll.
+		expectTip := ""
+		if quoteOK {
+			expectTip = env.head(ch.HeadField)
+		}
 		prior := st.Chains[ch.Domain].PinnedHead // "" on first observation => no --since anchor yet
-		if cerr := v.VerifyChain(logPath, dev.AuditPub, ch.Domain, prior, quoted); cerr != nil {
-			// verify-audit fails closed on: bad signature/hash, a deleted interior record, the prior HEAD not
-			// being an ancestor (REWOUND/FORKED), or tip != the attested HEAD (withheld/truncated tail).
-			st.Metrics.Chains[ch.Domain] = chainMetric{Records: records, VerifyOK: 0}
-			alerts = append(alerts, Alert{Device: dev.Name, Kind: "chain-rewind-or-fail", Domain: ch.Domain, Detail: cerr.Error()})
+		tip, cerr := v.VerifyChain(logPath, dev.AuditPub, ch.Domain, prior, expectTip)
+		if cerr != nil {
+			// verify-audit fails closed on: bad signature/hash, a deleted interior record, tip != the attested
+			// HEAD, or the prior-pinned HEAD not being a verified ancestor (REWOUND). Under the operating
+			// assumption (poll interval < the ADR-0040 segment-prune cadence) the prior pin is ALWAYS still in
+			// the retained window, so a REWOUND verdict is a genuine tail-truncation of a previously-witnessed
+			// HEAD. The one benign way to reach it is if the device was UNREACHABLE long enough for rotation to
+			// prune the anchor (the witness could not advance the pin across the gap) — indistinguishable on-box
+			// from a truncation, so we FAIL CLOSED (alarm + keep the last-good anchor) and label the dual cause
+			// for the operator. Witnessed=1 (we DID ingest the HEAD this cycle), VerifyOK=0.
+			st.Metrics.Chains[ch.Domain] = chainMetric{Records: records, Witnessed: 1, VerifyOK: 0}
+			detail := cerr.Error()
+			if prior != "" {
+				detail += " — the prior-pinned HEAD is gone: a tail-truncation/rewind, OR (only if the device was unreachable past the ADR-0040 prune cadence) a benign rotation that pruned the anchor; correlate with this device's reachability/missed-attestation. After confirming the device is healthy, clear its monitor state file to re-anchor."
+			}
+			alerts = append(alerts, Alert{Device: dev.Name, Kind: "chain-rewind-or-fail", Domain: ch.Domain, Detail: detail})
 			continue // do NOT advance the pin — keep the last-good anchor
 		}
-		st.Metrics.Chains[ch.Domain] = chainMetric{Records: records, VerifyOK: 1}
-		st.Chains[ch.Domain] = chainState{PinnedHead: quoted, LastUpdate: now}
+		st.Metrics.Chains[ch.Domain] = chainMetric{Records: records, Witnessed: 1, VerifyOK: 1}
+		// Advance the pin to the verify-audit-authenticated tip (works with OR without a quote), so next poll's
+		// --since anchor is recent and rotation can't prune it before we re-check.
+		st.Chains[ch.Domain] = chainState{PinnedHead: tip, LastUpdate: now}
 	}
 	return alerts
 }
@@ -440,6 +514,7 @@ func renderMetrics(states map[string]*deviceState, now int64) string {
 	b.WriteString("# HELP bulkhead_attestation_ok The fresh-nonce quote verified (AK-pinned, expected-D, PCR-14).\n# TYPE bulkhead_attestation_ok gauge\n")
 	b.WriteString("# HELP bulkhead_device_missed_polls Consecutive polls with no verifiable quote.\n# TYPE bulkhead_device_missed_polls gauge\n")
 	b.WriteString("# HELP bulkhead_chain_records Record count of the fetched audit chain this cycle.\n# TYPE bulkhead_chain_records gauge\n")
+	b.WriteString("# HELP bulkhead_chain_witnessed The chain HEAD was ingested + verify-audit run this cycle (1), independent of attestation.\n# TYPE bulkhead_chain_witnessed gauge\n")
 	b.WriteString("# HELP bulkhead_chain_verify_ok verify-audit (--since/--expect-tip) passed for the chain (1) or failed/rewound (0).\n# TYPE bulkhead_chain_verify_ok gauge\n")
 	names := make([]string, 0, len(states))
 	for n := range states {
@@ -464,6 +539,7 @@ func renderMetrics(states map[string]*deviceState, now int64) string {
 			for _, d := range doms {
 				cm := st.Metrics.Chains[d]
 				fmt.Fprintf(&b, "bulkhead_chain_records{device=%q,chain=%q} %d\n", name, d, cm.Records)
+				fmt.Fprintf(&b, "bulkhead_chain_witnessed{device=%q,chain=%q} %d\n", name, d, cm.Witnessed)
 				fmt.Fprintf(&b, "bulkhead_chain_verify_ok{device=%q,chain=%q} %d\n", name, d, cm.VerifyOK)
 			}
 		}
