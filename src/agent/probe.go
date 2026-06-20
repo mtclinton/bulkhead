@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -89,6 +90,26 @@ func runEgressProbe() int {
 	default:
 		c2.Close()
 		report("PROXY-DENY", false, fmt.Sprintf("%s was ALLOWED through the proxy (allowlist bypass!)", denied))
+	}
+
+	// 4b. CRED — a broker-delegated agent receives its task as a systemd credential (ADR-0015):
+	//     $CREDENTIALS_DIRECTORY/$BULKHEAD_AGENT_TASK_CRED, bound read-only into the substrate
+	//     sandbox. The runsc tier runs the agent as a NON-ROOT in-sandbox uid ([81] hardening), so
+	//     this confirms the unprivileged agent can still READ its task — a functional regression
+	//     guard for tightening the in-sandbox uid (skipped when no credential is configured).
+	if cred := os.Getenv("BULKHEAD_AGENT_TASK_CRED"); cred != "" {
+		if dir := os.Getenv("CREDENTIALS_DIRECTORY"); dir != "" {
+			path := filepath.Join(dir, cred)
+			b, err := os.ReadFile(path)
+			switch {
+			case err != nil:
+				report("CRED", false, fmt.Sprintf("task credential %s unreadable (%v)", path, err))
+			case len(strings.TrimSpace(string(b))) == 0:
+				report("CRED", false, fmt.Sprintf("task credential %s is empty", path))
+			default:
+				report("CRED", true, fmt.Sprintf("task credential %s readable by the in-sandbox uid (%d bytes)", path, len(b)))
+			}
+		}
 	}
 
 	// 5. IOURING — io_uring_setup must be denied (ADR-0033). systemd's @system-service allows

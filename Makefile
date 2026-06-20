@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-runsc-kvm-nonroot verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -194,6 +194,13 @@ verify-runsc-kvm-escape:
 	sh $(BULKHEAD_ROOT)/scripts/runsc-kvm-escape-check.sh
 verify-fc-escape:
 	sh $(BULKHEAD_ROOT)/scripts/fc-escape-check.sh
+
+# runsc DEFAULT-tier NON-ROOT in-sandbox hardening on REAL /dev/kvm (PRODUCTION-READINESS [81]). Proves the
+# production launcher's non-root OCI user is BOTH safe (in-sandbox setuid/capset now CONTAINED, not SANDBOX-PRIV)
+# AND functional (the non-root agent still reaches its mode-0666 mediated leg and READS its 0444 task credential
+# through the o+x creds dir). --platform=kvm, production-minimal bundle. Needs real /dev/kvm + runsc.
+verify-runsc-kvm-nonroot:
+	sh $(BULKHEAD_ROOT)/scripts/runsc-kvm-nonroot-check.sh
 
 # ADR-0042 JAILER confinement of the VMM, LIVE on real /dev/kvm: runs the firecracker jailer (per-instance
 # non-root uid + chroot + cgroup) wrapping firecracker inside a privileged container (root context + real

@@ -14,8 +14,15 @@
 #     host-nobody for the proxy-owned mode-0755 leg dir, so it cannot write it regardless of the mount
 #     flag); ro makes that hold even for a non-rootless / root-gofer tier where the userns remap would
 #     not apply (security-review R3 — live-ATTRIBUTED to the userns layer in verify-runsc-run);
-#   - the task rides a 0400 credential (file CONTENT, never JSON/unit syntax — injection-safe,
-#     reusing ADR-0015's credential channel).
+#   - the agent runs as a NON-ROOT in-sandbox uid (65534): the Sentry already denies HOST escape, but a
+#     non-root guest uid ALSO denies in-sandbox setuid/capset (PRODUCTION-READINESS [81]) — so a compromised
+#     agent gains no in-guest privilege either. Live-proven on real KVM by verify-runsc-kvm-nonroot;
+#   - the task rides a credential (file CONTENT, never JSON/unit syntax — injection-safe, reusing ADR-0015's
+#     channel). It is mode 0444 in an o+x-only (0711) dir so the NON-ROOT guest uid can TRAVERSE+READ it across
+#     the rootless gofer (whose host uid != the guest uid, so the o-bits are required — the same o+x-dir/o+r-file
+#     rule a non-root DynamicUser needs to read a root-provisioned file). The dir is non-listable, and the task
+#     is not a secret (ADR-0015's concern is injection, not confidentiality; the appliance has no untrusted
+#     local users; the mediated legs are likewise mode 0666 for this distinct-uid agent).
 set -eu
 inst="${1:?usage: bulkhead-agent-runsc-launch <instance>}"
 # Defense-in-depth: the instance id is interpolated into the JSON OCI config AND into the bundle
@@ -36,11 +43,12 @@ mkdir -p "${rootfs}/usr/bin" "${rootfs}/run/bulkhead-egress" "${rootfs}/run/bulk
          "${rootfs}/run/creds" "${rootfs}/proc" "${rootfs}/dev" "${rootfs}/sys" "${creds}"
 : > "${rootfs}/usr/bin/bulkhead-agent"            # bind-mount point for the (host) agent binary
 printf '%s' "${task}" > "${creds}/agent-task"     # injection-safe: the task is file CONTENT
-chmod 0400 "${creds}/agent-task"
+chmod 0444 "${creds}/agent-task"                  # o+r: readable by the NON-ROOT in-sandbox uid via the gofer
+chmod 0711 "${creds}"                             # o+x so the guest uid traverses; not listable (host-isolated)
 
 # The OCI config. $inst and $creds are the only expansions (both are non-attacker-controlled paths/ids).
 cat > "${bundle}/config.json" <<EOF
-{"ociVersion":"1.0.0","process":{"user":{"uid":0,"gid":0},"args":["/usr/bin/bulkhead-agent","${inst}"],"env":["PATH=/usr/bin:/bin","BULKHEAD_ROUTER_UDS=/run/bulkhead-router/router.sock","BULKHEAD_EGRESS_SOCK=/run/bulkhead-egress/egress.sock","BULKHEAD_AGENT_TASK_CRED=agent-task","CREDENTIALS_DIRECTORY=/run/creds","BULKHEAD_AGENT_DEADLINE=90"],"cwd":"/","capabilities":{"bounding":[],"effective":[],"inheritable":[],"permitted":[]},"rlimits":[{"type":"RLIMIT_NOFILE","hard":1024,"soft":1024}],"noNewPrivileges":true},"root":{"path":"rootfs","readonly":true},"hostname":"runsc","mounts":[{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","noexec","nodev"]},{"destination":"/sys","type":"sysfs","source":"sysfs","options":["nosuid","noexec","nodev","ro"]},{"destination":"/usr/bin/bulkhead-agent","type":"bind","source":"/usr/bin/bulkhead-agent","options":["bind","ro"]},{"destination":"/run/bulkhead-egress","type":"bind","source":"/run/bulkhead-egress","options":["bind","ro"]},{"destination":"/run/bulkhead-router","type":"bind","source":"/run/bulkhead-router","options":["bind","ro"]},{"destination":"/run/creds","type":"bind","source":"${creds}","options":["bind","ro"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"network"},{"type":"ipc"},{"type":"uts"},{"type":"mount"}]}}
+{"ociVersion":"1.0.0","process":{"user":{"uid":65534,"gid":65534},"args":["/usr/bin/bulkhead-agent","${inst}"],"env":["PATH=/usr/bin:/bin","BULKHEAD_ROUTER_UDS=/run/bulkhead-router/router.sock","BULKHEAD_EGRESS_SOCK=/run/bulkhead-egress/egress.sock","BULKHEAD_AGENT_TASK_CRED=agent-task","CREDENTIALS_DIRECTORY=/run/creds","BULKHEAD_AGENT_DEADLINE=90"],"cwd":"/","capabilities":{"bounding":[],"effective":[],"inheritable":[],"permitted":[]},"rlimits":[{"type":"RLIMIT_NOFILE","hard":1024,"soft":1024}],"noNewPrivileges":true},"root":{"path":"rootfs","readonly":true},"hostname":"runsc","mounts":[{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","noexec","nodev"]},{"destination":"/sys","type":"sysfs","source":"sysfs","options":["nosuid","noexec","nodev","ro"]},{"destination":"/usr/bin/bulkhead-agent","type":"bind","source":"/usr/bin/bulkhead-agent","options":["bind","ro"]},{"destination":"/run/bulkhead-egress","type":"bind","source":"/run/bulkhead-egress","options":["bind","ro"]},{"destination":"/run/bulkhead-router","type":"bind","source":"/run/bulkhead-router","options":["bind","ro"]},{"destination":"/run/creds","type":"bind","source":"${creds}","options":["bind","ro"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"network"},{"type":"ipc"},{"type":"uts"},{"type":"mount"}]}}
 EOF
 
 exec /usr/bin/runsc --host-uds=open --rootless --ignore-cgroups --platform=systrap --network=none \
