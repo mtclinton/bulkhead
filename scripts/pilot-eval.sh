@@ -38,6 +38,37 @@ field() { printf '%s\n%s\n' "$CORE" "$KVM" | awk -F'|' -v t="$1" -v n="$2" '$1==
 leg_of()   { field "$1" 2; }
 prove_of() { field "$1" 3; }
 
+# --- assurance renderer: roll the technical arms up into plain-language SECURITY ASSURANCES (PASS/PARTIAL/
+# FAIL/n-a per assurance, derived from the arms in its leg(s)). Reads the structured $RESULTS (no re-parsing).
+acount() { printf '%s\n' "$RESULTS" | grep -cF "$1  [$2]"; }  # <PASS|FAIL> <leg> -> matching arm count
+assess() {
+	claim="$1"; shift
+	p=0; f=0
+	for lg in "$@"; do p=$((p + $(acount PASS "$lg"))); f=$((f + $(acount FAIL "$lg"))); done
+	if   [ $((p + f)) -eq 0 ]; then st="  n/a  "
+	elif [ "$f" -eq 0 ];       then st=" PASS  "
+	elif [ "$p" -eq 0 ];       then st=" FAIL  "
+	else                            st="PARTIAL"; fi
+	printf '  [%s] %s\n' "$st" "$claim"
+}
+
+# --selftest: exercise the renderer rollup against a fixture (no qemu/hardware — runs in CI).
+if [ "${1:-}" = "--selftest" ]; then
+	RESULTS='
+  PASS  [BOOT] verify-hbd
+  FAIL  [SUBMIT+ISOLATE] verify-runsc-unit
+  PASS  [ISOLATE(+KVM)] verify-runsc-kvm-nonroot
+  PASS  [MEDIATE+SIGN] verify-confined-agent'
+	out="$(assess 'boot' BOOT; assess 'iso' 'SUBMIT+ISOLATE' 'ISOLATE(+KVM)'; assess 'med' 'MEDIATE+SIGN'; assess 'inj' 'INJECTION-SAFE')"
+	rc=0
+	printf '%s\n' "$out" | grep -q '\[ PASS  \] boot' || { echo "selftest FAIL: boot want PASS (all arms pass)"; rc=1; }
+	printf '%s\n' "$out" | grep -q '\[PARTIAL\] iso'  || { echo "selftest FAIL: iso want PARTIAL (1 fail + 1 pass across legs)"; rc=1; }
+	printf '%s\n' "$out" | grep -q '\[ PASS  \] med'  || { echo "selftest FAIL: med want PASS"; rc=1; }
+	printf '%s\n' "$out" | grep -q '\[  n/a  \] inj'  || { echo "selftest FAIL: inj want n/a (no arm in that leg ran)"; rc=1; }
+	[ "$rc" = 0 ] && echo "pilot-eval --selftest: OK" || echo "pilot-eval --selftest: FAILED"
+	exit "$rc"
+fi
+
 LISTONLY=0
 if [ "${1:-}" = "--list" ]; then LISTONLY=1; shift; fi
 if [ "$#" -gt 0 ]; then
@@ -88,22 +119,6 @@ for t in $TARGETS; do
   FAIL  [$leg] $t"
 	fi
 done
-
-# --- the pilot-facing verdict renderer: roll the technical arms up into plain-language SECURITY ASSURANCES an
-# evaluator (not a cryptographer) can act on. Each assurance's status is derived from the arms in its leg(s):
-# all-pass => PASS, any-fail => PARTIAL/FAIL, none-run => n/a. No stdout re-parsing — it reads the same
-# structured RESULTS the per-arm table is built from.
-acount() { printf '%s\n' "$RESULTS" | grep -cF "$1  [$2]"; }  # <PASS|FAIL> <leg> -> matching arm count
-assess() {
-	claim="$1"; shift
-	p=0; f=0
-	for lg in "$@"; do p=$((p + $(acount PASS "$lg"))); f=$((f + $(acount FAIL "$lg"))); done
-	if   [ $((p + f)) -eq 0 ]; then st="  n/a  "
-	elif [ "$f" -eq 0 ];       then st=" PASS  "
-	elif [ "$p" -eq 0 ];       then st=" FAIL  "
-	else                            st="PARTIAL"; fi
-	printf '  [%s] %s\n' "$st" "$claim"
-}
 
 echo
 echo "============================================================"

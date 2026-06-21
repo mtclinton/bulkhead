@@ -49,3 +49,16 @@ jobs:
       # seccomp/hardening invariants the ADRs require; carries its own negative self-test.
       - name: floor-lint
         run: sh scripts/floor-lint.sh --selftest
+  host-checks:
+    name: host-side-proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The no-qemu host-side proofs (the qemu verify-* arms can't run on a hosted runner, but these can):
+      # the fail-closed tier-selection resolver matrix, and the pilot-eval assurance renderer's rollup logic.
+      - name: tier-selection policy (fail-closed matrix)
+        run: sh scripts/tier-policy-check.sh
+      - name: pilot-eval renderer selftest
+        run: sh scripts/pilot-eval.sh --selftest
+      - name: pilot-eval plan parses (smoke)
+        run: sh scripts/pilot-eval.sh --list
