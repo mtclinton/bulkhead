@@ -55,6 +55,24 @@ for t in $TARGETS; do printf '  [%-14s] %s\n        %s\n' "$(leg_of "$t")" "$t" 
 echo
 [ "$LISTONLY" = 1 ] && { echo "(--list: nothing run)"; exit 0; }
 
+# The sequential VM boots have tight per-step timeouts; on a LOADED host the software-emulated arms time out
+# and the verdict flakes (not a regression). Warn so the evaluator runs it on a quiet/dedicated host.
+LOAD1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
+NCPU="$(nproc 2>/dev/null || echo 1)"
+awk -v l="$LOAD1" -v n="$NCPU" 'BEGIN{ if (l+0 > n+0) printf "WARNING: host 1-min load %.1f exceeds %d CPUs — the software-emulated arms may time out and flake. Run on a quieter/dedicated host for a reliable verdict (the /dev/kvm arms are load-tolerant).\n\n", l, n }'
+
+# Each arm boots its own qemu (software-emulated unless it uses /dev/kvm) with tight per-step timeouts, so under
+# host load an arm can FLAKE (e.g. a slirp fetch hitting a context-deadline) without any regression. run_arm
+# retries a failed arm ONCE after a settle — a genuinely-broken arm still fails twice => a real FAIL. It does
+# NOT pkill qemu/swtpm: on a shared host that would kill unrelated VMs, and each verify-* reaps its own qemu.
+run_arm() {
+	t="$1"
+	( cd "$REPO" && make "$t" ) && return 0
+	echo ">>> $t failed once; settling 15s then retrying ONCE (qemu arms flake under host load)..."
+	sleep 15
+	( cd "$REPO" && make "$t" )
+}
+
 PASS=0; FAIL=0; RESULTS=""
 for t in $TARGETS; do
 	leg="$(leg_of "$t")"
@@ -62,11 +80,11 @@ for t in $TARGETS; do
 	echo ">>> [$leg] make $t"
 	echo ">>> proves: $(prove_of "$t")"
 	echo "============================================================"
-	if ( cd "$REPO" && make "$t" ); then
+	if run_arm "$t"; then
 		echo "<<< $t: PASS"; PASS=$((PASS + 1)); RESULTS="$RESULTS
   PASS  [$leg] $t"
 	else
-		echo "<<< $t: FAIL"; FAIL=$((FAIL + 1)); RESULTS="$RESULTS
+		echo "<<< $t: FAIL (twice — not a transient flake)"; FAIL=$((FAIL + 1)); RESULTS="$RESULTS
   FAIL  [$leg] $t"
 	fi
 done

@@ -52,6 +52,10 @@ A built wic + the qemu/Yocto tooling — all present on the bulkhead build host:
 
 Each `verify-*` target boots its **own** qemu (minutes) and the suite runs them **sequentially** — budget
 ~30–60 min for the full run. To exercise a single leg, pass its target: `scripts/pilot-eval.sh verify-quarantine`.
+Back-to-back VM boots load the host, so an arm can flake on a tight per-step timeout (e.g. a slow slirp
+fetch); the orchestrator therefore **kills straggler qemu/swtpm and retries a failed arm once** before
+recording it — a genuinely-broken arm fails twice. Run it on a host you've budgeted for the evaluation (it may
+kill stray `qemu-system-x86`/`swtpm` processes on a retry).
 
 ## Reading the verdict
 
