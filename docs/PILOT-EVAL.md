@@ -57,6 +57,16 @@ fetch); the orchestrator therefore **kills straggler qemu/swtpm and retries a fa
 recording it — a genuinely-broken arm fails twice. Run it on a host you've budgeted for the evaluation (it may
 kill stray `qemu-system-x86`/`swtpm` processes on a retry).
 
+## Troubleshooting
+
+- **`BOOT` fails with "audit-chain verification (boot gate) FAILED" / collector inactive.** The wic's
+  persistent `/data` audit chain is tampered or invalid — the appliance is *correctly* fail-closing (good
+  security behavior, not a tool bug). It happens when a prior **destructive** test (one that truncates/edits
+  `/data`) booted the wic read-write, or when stale timestamped wics linger in the deploy dir and runqemu
+  boots an old one. Fix: keep only the current wic (`rm` older `…rootfs-*.wic`, keep the `…rootfs.wic`
+  symlink's target) or rebuild it (`bitbake -C image_wic bulkhead-image`), then re-run. The bundled
+  destructive test (`verify-chain-monitor-live`) boots copy-on-write so it can't corrupt the wic.
+
 ## Reading the verdict
 
 The run ends with a per-leg `PASS`/`FAIL` table and a single line: **`PILOT GO`** (every check on this host
