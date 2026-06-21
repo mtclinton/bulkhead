@@ -43,7 +43,11 @@ run_lock = threading.Lock()
 stop = threading.Event()
 
 try:
-    child = pexpect.spawn("/bin/bash", ["-c", f"exec bash {RUN}"], timeout=300, encoding="utf-8", codec_errors="replace")
+    # `snapshot`: boot the wic copy-on-write so this test's DESTRUCTIVE /data edits (truncating + splitting the
+    # control chain to exercise tail-truncation / segmented-fetch detection) are discarded on poweroff and never
+    # tamper the persistent wic — otherwise the appliance's audit-chain boot gate correctly fail-closes on every
+    # SUBSEQUENT boot, bricking the image for other verify-* runs. The test is single-boot, so CoW is safe.
+    child = pexpect.spawn("/bin/bash", ["-c", f"exec bash {RUN} snapshot"], timeout=300, encoding="utf-8", codec_errors="replace")
     child.logfile_read = sys.stdout
     child.expect("login:", timeout=360); child.sendline("root")
     i = child.expect(["Password:", r"@qemux86-64:~#"], timeout=60)
