@@ -151,6 +151,27 @@ guarantee end to end — the fail-closed floor, the egress boundary, cold-boot
 attestation, sub-agent delegation, the quarantine, the gVisor substrate, the A/B
 update and rollback. Nothing is called done until its target is green.
 
+## Evaluate it (software pilot — no hardware required)
+
+To assess the isolation, egress mediation, and signed-audit guarantees **without commissioning a
+target**, build the Yocto wic (above) and run the one-command software pilot:
+
+```sh
+make pilot-eval          # boot the wic + run the live proofs in critical-path order -> one GO/NO-GO
+make pilot-eval-list     # show the plan without booting anything
+```
+
+It boots the appliance under qemu + a software TPM and proves the path end to end — **hardened boot →
+submit + isolate a real agent workload → mediated + signed egress → injection safety → off-box
+verifiability** — then prints a plain-language **assurance summary** and a GO/NO-GO. It is honest about
+its limits: EK-rooted attestation and PCR-7 measured-boot sealing need a real TPM2 and are marked
+`[HW-deferred]`. Walkthrough: **[docs/PILOT-EVAL.md](docs/PILOT-EVAL.md)**.
+
+- **Watch it from off the box** (the continuous tamper-evident witness): stand up the off-box
+  audit-chain monitor — **[deploy/chain-monitor.md](deploy/chain-monitor.md)**.
+- **Take it to real hardware** (TPM-sealed boot, Secure Boot, real-NIC default-deny, A/B install):
+  **[docs/COMMISSIONING.md](docs/COMMISSIONING.md)**.
+
 ## Source, secrets, and license
 
 bulkhead is **[AGPL-3.0-only](LICENSE)**. Because it serves requests over a
