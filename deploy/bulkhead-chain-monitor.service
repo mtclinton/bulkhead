@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Managed deployment of the OFF-BOX audit-chain monitor (bulkhead-chain-monitor). This unit installs on the
+# operator's MANAGEMENT host, NOT on the appliance — it loops every interval_seconds polling each device over
+# the configured transport (ssh-over-tailnet, threat-model.md). It is the continuous, always-on form of the
+# witness that closes the off-box-anchor gap. See deploy/chain-monitor.md.
+#
+# Install (management host):
+#   install -Dm0755 bulkhead-chain-monitor /usr/local/bin/bulkhead-chain-monitor
+#   install -Dm0755 bulkhead-collector     /usr/local/bin/bulkhead-collector      # the verifier (same release)
+#   install -Dm0640 chain-monitor.json     /etc/bulkhead/chain-monitor.json       # from chain-monitor.example.json
+#   install -Dm0644 bulkhead-chain-monitor.service /etc/systemd/system/bulkhead-chain-monitor.service
+#   # wire the transport credential the config's quote_cmd/fetch_chain_cmd use (an ssh key the service user can
+#   # read, or a forwarded agent), then:
+#   systemctl daemon-reload && systemctl enable --now bulkhead-chain-monitor.service
+#
+# The state_dir (TOFU AK + HEAD pins) is provided by StateDirectory= below; point the config's "state_dir" at
+# it (/var/lib/bulkhead-chain-monitor) so the anchors survive restarts. The monitor never mutates the appliance
+# (read-only ssh: a quote + cat/ls of the chain), so this host is the only place its trust state lives.
+
+[Unit]
+Description=bulkhead off-box audit-chain monitor (continuous HEAD witness)
+Documentation=https://github.com/mtclinton/bulkhead
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Daemon mode: loops internally every interval_seconds. (For a cron/timer instead, run `-config … -once`
+# from a .timer — it exits non-zero on any alert, so it doubles as a check gate.)
+ExecStart=/usr/local/bin/bulkhead-chain-monitor -config /etc/bulkhead/chain-monitor.json
+Restart=on-failure
+RestartSec=15
+
+# Least privilege on the management host: the monitor only READS the config + verifier + chain bytes and WRITES
+# its pins/metrics under StateDirectory. It shells out to the transport (ssh) + bulkhead-collector, so it needs
+# the network + exec, but nothing else. Run it as a dedicated unprivileged user (set User=, or DynamicUser=yes
+# if the transport credential is delivered via a systemd Credential rather than a user-owned ssh key).
+User=bulkhead-monitor
+StateDirectory=bulkhead-chain-monitor
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# The config + verifier live under /etc/bulkhead and /usr/local/bin (ProtectSystem=strict makes them ro);
+# the transport key (e.g. ~/.ssh) must be readable by User= — wire it per your secret-management.
+
+[Install]
+WantedBy=multi-user.target

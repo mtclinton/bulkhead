@@ -51,7 +51,11 @@ bulkhead-chain-monitor -config /etc/bulkhead/chain-monitor.json            # dae
 bulkhead-chain-monitor -config /etc/bulkhead/chain-monitor.json -once      # one sweep; exit 1 if any alert (cron/check gate)
 ```
 
-See `deploy/chain-monitor.example.json` for the config shape.
+**Managed deployment:** run it as an always-on systemd service on the management host with the hardened unit
+template `deploy/bulkhead-chain-monitor.service` (daemon mode; `StateDirectory=` holds the TOFU pins, least-
+privilege sandbox, restart-on-failure). The unit's header has the install steps. For a cron/check-gate style
+instead, point a `.timer` at the `-once` form (it exits non-zero on any alert). See
+`deploy/chain-monitor.example.json` for the config shape.
 
 ## Metrics / observability
 
