@@ -89,12 +89,35 @@ for t in $TARGETS; do
 	fi
 done
 
+# --- the pilot-facing verdict renderer: roll the technical arms up into plain-language SECURITY ASSURANCES an
+# evaluator (not a cryptographer) can act on. Each assurance's status is derived from the arms in its leg(s):
+# all-pass => PASS, any-fail => PARTIAL/FAIL, none-run => n/a. No stdout re-parsing — it reads the same
+# structured RESULTS the per-arm table is built from.
+acount() { printf '%s\n' "$RESULTS" | grep -cF "$1  [$2]"; }  # <PASS|FAIL> <leg> -> matching arm count
+assess() {
+	claim="$1"; shift
+	p=0; f=0
+	for lg in "$@"; do p=$((p + $(acount PASS "$lg"))); f=$((f + $(acount FAIL "$lg"))); done
+	if   [ $((p + f)) -eq 0 ]; then st="  n/a  "
+	elif [ "$f" -eq 0 ];       then st=" PASS  "
+	elif [ "$p" -eq 0 ];       then st=" FAIL  "
+	else                            st="PARTIAL"; fi
+	printf '  [%s] %s\n' "$st" "$claim"
+}
+
 echo
 echo "============================================================"
 echo "=== PILOT EVALUATION VERDICT ==="
+echo "  --- evidence (per check) ---"
 printf '%s\n' "$RESULTS"
 echo
-echo "  proven legs: BOOT · SUBMIT+ISOLATE · MEDIATE+SIGN · INJECTION-SAFE · VERIFY-OFFBOX (attestation MECHANISM)"
+echo "  --- ASSURANCE SUMMARY — what a passing run means for an evaluator ---"
+assess "Hardened boot — the security floor is enforced from cold boot: no operator action, no unarmed window." BOOT
+assess "Workload isolation — untrusted agent code is contained: a host-surface-collapsed sandbox, no privilege escalation, resource-bounded." "SUBMIT+ISOLATE" "ISOLATE(+KVM)"
+assess "Mediated + signed egress — the agent's only network paths are mediated + allowlist-enforced, and every decision is signed into a tamper-evident log." "MEDIATE+SIGN"
+assess "Injection safety — a prompt injection in fetched content cannot trigger a privileged action (the product thesis)." "INJECTION-SAFE"
+assess "Off-box verifiability — an external party can cryptographically verify the appliance's posture and detect any audit-log rewind/truncation." "VERIFY-OFFBOX"
+echo
 echo "  [HW-deferred] NOT proven by this software pilot (need a commissioned TPM2 target — docs/COMMISSIONING.md):"
 echo "      - EK-rooted attestation (swtpm uses self-signed dev PKI, not a genuine manufacturer EK cert)"
 echo "      - PCR-7 measured-boot sealing of the audit seed + MITM CA (the qemu vTPM leaves PCRs zeroed)"
