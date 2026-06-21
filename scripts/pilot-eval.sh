@@ -1,0 +1,90 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# bulkhead PILOT EVALUATION — one command that boots the already-built appliance image and runs the live
+# security proofs in critical-path order, then prints a single GO/NO-GO verdict. It demonstrates the four
+# pilot legs end-to-end WITHOUT commissioning any hardware:
+#   BOOT           a hardened appliance with its security floor live from cold boot
+#   SUBMIT+ISOLATE a real agent workload runs in an isolation tier
+#   MEDIATE+SIGN   its only egress paths are mediated + every decision signed into the audit chain
+#   INJECTION-SAFE a prompt injection in fetched content stays inert (the product thesis)
+#   VERIFY-OFFBOX  a fresh-nonce attestation binds the chain HEADs + an off-box monitor catches a rewind
+#
+# HONESTY: the qemu/swtpm software pilot proves the MECHANISMS above. It does NOT prove hardware-rooted trust —
+# EK-rooted attestation (swtpm uses self-signed dev PKI) and PCR-7 measured-boot sealing (the vTPM leaves PCRs
+# zeroed) require a commissioned TPM2 target (docs/COMMISSIONING.md). Those are marked [HW-deferred] below and
+# in the verdict; the pilot never claims them.
+#
+# Usage:
+#   scripts/pilot-eval.sh            # the full pilot suite (core + the /dev/kvm arms if this host has KVM)
+#   scripts/pilot-eval.sh --list     # print the plan + exit (no boots)
+#   scripts/pilot-eval.sh <target>…  # run only these make targets (a subset / re-run one leg)
+# Each verify-* target boots its OWN qemu (minutes); the suite runs them SEQUENTIALLY (two qemus contend).
+set -u
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+# target|LEG|what-it-proves  (ordered = the pilot critical path)
+CORE='verify-hbd|BOOT|hardened appliance boots with its security floor LIVE from cold boot (BPF-LSM E0+E2 armed after a reboot)
+verify-runsc-unit|SUBMIT+ISOLATE|a real agent workload runs in the gVisor default tier via the deployable systemd path; both mediated legs work; egress signed; bundle reaped
+verify-confined-agent|MEDIATE+SIGN|the agent only exits via audited channels: an allowlisted fetch is mediated+signed, a non-allowlisted one is DENIED and the deny is signed
+verify-quarantine|INJECTION-SAFE|a prompt injection in fetched content stays inert — control flow fixed before untrusted bytes are read, no privileged tool fires (the product thesis)
+verify-attest|VERIFY-OFFBOX|a fresh-nonce TPM-quoted attestation binds the three chain HEADs; rewind/tamper fails closed  [HW-deferred: EK-rooted trust + PCR-7 sealing need a real TPM2]
+verify-chain-monitor-live|VERIFY-OFFBOX|the off-box monitor pins the chain HEAD and catches a tail-truncation/rewind within one interval'
+
+KVM='verify-runsc-kvm-nonroot|ISOLATE(+KVM)|non-root in-sandbox uid: setuid/capset CONTAINED yet the agent still reaches its mediated legs (real KVM)
+verify-runsc-kvm-escape|ISOLATE(+KVM)|host-surface collapse under runsc --platform=kvm: every host-crossing escape vector contained (real KVM)
+verify-fc-jailer|ISOLATE(+KVM)|the Firecracker hostile tier jailer: the VMM runs non-root, chrooted, with no inet socket (real KVM)'
+
+field() { printf '%s\n%s\n' "$CORE" "$KVM" | awk -F'|' -v t="$1" -v n="$2" '$1==t{print $n; f=1} END{if(!f){if(n==2)print "STEP"; else print "(ad-hoc target)"}}'; }
+leg_of()   { field "$1" 2; }
+prove_of() { field "$1" 3; }
+
+LISTONLY=0
+if [ "${1:-}" = "--list" ]; then LISTONLY=1; shift; fi
+if [ "$#" -gt 0 ]; then
+	TARGETS="$*"
+else
+	TARGETS="$(printf '%s\n' "$CORE" | cut -d'|' -f1)"
+	[ -e /dev/kvm ] && TARGETS="$TARGETS $(printf '%s\n' "$KVM" | cut -d'|' -f1)"
+fi
+
+echo "=== bulkhead PILOT EVALUATION ==="
+echo "repo: $REPO"
+[ -e /dev/kvm ] && echo "host: /dev/kvm present (KVM-tier arms included)" || echo "host: no /dev/kvm (KVM-tier arms skipped — pure software eval)"
+echo "plan (critical-path order):"
+for t in $TARGETS; do printf '  [%-14s] %s\n        %s\n' "$(leg_of "$t")" "$t" "$(prove_of "$t")"; done
+echo
+[ "$LISTONLY" = 1 ] && { echo "(--list: nothing run)"; exit 0; }
+
+PASS=0; FAIL=0; RESULTS=""
+for t in $TARGETS; do
+	leg="$(leg_of "$t")"
+	echo "============================================================"
+	echo ">>> [$leg] make $t"
+	echo ">>> proves: $(prove_of "$t")"
+	echo "============================================================"
+	if ( cd "$REPO" && make "$t" ); then
+		echo "<<< $t: PASS"; PASS=$((PASS + 1)); RESULTS="$RESULTS
+  PASS  [$leg] $t"
+	else
+		echo "<<< $t: FAIL"; FAIL=$((FAIL + 1)); RESULTS="$RESULTS
+  FAIL  [$leg] $t"
+	fi
+done
+
+echo
+echo "============================================================"
+echo "=== PILOT EVALUATION VERDICT ==="
+printf '%s\n' "$RESULTS"
+echo
+echo "  proven legs: BOOT · SUBMIT+ISOLATE · MEDIATE+SIGN · INJECTION-SAFE · VERIFY-OFFBOX (attestation MECHANISM)"
+echo "  [HW-deferred] NOT proven by this software pilot (need a commissioned TPM2 target — docs/COMMISSIONING.md):"
+echo "      - EK-rooted attestation (swtpm uses self-signed dev PKI, not a genuine manufacturer EK cert)"
+echo "      - PCR-7 measured-boot sealing of the audit seed + MITM CA (the qemu vTPM leaves PCRs zeroed)"
+echo
+if [ "$FAIL" -eq 0 ]; then
+	echo "=== PILOT GO — $PASS/$((PASS + FAIL)) checks proven on this host (software pilot) ==="
+	exit 0
+else
+	echo "=== PILOT NO-GO — $FAIL of $((PASS + FAIL)) checks FAILED ==="
+	exit 1
+fi

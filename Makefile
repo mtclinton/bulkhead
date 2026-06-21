@@ -8,7 +8,7 @@ OUTPUT        := $(BULKHEAD_ROOT)/output
 DEFCONFIG     := bulkhead_defconfig
 BR            := $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT) BR2_EXTERNAL=$(EXTERNAL)
 
-.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-runsc-kvm-nonroot verify-runsc-limits verify-tier-policy verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
+.PHONY: help buildroot defconfig image run verify verify-agent-orch verify-e0 verify-hbd verify-attest verify-security-review verify-audit-rotation verify-firecracker-spike verify-firecracker-legs verify-firecracker-agent verify-firecracker-proxy verify-firecracker-jail verify-firecracker-image verify-chain-monitor verify-chain-monitor-live verify-floor-lint verify-hostile-agent verify-runsc-kvm-escape verify-runsc-kvm-nonroot verify-runsc-limits verify-tier-policy pilot-eval pilot-eval-list verify-fc-escape verify-fc-jailer verify-fc-jailer-iso menuconfig linux-menuconfig \
         savedefconfig clean distclean
 
 help:
@@ -178,6 +178,15 @@ verify-floor-lint:
 # without KVM, and an explicit class->confined opt-in is honored. Exercises the shipped + crafted policies.
 verify-tier-policy:
 	sh $(BULKHEAD_ROOT)/scripts/tier-policy-check.sh
+
+# One-command PILOT EVALUATION (docs/PILOT-EVAL.md): boots the built wic and runs the live security proofs in
+# critical-path order (boot -> submit+isolate -> mediate+sign -> injection-safe -> verify-offbox), then prints a
+# single GO/NO-GO. EK-rooted attestation + PCR-7 sealing are marked [HW-deferred] (need a commissioned TPM2).
+# `make pilot-eval-list` shows the plan without booting. Each arm boots its own qemu; budget ~30-60 min.
+pilot-eval:
+	sh $(BULKHEAD_ROOT)/scripts/pilot-eval.sh
+pilot-eval-list:
+	sh $(BULKHEAD_ROOT)/scripts/pilot-eval.sh --list
 
 # LIVE arm: boot the wic under swtpm, run the monitor BINARY off-box against the booted appliance over a
 # guest-exec bridge (fresh-nonce quote -> verify -> pin the control HEAD = GREEN), then truncate the chain's
