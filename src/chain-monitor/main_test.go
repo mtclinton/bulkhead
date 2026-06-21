@@ -3,6 +3,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -46,9 +48,13 @@ func (f *fakeVerifier) VerifyChain(path, pub, domain, since, expect string) (str
 type fakeTransport struct {
 	quote, log       []byte
 	quoteErr, logErr error
+	fetchFn          func(cmd string, subs map[string]string) ([]byte, error) // overrides the simple fields when set
 }
 
-func (f *fakeTransport) Fetch(_ string, subs map[string]string) ([]byte, error) {
+func (f *fakeTransport) Fetch(cmd string, subs map[string]string) ([]byte, error) {
+	if f.fetchFn != nil {
+		return f.fetchFn(cmd, subs)
+	}
 	if _, isQuote := subs["nonce"]; isQuote {
 		return f.quote, f.quoteErr
 	}
@@ -379,6 +385,159 @@ func TestRenderMetrics(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("renderMetrics missing line: %s", want)
 		}
+	}
+}
+
+func TestSegmentedChainFetchReconstructsLayout(t *testing.T) {
+	// [34]: the device exposes a segment-list command. The monitor must fetch all retained sealed segments +
+	// the live file and mirror the on-box <base>.NNNNNN names into a per-domain dir, so verify-audit (which
+	// lists those siblings) reconstructs a ROTATED chain. Records sum across all fetched files.
+	dev := ctrlDevice()
+	dev.ListSegmentsCmd = "ssh box ls {chain}.[0-9]*"
+	dev.Chains[0].RemotePath = "/data/audit/control.jsonl"
+	live := dev.Chains[0].RemotePath
+	segList := live + ".000002\n" + live + ".000003\n" // 000001 already pruned (oldest retained = 000002)
+	files := map[string]string{
+		live:             "liveR1\nliveR2\n",
+		live + ".000002": "s2r1\ns2r2\n",
+		live + ".000003": "s3r1\n",
+	}
+	tr := &fakeTransport{fetchFn: func(cmd string, subs map[string]string) ([]byte, error) {
+		if _, isQuote := subs["nonce"]; isQuote {
+			return env("c", "ctrlTIP", "b"), nil
+		}
+		if cmd == dev.ListSegmentsCmd {
+			return []byte(segList), nil
+		}
+		return []byte(files[subs["chain"]]), nil
+	}}
+	v := &fakeVerifier{pin: "ak", chainTip: "ctrlTIP"}
+	wd := t.TempDir()
+	st := &deviceState{AKPinHex: "ak", Chains: map[string]chainState{}}
+	al := pollDevice(cfg(), dev, st, v, tr, "n", 100, wd)
+
+	if contains(kinds(al), "fetch-failed") || contains(kinds(al), "chain-rewind-or-fail") {
+		t.Fatalf("a clean segmented fetch must not alarm, got %v", kinds(al))
+	}
+	dd := filepath.Join(wd, "control")
+	for _, f := range []string{"control.jsonl", "control.jsonl.000002", "control.jsonl.000003"} {
+		if _, err := os.Stat(filepath.Join(dd, f)); err != nil {
+			t.Fatalf("reconstructed dir missing %s: %v", f, err)
+		}
+	}
+	if cm := st.Metrics.Chains["control"]; cm.Records != 5 {
+		t.Fatalf("records must sum across the retained segments + live file (2+2+1=5), got %d", cm.Records)
+	}
+}
+
+func TestSegmentRotationRaceSkipsVerdict(t *testing.T) {
+	// [34]: if a rotation seals/prunes a segment WHILE the monitor is fetching the multi-file chain, the
+	// off-box snapshot is inconsistent — the re-list differs from the first list, so the monitor skips the
+	// verdict (no alarm, no advance, not marked verified) and re-checks next poll. This is NOT a truncation.
+	dev := ctrlDevice()
+	dev.ListSegmentsCmd = "ssh box ls {chain}.[0-9]*"
+	dev.Chains[0].RemotePath = "/data/audit/control.jsonl"
+	live := dev.Chains[0].RemotePath
+	listCalls := 0
+	tr := &fakeTransport{fetchFn: func(cmd string, subs map[string]string) ([]byte, error) {
+		if _, isQuote := subs["nonce"]; isQuote {
+			return env("c", "ctrlTIP", "b"), nil
+		}
+		if cmd == dev.ListSegmentsCmd {
+			listCalls++
+			if listCalls == 1 {
+				return []byte(live + ".000001\n"), nil
+			}
+			return []byte(live + ".000001\n" + live + ".000002\n"), nil // re-list shows a NEW segment => rotation raced
+		}
+		return []byte("r1\n"), nil
+	}}
+	v := &fakeVerifier{pin: "ak", chainTip: "ctrlTIP"}
+	st := &deviceState{AKPinHex: "ak", Chains: map[string]chainState{"control": {PinnedHead: "ctrlTIP"}}}
+	al := pollDevice(cfg(), dev, st, v, tr, "n", 100, t.TempDir())
+
+	if contains(kinds(al), "chain-rewind-or-fail") {
+		t.Fatalf("a rotation race must NOT alarm, got %v", kinds(al))
+	}
+	if _, ok := st.Metrics.Chains["control"]; ok {
+		t.Fatalf("a raced poll must not mark the chain witnessed/verified, got %+v", st.Metrics.Chains)
+	}
+	if st.Chains["control"].PinnedHead != "ctrlTIP" {
+		t.Fatalf("a raced poll must not advance the pin, got %q", st.Chains["control"].PinnedHead)
+	}
+	if v.lastSince != "" || v.lastExpect != "" {
+		t.Fatalf("a raced poll must not call verify-audit, got since=%q expect=%q", v.lastSince, v.lastExpect)
+	}
+}
+
+func TestConsecutiveSegmentRacesAlarm(t *testing.T) {
+	// [34] evasion guard: a box that re-rotates EVERY poll (segment set differs every fetch) would perpetually
+	// dodge a consistent snapshot. After maxConsecutiveRaces in a row the monitor must ALARM chain-fetch-unstable.
+	dev := ctrlDevice()
+	dev.ListSegmentsCmd = "ssh box ls {chain}.[0-9]*"
+	dev.Chains[0].RemotePath = "/data/audit/control.jsonl"
+	live := dev.Chains[0].RemotePath
+	listCalls := 0
+	tr := &fakeTransport{fetchFn: func(cmd string, subs map[string]string) ([]byte, error) {
+		if _, isQuote := subs["nonce"]; isQuote {
+			return env("c", "ctrlTIP", "b"), nil
+		}
+		if cmd == dev.ListSegmentsCmd {
+			listCalls++ // a DIFFERENT segment number every list call => list1 != list2 every poll => always raced
+			return []byte(fmt.Sprintf("%s.%06d\n", live, listCalls)), nil
+		}
+		return []byte("r1\n"), nil
+	}}
+	v := &fakeVerifier{pin: "ak", chainTip: "ctrlTIP"}
+	st := &deviceState{AKPinHex: "ak", Chains: map[string]chainState{}}
+	for i := int64(1); i <= 2; i++ {
+		if al := pollDevice(cfg(), dev, st, v, tr, "n", i, t.TempDir()); contains(kinds(al), "chain-fetch-unstable") {
+			t.Fatalf("poll %d: must NOT alarm before maxConsecutiveRaces, got %v", i, kinds(al))
+		}
+	}
+	if al := pollDevice(cfg(), dev, st, v, tr, "n", 3, t.TempDir()); !contains(kinds(al), "chain-fetch-unstable") {
+		t.Fatalf("the 3rd consecutive race must alarm chain-fetch-unstable, got %v", kinds(al))
+	}
+}
+
+func TestDuplicateSegmentNumberRejected(t *testing.T) {
+	// [34] security: a box that lists the SAME segment number from two paths (basenames collide) must be
+	// rejected, not silently resolved — a hostile box must not choose which signed segment we verify.
+	dev := ctrlDevice()
+	dev.ListSegmentsCmd = "ssh box ls {chain}.[0-9]*"
+	dev.Chains[0].RemotePath = "/data/audit/control.jsonl"
+	live := dev.Chains[0].RemotePath
+	tr := &fakeTransport{fetchFn: func(cmd string, subs map[string]string) ([]byte, error) {
+		if _, isQuote := subs["nonce"]; isQuote {
+			return env("c", "ctrlTIP", "b"), nil
+		}
+		if cmd == dev.ListSegmentsCmd {
+			return []byte(live + ".000001\n/tmp/forged/" + filepath.Base(live) + ".000001\n"), nil // dup number 000001
+		}
+		return []byte("r1\n"), nil
+	}}
+	v := &fakeVerifier{pin: "ak", chainTip: "ctrlTIP"}
+	st := &deviceState{AKPinHex: "ak", Chains: map[string]chainState{}}
+	al := pollDevice(cfg(), dev, st, v, tr, "n", 1, t.TempDir())
+	if !contains(kinds(al), "fetch-failed") {
+		t.Fatalf("a duplicate segment number must be rejected (fetch-failed), got %v", kinds(al))
+	}
+	if v.lastSince != "" || v.lastExpect != "" {
+		t.Fatalf("a rejected segment list must not reach verify-audit")
+	}
+}
+
+func TestOversizedChainFileRejected(t *testing.T) {
+	// [34] security: a hostile box must not OOM the monitor with a giant "chain file".
+	old := maxChainFileBytes
+	maxChainFileBytes = 8
+	defer func() { maxChainFileBytes = old }()
+	tr := &fakeTransport{quote: env("c", "ctrlTIP", "b"), log: []byte("way more than eight bytes")}
+	v := &fakeVerifier{pin: "ak", chainTip: "ctrlTIP"}
+	st := &deviceState{AKPinHex: "ak", Chains: map[string]chainState{"control": {PinnedHead: "ctrlTIP"}}}
+	al := pollDevice(cfg(), ctrlDevice(), st, v, tr, "n", 1, t.TempDir())
+	if !contains(kinds(al), "fetch-failed") {
+		t.Fatalf("an oversized chain file must be rejected (fetch-failed), got %v", kinds(al))
 	}
 }
 

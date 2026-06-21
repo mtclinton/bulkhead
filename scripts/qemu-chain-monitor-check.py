@@ -148,6 +148,13 @@ try:
     cfg2["devices"][0]["quote_cmd"] = f"python3 {client} 'false'"  # 'false' fails (rc1) WITHOUT exiting the guest shell
     cfg2file = os.path.join(work, "cfg-noquote.json"); open(cfg2file, "w").write(json.dumps(cfg2))
 
+    # a THIRD config with a segment-list command + a FRESH state dir, to prove the [34] segmented-chain fetch:
+    # the monitor lists+fetches the retained sealed segments, reconstructs the rotated chain off-box, verifies it.
+    cfg3 = json.loads(json.dumps(cfg))
+    cfg3["state_dir"] = os.path.join(work, "state-seg")
+    cfg3["devices"][0]["list_segments_cmd"] = f"python3 {client} 'ls -1 {{chain}}.[0-9]* 2>/dev/null || true'"
+    cfg3file = os.path.join(work, "cfg-seg.json"); open(cfg3file, "w").write(json.dumps(cfg3))
+
     def monitor_once(conf=cfgfile):
         p = subprocess.run([MONITOR, "-config", conf, "-once"], capture_output=True, text=True)
         out("\n[monitor]\n" + p.stdout + p.stderr + f"\n[exit {p.returncode}]\n")
@@ -209,6 +216,27 @@ try:
                     "/data/bulkhead/audit/audit-pub.txt >/dev/null 2>&1; echo RC=$?")
     check("RC=0" in okc and "RC=0" not in badc,
           f"middle deletion fails verify-audit on-box (clean copy {okc.strip()}, deleted-line-{delln} copy {badc.strip()} — prev_hash linkage break)")
+
+    # --- [34] SEGMENTED-CHAIN FETCH ---. Splitting a contiguous signed chain at a record boundary into a
+    # sealed segment (records 1..3 -> <base>.000001) + a shorter live file (records 4..N) yields a VALID
+    # rotated chain on-box (no signing needed — the prev_hash seam is already correct). Then prove the monitor,
+    # with list_segments_cmd set, lists+fetches the segment, mirrors the layout off-box, and verify-audits the
+    # reconstructed rotated chain CLEAN — the capability the old (live-file-only) monitor lacked.
+    nseg, _ = guest(f"wc -l < {CTLCHAIN}"); nseg = int((nseg.strip() or "0"))
+    if nseg >= 4:
+        guest(f"sed -n '1,3p' {CTLCHAIN} > {CTLCHAIN}.000001 && sed -n '4,$p' {CTLCHAIN} > {CTLCHAIN}.lv && mv {CTLCHAIN}.lv {CTLCHAIN}")
+        oks, _ = guest(f"BULKHEAD_AUDIT_DOMAIN=control bulkhead-collector verify-audit {CTLCHAIN} @"
+                       "/data/bulkhead/audit/audit-pub.txt >/dev/null 2>&1; echo RC=$?")
+        lss, _ = guest(f"ls -1 {CTLCHAIN}.[0-9]* 2>/dev/null | wc -l"); lss = int((lss.strip() or "0"))
+        check("RC=0" in oks and lss == 1,
+              f"split control into a sealed segment + live file = a valid rotated chain on-box (verify {oks.strip()}, {lss} segment)")
+        rcs, o4 = monitor_once(cfg3file)
+        sfs = os.path.join(cfg3["state_dir"], "device-qemu-box.json")
+        pinned_s = json.load(open(sfs)).get("chains", {}).get("control", {}).get("pinned_head_hex", "") if os.path.exists(sfs) else ""
+        check(rcs == 0 and "OK device=qemu-box" in o4 and re.fullmatch(r"[0-9a-f]{64}", pinned_s or "") is not None,
+              f"SEGMENTED: monitor listed+fetched the sealed segment, reconstructed the rotated chain off-box, verify-audit CLEAN (pinned {pinned_s[:16]}…)")
+    else:
+        check(False, f"control chain too short to split into a segment ({nseg} records)")
 
     out("\n=== off-box chain monitor LIVE: %d passed, %d failed ===\n" %
         (sum(1 for v in results.values() if v), sum(1 for v in results.values() if not v)))

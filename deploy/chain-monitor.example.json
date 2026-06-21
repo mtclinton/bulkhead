@@ -11,6 +11,7 @@
       "name": "appliance-01",
       "quote_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=10 root@appliance-01 'bulkhead-collector attest quote {nonce}'",
       "fetch_chain_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=10 root@appliance-01 'cat {chain}'",
+      "list_segments_cmd": "ssh -o BatchMode=yes -o ConnectTimeout=10 root@appliance-01 'ls -1 {chain}.[0-9]* 2>/dev/null || true'",
       "collector_bin_for_d": "/etc/bulkhead/released/bulkhead-collector",
       "audit_pub": "@/etc/bulkhead/appliance-01-audit-pub.txt",
       "chains": [

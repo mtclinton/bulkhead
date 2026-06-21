@@ -38,6 +38,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -58,6 +59,7 @@ type Device struct {
 	Name             string  `json:"name"`
 	QuoteCmd         string  `json:"quote_cmd"`           // fetch a quote envelope (JSON) to stdout; {nonce} is substituted
 	FetchChainCmd    string  `json:"fetch_chain_cmd"`     // fetch a chain log to stdout; {chain} = the chain's remote path
+	ListSegmentsCmd  string  `json:"list_segments_cmd"`   // optional ([34]): list retained ADR-0040 sealed-segment paths (one/line) for {chain}; empty => single live file
 	ExpectedD        string  `json:"expected_d"`          // expected TCB digest hex; OR set CollectorBinForD to derive it
 	CollectorBinForD string  `json:"collector_bin_for_d"` // released collector binary -> `attest expected-d` computes D
 	AuditPub         string  `json:"audit_pub"`           // audit pubkey hex or @file for verify-audit (else sibling audit-pub.txt)
@@ -96,9 +98,18 @@ type chainMetric struct {
 }
 
 type chainState struct {
-	PinnedHead string `json:"pinned_head_hex"`
-	LastUpdate int64  `json:"last_update_unix"`
+	PinnedHead       string `json:"pinned_head_hex"`
+	LastUpdate       int64  `json:"last_update_unix"`
+	ConsecutiveRaces int    `json:"consecutive_races,omitempty"` // [34]: segment set churned this many polls in a row (evasion guard)
 }
+
+// maxConsecutiveRaces: after this many consecutive polls where a rotation raced the segment fetch, ALARM —
+// a box that re-rotates every single poll is pathological or evading the witness (perpetually dodging a
+// consistent snapshot), not legitimately busy. maxChainFileBytes bounds a single fetched chain file so a
+// hostile box cannot OOM the monitor with a giant "segment" (a real chain file is (segKeep+1)×segment-bytes).
+const maxConsecutiveRaces = 3
+
+var maxChainFileBytes int64 = 128 << 20 // 128 MiB; var so tests can lower it
 
 func stateFile(dir, dev string) string { return filepath.Join(dir, "device-"+sanitize(dev)+".json") }
 
@@ -139,7 +150,7 @@ func saveState(dir, dev string, st *deviceState) error {
 
 type Alert struct {
 	Device string
-	Kind   string // missed-attestation | quote-verify-failed | chain-rewind-or-fail | fetch-failed
+	Kind   string // missed-attestation | quote-verify-failed | chain-rewind-or-fail | fetch-failed | chain-fetch-unstable
 	Domain string // chain domain, when applicable
 	Detail string
 }
@@ -381,7 +392,16 @@ func attestPoll(cfg *Config, dev *Device, st *deviceState, v Verifier, tr Transp
 func witnessChains(dev *Device, st *deviceState, v Verifier, tr Transport, now int64, workDir string, quoteOK, reachable bool, env quoteEnvelope) []Alert {
 	var alerts []Alert
 	for _, ch := range dev.Chains {
-		logBytes, ferr := tr.Fetch(dev.FetchChainCmd, map[string]string{"chain": ch.RemotePath})
+		// Reconstruct the chain off-box into a per-domain dir, mirroring the ADR-0040 segment layout so a
+		// ROTATED chain verifies as one continuous chain ([34]). RemoveAll first so a pruned segment from a
+		// prior poll never lingers and gets verified as still-present.
+		destDir := filepath.Join(workDir, sanitize(ch.Domain))
+		_ = os.RemoveAll(destDir)
+		if werr := os.MkdirAll(destDir, 0o700); werr != nil {
+			alerts = append(alerts, Alert{Device: dev.Name, Kind: "fetch-failed", Domain: ch.Domain, Detail: werr.Error()})
+			continue
+		}
+		logPath, records, raced, ferr := fetchChainToDir(tr, dev, ch, destDir)
 		if ferr != nil {
 			// Flag a chain-fetch failure only when the box otherwise answered (reachable): a fully silent box
 			// is already covered by missed-attestation, so do not double-alarm every chain every poll.
@@ -390,16 +410,28 @@ func witnessChains(dev *Device, st *deviceState, v Verifier, tr Transport, now i
 			}
 			continue
 		}
-		logPath := filepath.Join(workDir, "chain-"+sanitize(ch.Domain)+".jsonl")
-		if werr := os.WriteFile(logPath, logBytes, 0o600); werr != nil {
-			alerts = append(alerts, Alert{Device: dev.Name, Kind: "fetch-failed", Domain: ch.Domain, Detail: werr.Error()})
+		if raced {
+			// A rotation sealed/pruned a segment WHILE we were fetching the multi-file chain — the off-box
+			// snapshot is inconsistent (usually not an attack). Skip the verdict this poll (no advance); the next
+			// poll re-checks the now-stable chain. But a box that re-rotates EVERY poll would perpetually dodge a
+			// consistent snapshot and never be verified — so after maxConsecutiveRaces in a row we ALARM (the
+			// witness must not be silently evadable).
+			cs := st.Chains[ch.Domain]
+			cs.ConsecutiveRaces++
+			st.Chains[ch.Domain] = cs
+			if cs.ConsecutiveRaces >= maxConsecutiveRaces {
+				alerts = append(alerts, Alert{Device: dev.Name, Kind: "chain-fetch-unstable", Domain: ch.Domain,
+					Detail: fmt.Sprintf("the segment set changed on %d consecutive polls — pathological rotation or an evasion attempt (a box re-rotating every poll to dodge the off-box witness); investigate the device", cs.ConsecutiveRaces)})
+			} else {
+				fmt.Printf("NOTICE device=%s chain=%s: segment rotation raced the fetch; skipping the verdict this poll (%d consecutive)\n", dev.Name, ch.Domain, cs.ConsecutiveRaces)
+			}
 			continue
 		}
-		records := 0
-		for _, ln := range strings.Split(string(logBytes), "\n") {
-			if strings.TrimSpace(ln) != "" {
-				records++
-			}
+		// A consistent snapshot — clear any prior race streak (kept here so a rewind, which does not rewrite
+		// the pin below, still resets the counter).
+		if cs := st.Chains[ch.Domain]; cs.ConsecutiveRaces != 0 {
+			cs.ConsecutiveRaces = 0
+			st.Chains[ch.Domain] = cs
 		}
 		// The strongest binding (the cryptographically-attested HEAD) is used ONLY when a fresh quote verified
 		// this cycle; otherwise the chain is witnessed via --since alone (which still catches a tail-truncation
@@ -435,6 +467,134 @@ func witnessChains(dev *Device, st *deviceState, v Verifier, tr Transport, now i
 		st.Chains[ch.Domain] = chainState{PinnedHead: tip, LastUpdate: now}
 	}
 	return alerts
+}
+
+// fetchChainToDir fetches a chain off-box into destDir, mirroring the on-box ADR-0040 segment layout so
+// verify-audit reconstructs a ROTATED chain ([34]): the live file as <base> plus each retained sealed segment
+// as <base>.NNNNNN (the "%s.%06d" contract). When the device exposes no ListSegmentsCmd the chain is treated
+// as a single live file (backward compatible). To stop a rotation from racing the multi-file fetch, the
+// segment set is read BEFORE and AFTER the fetches; if it changed mid-fetch the snapshot is inconsistent and
+// the caller skips the verdict (raced=true). Returns the live-file path, the total record count across all
+// fetched files, raced, and the first error.
+func fetchChainToDir(tr Transport, dev *Device, ch Chain, destDir string) (logPath string, records int, raced bool, err error) {
+	base := filepath.Base(ch.RemotePath)
+	logPath = filepath.Join(destDir, base)
+
+	segs1, err := listRemoteSegments(tr, dev, ch)
+	if err != nil {
+		return logPath, 0, false, err
+	}
+	for _, seg := range segs1 {
+		n, ferr := fetchOneInto(tr, dev, seg, filepath.Join(destDir, filepath.Base(seg)))
+		if ferr != nil {
+			return logPath, 0, false, ferr
+		}
+		records += n
+	}
+	n, ferr := fetchOneInto(tr, dev, ch.RemotePath, logPath)
+	if ferr != nil {
+		return logPath, 0, false, ferr
+	}
+	records += n
+
+	if dev.ListSegmentsCmd != "" {
+		segs2, lerr := listRemoteSegments(tr, dev, ch)
+		if lerr != nil {
+			return logPath, 0, false, lerr
+		}
+		if !sameStrings(segs1, segs2) {
+			return logPath, records, true, nil
+		}
+	}
+	return logPath, records, false, nil
+}
+
+// listRemoteSegments runs the device's ListSegmentsCmd and returns the retained sealed-segment paths it names,
+// keeping only valid <base>.<all-digits> siblings (mirrors the collector's listSegments filter so audit-pub.txt,
+// *.tmp, or another chain's files in a shared dir are excluded) in ASCENDING segment order. No command
+// configured => no segments (a never-rotated / single-file chain).
+func listRemoteSegments(tr Transport, dev *Device, ch Chain) ([]string, error) {
+	if dev.ListSegmentsCmd == "" {
+		return nil, nil
+	}
+	out, err := tr.Fetch(dev.ListSegmentsCmd, map[string]string{"chain": ch.RemotePath})
+	if err != nil {
+		return nil, err
+	}
+	prefix := filepath.Base(ch.RemotePath) + "."
+	type seg struct {
+		path string
+		n    uint64
+	}
+	var segs []seg
+	seen := map[uint64]bool{}
+	for _, ln := range strings.Split(string(out), "\n") {
+		p := strings.TrimSpace(ln)
+		if p == "" {
+			continue
+		}
+		name := filepath.Base(p)
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		suf := name[len(prefix):]
+		if suf == "" || strings.TrimLeft(suf, "0123456789") != "" {
+			continue // not an all-digit suffix
+		}
+		num, perr := strconv.ParseUint(suf, 10, 64)
+		if perr != nil {
+			continue
+		}
+		// On-box a segment number is one inode. A list that names the SAME number twice (e.g. two paths whose
+		// basename collides — `<base>.000001` from two dirs) would overwrite one fetch with the other; reject it
+		// rather than silently pick one (a hostile box must not choose which signed segment we verify).
+		if seen[num] {
+			return nil, fmt.Errorf("segment %06d listed more than once by ListSegmentsCmd", num)
+		}
+		seen[num] = true
+		segs = append(segs, seg{p, num})
+	}
+	sort.Slice(segs, func(i, j int) bool { return segs[i].n < segs[j].n })
+	paths := make([]string, len(segs))
+	for i, s := range segs {
+		paths[i] = s.path
+	}
+	return paths, nil
+}
+
+// fetchOneInto fetches one remote file via FetchChainCmd and writes it to dest, returning its record count.
+func fetchOneInto(tr Transport, dev *Device, remotePath, dest string) (int, error) {
+	b, err := tr.Fetch(dev.FetchChainCmd, map[string]string{"chain": remotePath})
+	if err != nil {
+		return 0, err
+	}
+	if int64(len(b)) > maxChainFileBytes {
+		// A hostile box must not be able to OOM the monitor with a giant "chain file" — a real one is bounded
+		// by (segKeep+1)×BULKHEAD_AUDIT_SEGMENT_BYTES (≈16 MiB at the defaults).
+		return 0, fmt.Errorf("chain file %s is %d bytes (> the %d-byte cap)", remotePath, len(b), maxChainFileBytes)
+	}
+	if err := os.WriteFile(dest, b, 0o600); err != nil {
+		return 0, err
+	}
+	records := 0
+	for _, ln := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(ln) != "" {
+			records++
+		}
+	}
+	return records, nil
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func errStr(e error) string {

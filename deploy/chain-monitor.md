@@ -66,11 +66,14 @@ scraper) at it. Series: `bulkhead_device_reachable` / `bulkhead_attestation_ok` 
 
 ## Limitations / follow-ups
 
-- **Segmented (rotated) chains (ADR-0040):** the example `fetch_chain_cmd` ships only the live
-  `*.jsonl`. Once a chain has rotated, `verify-audit` needs the retained sealed segments
-  (`<base>.NNNNNN`) alongside the live file, and a pruned `--since` anchor must have been archived
-  off-box *before* the on-box prune. For rotated chains, configure `fetch_chain_cmd` to ship the whole
-  chain directory (e.g. `tar -C <dir> -cf - <base>.jsonl <base>.[0-9]*`) and extend the monitor to
-  extract it — tracked as a follow-up. Non-rotated chains (early deployments) are fully covered today.
+- **Segmented (rotated) chains (ADR-0040):** SUPPORTED. Set `list_segments_cmd` (lists the retained
+  `<base>.NNNNNN` sealed-segment paths for `{chain}`, one per line — see the example config). Each poll the
+  monitor fetches every retained segment + the live file, mirrors the on-box `<base>.NNNNNN` layout into a
+  per-domain temp dir, and `verify-audit` reconstructs the rotated chain as one continuous chain. To stop a
+  rotation from racing the multi-file fetch, the segment set is read before AND after the fetches; if it
+  changed the snapshot is inconsistent and that chain's verdict is skipped for one poll (no alarm). With no
+  `list_segments_cmd` the chain is treated as a single live file (correct for never-rotated chains, but it
+  will false-alarm once that chain rotates — set the command). Note the `--since` anchor must still be in the
+  retained window, which the [operating assumption](#what-it-does-each-interval-per-device) guarantees.
 - **Transport:** any command that emits the quote / log to stdout works (`ssh`, a serial bridge, a
   local `cat` of captured artifacts). `{nonce}` and `{chain}` are substituted into the templates.
