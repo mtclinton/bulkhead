@@ -40,16 +40,27 @@ tailnet (SSH-as-uid-0 is the documented transport).
 
 The per-device AK pin and per-chain HEADs are **trust-on-first-use** and persisted under `state_dir`
 (atomic writes). **Cross-check the TOFU AK pin out-of-band** on first enrollment — a device already
-compromised at first contact would pin a bad AK (inherent to TOFU). A captured pin prints a `NOTICE`.
+compromised at first contact would pin a bad AK (inherent to TOFU). The `-enroll` step makes this explicit.
 
 ## Build & run
 
 ```sh
 cd src/chain-monitor && CGO_ENABLED=0 go build -o /usr/local/bin/bulkhead-chain-monitor .
 # bulkhead-collector (the verifier) must also be on the management host (built from the same release).
+
+# 1. ENROLL (first contact): capture + display each device's TOFU anchors, then CROSS-CHECK the AK pin
+#    out-of-band against the device's known attestation key before trusting any later run.
+bulkhead-chain-monitor -config /etc/bulkhead/chain-monitor.json -enroll
+# 2. then run continuously (or as a cron/check gate):
 bulkhead-chain-monitor -config /etc/bulkhead/chain-monitor.json            # daemon: loop every interval_seconds
 bulkhead-chain-monitor -config /etc/bulkhead/chain-monitor.json -once      # one sweep; exit 1 if any alert (cron/check gate)
 ```
+
+`-enroll` does one poll per device and prints the captured **AK pin** + each chain's pinned **HEAD**, exiting
+non-zero if any device could not be reached/verified. An already-enrolled device is reported, not re-pinned
+(to re-enroll, delete its state file). This is the moment to defeat TOFU's one weakness — confirm the AK pin is
+the device's real attestation key (e.g. read it from the box over a separate trusted channel) before the
+daemon starts trusting it.
 
 **Managed deployment:** run it as an always-on systemd service on the management host with the hardened unit
 template `deploy/bulkhead-chain-monitor.service` (daemon mode; `StateDirectory=` holds the TOFU pins, least-

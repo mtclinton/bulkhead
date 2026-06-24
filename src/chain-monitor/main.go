@@ -665,6 +665,77 @@ func runOnce(cfg *Config, v Verifier, tr Transport) int {
 	return total
 }
 
+// enrollResult is the outcome of a first-contact enrollment poll for one device — the TOFU anchors to display
+// for out-of-band cross-check. Pure data so the display logic is unit-tested without FS/stdout.
+type enrollResult struct {
+	Device  string
+	AKPin   string            // the captured/existing attestation-key pin (the thing to cross-check out-of-band)
+	Heads   map[string]string // domain -> pinned chain HEAD
+	Already bool              // the device was already enrolled (a pin existed) — reported, not re-pinned
+	Failed  bool              // first contact failed (unreachable / quote did not verify) — nothing was pinned
+	Alerts  []Alert
+}
+
+// enrollResultFrom derives the enrollment outcome from a device's post-poll state. No pin captured => Failed.
+func enrollResultFrom(dev *Device, st *deviceState, already bool, alerts []Alert) enrollResult {
+	r := enrollResult{Device: dev.Name, Already: already, Alerts: alerts, Heads: map[string]string{}}
+	if st.AKPinHex == "" {
+		r.Failed = true
+		return r
+	}
+	r.AKPin = st.AKPinHex
+	for d, cs := range st.Chains {
+		r.Heads[d] = cs.PinnedHead
+	}
+	return r
+}
+
+// runEnroll does a SINGLE first-contact poll per device and prominently reports the captured TOFU anchors — the
+// AK pin and each chain's pinned HEAD — so the operator CROSS-CHECKS the AK pin out-of-band before trusting any
+// later run (TOFU's one weakness is a device compromised at first contact). An already-enrolled device is
+// reported, not re-pinned. Returns the count of devices that failed to enroll, so the caller can exit non-zero.
+func runEnroll(cfg *Config, v Verifier, tr Transport) int {
+	failed := 0
+	for i := range cfg.Devices {
+		dev := &cfg.Devices[i]
+		st := loadState(cfg.StateDir, dev.Name)
+		already := st.AKPinHex != ""
+		work, _ := os.MkdirTemp("", "bh-chain-mon-enroll-")
+		alerts := pollDevice(cfg, dev, st, v, tr, nonceHex(), time.Now().Unix(), work)
+		os.RemoveAll(work)
+		_ = saveState(cfg.StateDir, dev.Name, st)
+		r := enrollResultFrom(dev, st, already, alerts)
+
+		if r.Failed {
+			failed++
+			fmt.Printf("ENROLL FAILED device=%s — no attestation pin captured (unreachable or the quote did not verify):\n", r.Device)
+			for _, a := range r.Alerts {
+				fmt.Printf("    %s\n", a.String())
+			}
+			continue
+		}
+		if r.Already {
+			fmt.Printf("device=%s ALREADY ENROLLED (AK pin %s). To re-enroll, delete its state file: %s\n", r.Device, short(r.AKPin), stateFile(cfg.StateDir, dev.Name))
+		} else {
+			fmt.Printf("ENROLLED device=%s — first contact captured. >>> CROSS-CHECK the AK pin out-of-band before trusting any future poll <<<\n", r.Device)
+		}
+		fmt.Printf("    AK pin (TPM attestation key): %s\n", r.AKPin)
+		fmt.Printf("    chain HEADs pinned (TOFU anchors):\n")
+		doms := make([]string, 0, len(r.Heads))
+		for d := range r.Heads {
+			doms = append(doms, d)
+		}
+		sort.Strings(doms)
+		for _, d := range doms {
+			fmt.Printf("      %-11s %s\n", d+":", r.Heads[d])
+		}
+	}
+	if failed == 0 {
+		fmt.Printf("\nNext: verify each AK pin out-of-band against the device's known attestation key, then start the daemon:\n  bulkhead-chain-monitor -config <config>   (or systemctl enable --now bulkhead-chain-monitor.service)\n")
+	}
+	return failed
+}
+
 // renderMetrics emits a Prometheus-text exposition derived from this cycle's per-device state — read-only,
 // from the tamper-evident chains + the attestation, so it scrapes cleanly into a dashboard/alert pipeline
 // (e.g. a node-exporter textfile collector) over the management plane without touching the appliance.
@@ -757,6 +828,7 @@ func loadConfig(path string) (*Config, error) {
 func main() {
 	cfgPath := flag.String("config", "/etc/bulkhead/chain-monitor.json", "config file")
 	once := flag.Bool("once", false, "poll every device once and exit (exit 1 if any alert fired)")
+	enroll := flag.Bool("enroll", false, "first contact: capture + display each device's TOFU anchors (AK pin + chain HEADs) for out-of-band cross-check, then exit (exit 1 if any device could not be enrolled)")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
@@ -767,6 +839,12 @@ func main() {
 	v := collectorVerifier{bin: cfg.CollectorBin}
 	tr := shellTransport{}
 
+	if *enroll {
+		if runEnroll(cfg, v, tr) > 0 {
+			os.Exit(1)
+		}
+		return
+	}
 	if *once {
 		if runOnce(cfg, v, tr) > 0 {
 			os.Exit(1) // any alert -> nonzero, so `--once` is usable as a check/cron gate

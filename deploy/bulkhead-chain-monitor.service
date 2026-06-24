@@ -10,7 +10,8 @@
 #   install -Dm0640 chain-monitor.json     /etc/bulkhead/chain-monitor.json       # from chain-monitor.example.json
 #   install -Dm0644 bulkhead-chain-monitor.service /etc/systemd/system/bulkhead-chain-monitor.service
 #   # wire the transport credential the config's quote_cmd/fetch_chain_cmd use (an ssh key the service user can
-#   # read, or a forwarded agent), then:
+#   # read, or a forwarded agent), then ENROLL (first contact) + cross-check each AK pin out-of-band:
+#   sudo -u bulkhead-monitor bulkhead-chain-monitor -config /etc/bulkhead/chain-monitor.json -enroll
 #   systemctl daemon-reload && systemctl enable --now bulkhead-chain-monitor.service
 #
 # The state_dir (TOFU AK + HEAD pins) is provided by StateDirectory= below; point the config's "state_dir" at

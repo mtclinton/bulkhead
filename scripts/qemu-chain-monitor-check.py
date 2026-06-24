@@ -242,6 +242,18 @@ try:
     else:
         check(False, f"control chain too short to split into a segment ({nseg} records)")
 
+    # --- ENROLLMENT first-contact: `-enroll` captures + DISPLAYS the TOFU anchors (AK pin + chain HEADs) for
+    # out-of-band cross-check, with a fresh state dir so it does not disturb the polls above. ---
+    cfg_en = json.loads(json.dumps(cfg))
+    cfg_en["state_dir"] = os.path.join(work, "state-enroll")
+    cfg_enf = os.path.join(work, "cfg-enroll.json"); open(cfg_enf, "w").write(json.dumps(cfg_en))
+    pe = subprocess.run([MONITOR, "-config", cfg_enf, "-enroll"], capture_output=True, text=True)
+    out("\n[enroll]\n" + pe.stdout + pe.stderr + f"\n[exit {pe.returncode}]\n")
+    check(pe.returncode == 0 and "ENROLLED device=qemu-box" in pe.stdout
+          and "CROSS-CHECK the AK pin" in pe.stdout
+          and re.search(r"AK pin \(TPM attestation key\): [0-9a-f]{16,}", pe.stdout) is not None,
+          "ENROLL: first contact captured + displayed the AK pin + chain HEADs for out-of-band cross-check")
+
     out("\n=== off-box chain monitor LIVE: %d passed, %d failed ===\n" %
         (sum(1 for v in results.values() if v), sum(1 for v in results.values() if not v)))
     print("CHAIN MONITOR LIVE GO" if all(results.values()) else "CHAIN MONITOR LIVE INCOMPLETE")

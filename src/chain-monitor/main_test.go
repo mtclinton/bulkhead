@@ -541,6 +541,60 @@ func TestOversizedChainFileRejected(t *testing.T) {
 	}
 }
 
+func TestEnrollResultFromCapturesAnchors(t *testing.T) {
+	st := &deviceState{AKPinHex: "ak123", Chains: map[string]chainState{
+		"collector": {PinnedHead: "h_coll"}, "control": {PinnedHead: "h_ctrl"}}}
+	r := enrollResultFrom(&Device{Name: "box1"}, st, false, nil)
+	if r.Failed || r.Already || r.AKPin != "ak123" {
+		t.Fatalf("want captured ak123, not failed/already: %+v", r)
+	}
+	if r.Heads["collector"] != "h_coll" || r.Heads["control"] != "h_ctrl" {
+		t.Fatalf("heads not surfaced: %+v", r.Heads)
+	}
+}
+
+func TestEnrollResultFromFailedWhenNoPin(t *testing.T) {
+	r := enrollResultFrom(&Device{Name: "box1"}, &deviceState{Chains: map[string]chainState{}}, false, []Alert{{Kind: "missed-attestation"}})
+	if !r.Failed || r.AKPin != "" {
+		t.Fatalf("no captured pin must be a FAILED enrollment: %+v", r)
+	}
+}
+
+func TestEnrollResultFromAlreadyEnrolled(t *testing.T) {
+	st := &deviceState{AKPinHex: "akZ", Chains: map[string]chainState{"broker": {PinnedHead: "h_b"}}}
+	r := enrollResultFrom(&Device{Name: "b"}, st, true, nil)
+	if !r.Already || r.AKPin != "akZ" || r.Heads["broker"] != "h_b" {
+		t.Fatalf("already-enrolled must report the existing anchors: %+v", r)
+	}
+}
+
+func TestRunEnrollPinsAndSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{StateDir: dir, MissedThreshold: 2, Devices: []Device{*ctrlDevice()}}
+	v := &fakeVerifier{pin: "ak0001"}
+	tr := &fakeTransport{quote: env("c", "ctrlTIP", "b"), log: []byte("r1\n")}
+	if failed := runEnroll(cfg, v, tr); failed != 0 {
+		t.Fatalf("a clean first contact must enroll without failure, got %d", failed)
+	}
+	st := loadState(dir, "box1")
+	if st.AKPinHex != "ak0001" || st.Chains["control"].PinnedHead != "ctrlTIP" {
+		t.Fatalf("enroll must persist the captured AK pin + chain HEAD: %+v", st)
+	}
+}
+
+func TestRunEnrollFailsWhenUnreachable(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{StateDir: dir, MissedThreshold: 2, Devices: []Device{*ctrlDevice()}}
+	v := &fakeVerifier{pin: "ak0001"}
+	tr := &fakeTransport{quoteErr: fmt.Errorf("down"), logErr: fmt.Errorf("down")}
+	if failed := runEnroll(cfg, v, tr); failed != 1 {
+		t.Fatalf("an unreachable device must FAIL enrollment (nothing pinned), got %d", failed)
+	}
+	if loadState(dir, "box1").AKPinHex != "" {
+		t.Fatalf("a failed enrollment must not pin an AK")
+	}
+}
+
 func TestTipFromVerifyOutput(t *testing.T) {
 	tip := strings.Repeat("ab", 32) // 64 hex
 	cases := map[string]string{
