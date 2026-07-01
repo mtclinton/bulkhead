@@ -167,6 +167,8 @@ verifiability** — then prints a plain-language **assurance summary** and a GO/
 its limits: EK-rooted attestation and PCR-7 measured-boot sealing need a real TPM2 and are marked
 `[HW-deferred]`. Walkthrough: **[docs/PILOT-EVAL.md](docs/PILOT-EVAL.md)**.
 
+- **Demo it live** (a narrated ~15-min walkthrough — containment, injection-safety, and an off-box
+  tamper catch, each on the real booted image): **[docs/DEMO.md](docs/DEMO.md)**.
 - **Watch it from off the box** (the continuous tamper-evident witness): stand up the off-box
   audit-chain monitor — **[deploy/chain-monitor.md](deploy/chain-monitor.md)**.
 - **Take it to real hardware** (TPM-sealed boot, Secure Boot, real-NIC default-deny, A/B install):
